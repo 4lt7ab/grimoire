@@ -1,5 +1,4 @@
 import json
-import sqlite3
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -10,8 +9,6 @@ RECOGNIZED_FIELDS = {"kind", "content", "payload", "threshold"}
 REQUIRED_FIELDS = {"kind", "content"}
 PROGRESS_EVERY = 1000
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
-DEFAULT_DB = Path(".grimoire/data/grimoire.db")
-DEFAULT_CACHE = Path(".grimoire/models")
 
 app = typer.Typer(
     name="grimoire",
@@ -39,8 +36,19 @@ def ingest(
     ],
     db: Annotated[
         Path,
-        typer.Option(help="Path to the grimoire SQLite file."),
-    ] = DEFAULT_DB,
+        typer.Option(
+            help="Path to the grimoire SQLite file.",
+            envvar="GRIMOIRE_DB",
+        ),
+    ],
+    cache_folder: Annotated[
+        Path,
+        typer.Option(
+            "--cache-folder",
+            help="Directory for the embedder's model cache.",
+            envvar="GRIMOIRE_CACHE",
+        ),
+    ],
     model: Annotated[
         str,
         typer.Option(
@@ -54,7 +62,7 @@ def ingest(
         typer.echo(f"No records to ingest from {file}")
         return
 
-    with _open_grimoire(db, model_override=model) as g:
+    with _open_grimoire(db, cache_folder, model_override=model) as g:
         for i, record in enumerate(records, 1):
             g.add(
                 kind=record["kind"],
@@ -72,24 +80,139 @@ def ingest(
 def search(
     query: Annotated[str, typer.Argument(help="Query text to embed and search for.")],
     db: Annotated[
-        Path, typer.Option(help="Path to the grimoire SQLite file.", exists=True)
-    ] = DEFAULT_DB,
+        Path,
+        typer.Option(
+            help="Path to the grimoire SQLite file.",
+            envvar="GRIMOIRE_DB",
+            exists=True,
+        ),
+    ],
+    cache_folder: Annotated[
+        Path,
+        typer.Option(
+            "--cache-folder",
+            help="Directory for the embedder's model cache.",
+            envvar="GRIMOIRE_CACHE",
+        ),
+    ],
     kind: Annotated[
         str | None, typer.Option(help="Restrict results to entries of this kind.")
     ] = None,
     k: Annotated[int, typer.Option(help="Number of results to return.")] = 10,
+    dynamic_threshold: Annotated[
+        bool,
+        typer.Option(
+            "--dynamic-threshold",
+            help="Filter results by each entry's stored similarity threshold.",
+        ),
+    ] = False,
 ) -> None:
     """Run a semantic search against a grimoire."""
-    with _open_grimoire(db) as g:
-        for entry in g.search(query, kind=kind, k=k):
+    with _open_grimoire(db, cache_folder) as g:
+        for entry in g.search(
+            query, kind=kind, k=k, dynamic_threshold=dynamic_threshold
+        ):
             _print_entry(entry)
+
+
+@app.command()
+def add(
+    content: Annotated[str, typer.Argument(help="Content text for the new entry.")],
+    db: Annotated[
+        Path,
+        typer.Option(
+            help="Path to the grimoire SQLite file.",
+            envvar="GRIMOIRE_DB",
+        ),
+    ],
+    cache_folder: Annotated[
+        Path,
+        typer.Option(
+            "--cache-folder",
+            help="Directory for the embedder's model cache.",
+            envvar="GRIMOIRE_CACHE",
+        ),
+    ],
+    kind: Annotated[str, typer.Option(help="Kind label for the entry.")] = "note",
+    payload: Annotated[
+        str | None,
+        typer.Option(help="Optional JSON object to attach as the entry payload."),
+    ] = None,
+    threshold: Annotated[
+        float | None,
+        typer.Option(help="Optional per-entry similarity threshold."),
+    ] = None,
+    model: Annotated[
+        str,
+        typer.Option(help="fastembed model name (only used when creating a new file)."),
+    ] = DEFAULT_MODEL,
+) -> None:
+    """Add a single record to a grimoire."""
+    payload_obj: dict | None = None
+    if payload is not None:
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            _fail(f"--payload is not valid JSON: {exc.msg}")
+        if not isinstance(parsed, dict):
+            _fail("--payload must be a JSON object")
+        payload_obj = parsed
+    with _open_grimoire(db, cache_folder, model_override=model) as g:
+        entry = g.add(
+            kind=kind,
+            content=content,
+            payload=payload_obj,
+            threshold=threshold,
+        )
+    _print_entry(entry)
+
+
+@app.command()
+def info(
+    db: Annotated[
+        Path,
+        typer.Option(
+            help="Path to the grimoire SQLite file.",
+            envvar="GRIMOIRE_DB",
+        ),
+    ],
+) -> None:
+    """Show metadata and counts for a grimoire file."""
+    stats = Grimoire.peek(db)
+    if stats is None:
+        _fail(f"No grimoire at {db}")
+    typer.echo(
+        json.dumps(
+            {
+                "path": str(db),
+                "model": stats.model,
+                "dimension": stats.dimension,
+                "schema_version": stats.schema_version,
+                "entry_count": stats.entry_count,
+                "kinds": stats.kinds,
+            }
+        )
+    )
 
 
 @app.command(name="list")
 def list_entries(
     db: Annotated[
-        Path, typer.Option(help="Path to the grimoire SQLite file.", exists=True)
-    ] = DEFAULT_DB,
+        Path,
+        typer.Option(
+            help="Path to the grimoire SQLite file.",
+            envvar="GRIMOIRE_DB",
+            exists=True,
+        ),
+    ],
+    cache_folder: Annotated[
+        Path,
+        typer.Option(
+            "--cache-folder",
+            help="Directory for the embedder's model cache.",
+            envvar="GRIMOIRE_CACHE",
+        ),
+    ],
     kind: Annotated[
         str | None, typer.Option(help="Restrict to entries of this kind.")
     ] = None,
@@ -101,7 +224,7 @@ def list_entries(
     ] = None,
 ) -> None:
     """Paginate entries in chronological order (by id)."""
-    with _open_grimoire(db) as g:
+    with _open_grimoire(db, cache_folder) as g:
         for entry in g.list(kind=kind, limit=limit, after_id=after_id):
             _print_entry(entry)
 
@@ -110,11 +233,24 @@ def list_entries(
 def get(
     entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
     db: Annotated[
-        Path, typer.Option(help="Path to the grimoire SQLite file.", exists=True)
-    ] = DEFAULT_DB,
+        Path,
+        typer.Option(
+            help="Path to the grimoire SQLite file.",
+            envvar="GRIMOIRE_DB",
+            exists=True,
+        ),
+    ],
+    cache_folder: Annotated[
+        Path,
+        typer.Option(
+            "--cache-folder",
+            help="Directory for the embedder's model cache.",
+            envvar="GRIMOIRE_CACHE",
+        ),
+    ],
 ) -> None:
     """Fetch a single entry by id."""
-    with _open_grimoire(db) as g:
+    with _open_grimoire(db, cache_folder) as g:
         entry = g.get(entry_id)
         if entry is None:
             _fail(f"No entry with id {entry_id!r}")
@@ -125,17 +261,32 @@ def get(
 def delete(
     entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
     db: Annotated[
-        Path, typer.Option(help="Path to the grimoire SQLite file.", exists=True)
-    ] = DEFAULT_DB,
+        Path,
+        typer.Option(
+            help="Path to the grimoire SQLite file.",
+            envvar="GRIMOIRE_DB",
+            exists=True,
+        ),
+    ],
+    cache_folder: Annotated[
+        Path,
+        typer.Option(
+            "--cache-folder",
+            help="Directory for the embedder's model cache.",
+            envvar="GRIMOIRE_CACHE",
+        ),
+    ],
 ) -> None:
     """Delete an entry by id."""
-    with _open_grimoire(db) as g:
+    with _open_grimoire(db, cache_folder) as g:
         if not g.delete(entry_id):
             _fail(f"No entry with id {entry_id!r}")
     typer.echo(f"Deleted {entry_id}")
 
 
-def _open_grimoire(db: Path, *, model_override: str | None = None) -> Grimoire:
+def _open_grimoire(
+    db: Path, cache_folder: Path, *, model_override: str | None = None
+) -> Grimoire:
     """Open a Grimoire, auto-detecting the embedding model from the file when possible.
 
     Resolution order:
@@ -144,32 +295,19 @@ def _open_grimoire(db: Path, *, model_override: str | None = None) -> Grimoire:
       3. The library default model.
     """
     db.parent.mkdir(parents=True, exist_ok=True)
-    DEFAULT_CACHE.mkdir(parents=True, exist_ok=True)
-    model_name = _read_stored_model(db) or model_override or DEFAULT_MODEL
+    cache_folder.mkdir(parents=True, exist_ok=True)
+    stats = Grimoire.peek(db)
+    model_name = stats.model if stats else (model_override or DEFAULT_MODEL)
     try:
         from grimoire.embedders import FastembedEmbedder
 
-        embedder = FastembedEmbedder(model_name, cache_folder=DEFAULT_CACHE)
+        embedder = FastembedEmbedder(model_name, cache_folder=cache_folder)
     except ImportError as exc:
         _fail(str(exc))
     try:
         return Grimoire.open(db, embedder=embedder)
     except GrimoireError as exc:
         _fail(str(exc))
-
-
-def _read_stored_model(db: Path) -> str | None:
-    if not db.exists():
-        return None
-    try:
-        conn = sqlite3.connect(db)
-        try:
-            row = conn.execute("SELECT model FROM grimoire WHERE id = 1").fetchone()
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return None
-    return row[0] if row else None
 
 
 def _load_records(path: Path) -> list[dict]:

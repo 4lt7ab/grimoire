@@ -8,7 +8,7 @@ import sqlite_vec
 from ulid import ULID
 
 from grimoire.embedder import Embedder
-from grimoire.models import Entry
+from grimoire.models import Entry, Stats
 from grimoire.schema import bootstrap
 
 
@@ -28,6 +28,42 @@ class Grimoire:
         except BaseException:
             conn.close()
             raise
+
+    @classmethod
+    def peek(cls, path: str | Path) -> Stats | None:
+        """Read metadata and counts from a grimoire file without opening it for use.
+
+        Returns None if the file does not exist or is not a grimoire database.
+        Does not load sqlite-vec or require an embedder, so it is safe for
+        inspection (CLI `info`, model auto-detect) before deciding how to open.
+        """
+        path = Path(path)
+        if not path.exists():
+            return None
+        try:
+            conn = sqlite3.connect(path)
+            try:
+                row = conn.execute(
+                    "SELECT model, dimension FROM grimoire WHERE id = 1"
+                ).fetchone()
+                if row is None:
+                    return None
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+                count = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+                kind_rows = conn.execute(
+                    "SELECT kind, COUNT(*) FROM entries GROUP BY kind ORDER BY kind"
+                ).fetchall()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return None
+        return Stats(
+            model=row[0],
+            dimension=row[1],
+            schema_version=version,
+            entry_count=count,
+            kinds=dict(kind_rows),
+        )
 
     def add(
         self,

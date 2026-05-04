@@ -1,7 +1,7 @@
 import hashlib
 
 import pytest
-from grimoire import Entry, Grimoire, GrimoireMismatch, InvalidEmbedder
+from grimoire import Entry, Grimoire, GrimoireMismatch, InvalidEmbedder, Stats
 
 
 class FakeEmbedder:
@@ -236,3 +236,48 @@ def test_embedder_with_zero_dimension_rejected(tmp_path):
 def test_embedder_with_empty_model_rejected(tmp_path):
     with pytest.raises(InvalidEmbedder):
         Grimoire.open(tmp_path / "store.db", embedder=_EmptyModelEmbedder())
+
+
+# ---------- peek ----------
+
+
+def test_peek_returns_none_for_missing_file(tmp_path):
+    assert Grimoire.peek(tmp_path / "nope.db") is None
+
+
+def test_peek_returns_none_for_non_grimoire_file(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "stranger.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE other (x INTEGER)")
+    conn.commit()
+    conn.close()
+    assert Grimoire.peek(db) is None
+
+
+def test_peek_returns_stats_for_initialized_grimoire(tmp_path):
+    db = tmp_path / "store.db"
+    with Grimoire.open(db, embedder=FakeEmbedder(model="m1", dimension=8)) as g:
+        g.add(kind="note", content="alpha")
+        g.add(kind="note", content="beta")
+        g.add(kind="spell", content="lumos")
+
+    stats = Grimoire.peek(db)
+    assert isinstance(stats, Stats)
+    assert stats.model == "m1"
+    assert stats.dimension == 8
+    assert stats.schema_version == 1
+    assert stats.entry_count == 3
+    assert stats.kinds == {"note": 2, "spell": 1}
+
+
+def test_peek_does_not_require_embedder_or_extension(tmp_path):
+    # peek must be safe on a freshly-created file from another process,
+    # without sqlite-vec or an embedder loaded.
+    db = tmp_path / "store.db"
+    Grimoire.open(db, embedder=FakeEmbedder()).close()
+    stats = Grimoire.peek(db)
+    assert stats is not None
+    assert stats.entry_count == 0
+    assert stats.kinds == {}

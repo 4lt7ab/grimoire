@@ -125,7 +125,10 @@ def play(g: Grimoire) -> None:
 
 def main() -> None:
     DB.parent.mkdir(parents=True, exist_ok=True)
-    embedder = FastembedEmbedder(cache_folder=MODELS)
+    try:
+        embedder = FastembedEmbedder(cache_folder=MODELS)
+    except ImportError as exc:
+        raise SystemExit(f"Error: {exc}") from exc
     with Grimoire.open(DB, embedder=embedder) as g:
         seed_if_empty(g)
         try:

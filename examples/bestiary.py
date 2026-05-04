@@ -75,7 +75,10 @@ def main() -> None:
 
     args = parser.parse_args()
     DB.parent.mkdir(parents=True, exist_ok=True)
-    embedder = FastembedEmbedder(cache_folder=MODELS)
+    try:
+        embedder = FastembedEmbedder(cache_folder=MODELS)
+    except ImportError as exc:
+        raise SystemExit(f"Error: {exc}") from exc
     with Grimoire.open(DB, embedder=embedder) as g:
         args.func(g, args)
 

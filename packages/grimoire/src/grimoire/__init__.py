@@ -6,7 +6,7 @@ from grimoire.errors import (
     InvalidEmbedder,
     SchemaVersionError,
 )
-from grimoire.models import Entry
+from grimoire.models import Entry, Stats
 
 __all__ = [
     "Embedder",
@@ -16,4 +16,5 @@ __all__ = [
     "GrimoireMismatch",
     "InvalidEmbedder",
     "SchemaVersionError",
+    "Stats",
 ]

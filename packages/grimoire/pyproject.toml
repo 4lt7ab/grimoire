@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-fastembed = ["fastembed>=0.4"]
+fastembed = ["fastembed>=0.4", "socksio>=1.0"]
 
 [build-system]
 requires = ["hatchling"]
