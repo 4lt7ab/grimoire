@@ -4,8 +4,8 @@ requires-python = ">=3.14"
 
 [manifest]
 members = [
-    "grimoire",
-    "grimoire-cli",
+    "4lt7ab-grimoire",
+    "4lt7ab-grimoire-cli",
 ]
 
 [manifest.dependency-groups]
@@ -13,6 +13,54 @@ dev = [
     { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.8" },
 ]
+
+[[package]]
+name = "4lt7ab-grimoire"
+version = "0.0.1"
+source = { editable = "packages/grimoire" }
+dependencies = [
+    { name = "python-ulid" },
+    { name = "sqlite-vec" },
+    { name = "typing-extensions" },
+]
+
+[package.optional-dependencies]
+fastembed = [
+    { name = "fastembed" },
+    { name = "socksio" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastembed", marker = "extra == 'fastembed'", specifier = ">=0.4" },
+    { name = "python-ulid", specifier = ">=3.0" },
+    { name = "socksio", marker = "extra == 'fastembed'", specifier = ">=1.0" },
+    { name = "sqlite-vec", specifier = ">=0.1.6" },
+    { name = "typing-extensions", specifier = ">=4.0" },
+]
+provides-extras = ["fastembed"]
+
+[[package]]
+name = "4lt7ab-grimoire-cli"
+version = "0.0.1"
+source = { editable = "packages/grimoire-cli" }
+dependencies = [
+    { name = "4lt7ab-grimoire" },
+    { name = "typer" },
+]
+
+[package.optional-dependencies]
+fastembed = [
+    { name = "4lt7ab-grimoire", extra = ["fastembed"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "4lt7ab-grimoire", editable = "packages/grimoire" },
+    { name = "4lt7ab-grimoire", extras = ["fastembed"], marker = "extra == 'fastembed'", editable = "packages/grimoire" },
+    { name = "typer", specifier = ">=0.12" },
+]
+provides-extras = ["fastembed"]
 
 [[package]]
 name = "annotated-doc"
@@ -152,54 +200,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/d5/8d/1c51c094345df128c
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d5/0c/043d5e551459da400957a1395e0febbf771446ff34291afcbe3d8be2a279/fsspec-2026.4.0-py3-none-any.whl", hash = "sha256:11ef7bb35dab8a394fde6e608221d5cf3e8499401c249bebaeaad760a1a8dec2", size = 203402, upload-time = "2026-04-29T20:42:36.842Z" },
 ]
-
-[[package]]
-name = "grimoire"
-version = "0.0.1"
-source = { editable = "packages/grimoire" }
-dependencies = [
-    { name = "python-ulid" },
-    { name = "sqlite-vec" },
-    { name = "typing-extensions" },
-]
-
-[package.optional-dependencies]
-fastembed = [
-    { name = "fastembed" },
-    { name = "socksio" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "fastembed", marker = "extra == 'fastembed'", specifier = ">=0.4" },
-    { name = "python-ulid", specifier = ">=3.0" },
-    { name = "socksio", marker = "extra == 'fastembed'", specifier = ">=1.0" },
-    { name = "sqlite-vec", specifier = ">=0.1.6" },
-    { name = "typing-extensions", specifier = ">=4.0" },
-]
-provides-extras = ["fastembed"]
-
-[[package]]
-name = "grimoire-cli"
-version = "0.0.1"
-source = { editable = "packages/grimoire-cli" }
-dependencies = [
-    { name = "grimoire" },
-    { name = "typer" },
-]
-
-[package.optional-dependencies]
-fastembed = [
-    { name = "grimoire", extra = ["fastembed"] },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "grimoire", editable = "packages/grimoire" },
-    { name = "grimoire", extras = ["fastembed"], marker = "extra == 'fastembed'", editable = "packages/grimoire" },
-    { name = "typer", specifier = ">=0.12" },
-]
-provides-extras = ["fastembed"]
 
 [[package]]
 name = "h11"
