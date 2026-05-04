@@ -10,8 +10,11 @@ import sqlite_vec
 from ulid import ULID
 
 from grimoire.embedder import Embedder
+from grimoire.errors import GrimoireNotFound
 from grimoire.models import Entry, Stats
-from grimoire.schema import bootstrap
+from grimoire.schema import create, validate
+
+_WARMUP_PROBE = " "
 
 
 class Grimoire:
@@ -22,10 +25,38 @@ class Grimoire:
         self._embedder = embedder
 
     @classmethod
-    def open(cls, path: str | Path, *, embedder: Embedder) -> Self:
+    def init(cls, path: str | Path, *, embedder: Embedder) -> Self:
+        """Create the grimoire if missing, validate if present, and warm the embedder.
+
+        Idempotent. After this returns, the file exists with a lock row matching
+        the supplied embedder, and the embedder has been exercised once via
+        `embed(_WARMUP_PROBE)` so any deferred setup work has happened.
+        """
+        path = Path(path)
+        is_new = not path.exists()
+        if is_new:
+            path.parent.mkdir(parents=True, exist_ok=True)
         conn = _open_conn(str(path))
         try:
-            bootstrap(conn, embedder)
+            if is_new:
+                create(conn, embedder)
+            else:
+                validate(conn, embedder)
+            embedder.embed(_WARMUP_PROBE)
+            return cls(conn=conn, embedder=embedder)
+        except BaseException:
+            conn.close()
+            raise
+
+    @classmethod
+    def open(cls, path: str | Path, *, embedder: Embedder) -> Self:
+        """Open an existing grimoire; raises `GrimoireNotFound` if missing."""
+        path = Path(path)
+        if not path.exists():
+            raise GrimoireNotFound(f"No grimoire at {path}")
+        conn = _open_conn(str(path))
+        try:
+            validate(conn, embedder)
             return cls(conn=conn, embedder=embedder)
         except BaseException:
             conn.close()

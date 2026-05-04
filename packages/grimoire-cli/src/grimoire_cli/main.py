@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Annotated, NoReturn
 
 import typer
-from grimoire import Entry, Grimoire, GrimoireError
+from grimoire import Entry, Grimoire, GrimoireError, GrimoireNotFound
 
 RECOGNIZED_FIELDS = {"kind", "content", "payload", "threshold"}
 REQUIRED_FIELDS = {"kind", "content"}
@@ -20,6 +20,62 @@ app = typer.Typer(
 @app.callback()
 def _callback() -> None:
     """Manage a grimoire datastore."""
+
+
+@app.command()
+def init(
+    db: Annotated[
+        Path,
+        typer.Option(
+            help="Path to the grimoire SQLite file.",
+            envvar="GRIMOIRE_DB",
+        ),
+    ],
+    cache_folder: Annotated[
+        Path,
+        typer.Option(
+            "--cache-folder",
+            help="Directory for the embedder's model cache.",
+            envvar="GRIMOIRE_CACHE",
+        ),
+    ],
+    model: Annotated[
+        str | None,
+        typer.Option(
+            help=(
+                "fastembed model name. Used only when creating a new grimoire; "
+                "passing this against an existing grimoire whose locked model "
+                "differs is an error."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Create or verify a grimoire and warm its embedder. One-time setup."""
+    db.parent.mkdir(parents=True, exist_ok=True)
+    cache_folder.mkdir(parents=True, exist_ok=True)
+
+    stats = Grimoire.peek(db)
+    if stats is not None and model is not None and model != stats.model:
+        _fail(
+            f"file is locked to model {stats.model!r}; "
+            f"drop --model or use a different --db path"
+        )
+
+    model_name = stats.model if stats else (model or DEFAULT_MODEL)
+
+    try:
+        from grimoire.embedders import FastembedEmbedder
+
+        embedder = FastembedEmbedder(model_name, cache_folder=cache_folder)
+    except ImportError as exc:
+        _fail(str(exc))
+
+    try:
+        Grimoire.init(db, embedder=embedder).close()
+    except GrimoireError as exc:
+        _fail(str(exc))
+
+    _emit_info(db)
 
 
 @app.command()
@@ -49,12 +105,6 @@ def ingest(
             envvar="GRIMOIRE_CACHE",
         ),
     ],
-    model: Annotated[
-        str,
-        typer.Option(
-            help=("fastembed model name (only used when creating a new file).")
-        ),
-    ] = DEFAULT_MODEL,
 ) -> None:
     """Bulk-ingest records into a grimoire."""
     records = _load_records(file)
@@ -62,7 +112,7 @@ def ingest(
         typer.echo(f"No records to ingest from {file}")
         return
 
-    with _open_grimoire(db, cache_folder, model_override=model) as g:
+    with _open_grimoire(db, cache_folder) as g:
         for i, record in enumerate(records, 1):
             g.add(
                 kind=record["kind"],
@@ -142,10 +192,6 @@ def add(
         float | None,
         typer.Option(help="Optional per-entry similarity threshold."),
     ] = None,
-    model: Annotated[
-        str,
-        typer.Option(help="fastembed model name (only used when creating a new file)."),
-    ] = DEFAULT_MODEL,
 ) -> None:
     """Add a single record to a grimoire."""
     payload_obj: dict | None = None
@@ -157,7 +203,7 @@ def add(
         if not isinstance(parsed, dict):
             _fail("--payload must be a JSON object")
         payload_obj = parsed
-    with _open_grimoire(db, cache_folder, model_override=model) as g:
+    with _open_grimoire(db, cache_folder) as g:
         entry = g.add(
             kind=kind,
             content=content,
@@ -178,21 +224,7 @@ def info(
     ],
 ) -> None:
     """Show metadata and counts for a grimoire file."""
-    stats = Grimoire.peek(db)
-    if stats is None:
-        _fail(f"No grimoire at {db}")
-    typer.echo(
-        json.dumps(
-            {
-                "path": str(db),
-                "model": stats.model,
-                "dimension": stats.dimension,
-                "schema_version": stats.schema_version,
-                "entry_count": stats.entry_count,
-                "kinds": stats.kinds,
-            }
-        )
-    )
+    _emit_info(db)
 
 
 @app.command(name="list")
@@ -284,30 +316,45 @@ def delete(
     typer.echo(f"Deleted {entry_id}")
 
 
-def _open_grimoire(
-    db: Path, cache_folder: Path, *, model_override: str | None = None
-) -> Grimoire:
-    """Open a Grimoire, auto-detecting the embedding model from the file when possible.
+def _open_grimoire(db: Path, cache_folder: Path) -> Grimoire:
+    """Open an existing grimoire, auto-detecting the embedding model from the file.
 
-    Resolution order:
-      1. Model name stored in the file (if file exists and is initialized).
-      2. `model_override` argument (typically a CLI --model flag).
-      3. The library default model.
+    Surfaces `GrimoireNotFound` as a friendly "run grimoire init first" error.
     """
-    db.parent.mkdir(parents=True, exist_ok=True)
     cache_folder.mkdir(parents=True, exist_ok=True)
     stats = Grimoire.peek(db)
-    model_name = stats.model if stats else (model_override or DEFAULT_MODEL)
+    if stats is None:
+        _fail(f"no grimoire at {db}; run 'grimoire init' first")
     try:
         from grimoire.embedders import FastembedEmbedder
 
-        embedder = FastembedEmbedder(model_name, cache_folder=cache_folder)
+        embedder = FastembedEmbedder(stats.model, cache_folder=cache_folder)
     except ImportError as exc:
         _fail(str(exc))
     try:
         return Grimoire.open(db, embedder=embedder)
+    except GrimoireNotFound:
+        _fail(f"no grimoire at {db}; run 'grimoire init' first")
     except GrimoireError as exc:
         _fail(str(exc))
+
+
+def _emit_info(db: Path) -> None:
+    stats = Grimoire.peek(db)
+    if stats is None:
+        _fail(f"No grimoire at {db}")
+    typer.echo(
+        json.dumps(
+            {
+                "path": str(db),
+                "model": stats.model,
+                "dimension": stats.dimension,
+                "schema_version": stats.schema_version,
+                "entry_count": stats.entry_count,
+                "kinds": stats.kinds,
+            }
+        )
+    )
 
 
 def _load_records(path: Path) -> list[dict]:

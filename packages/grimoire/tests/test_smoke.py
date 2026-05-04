@@ -1,7 +1,15 @@
 import hashlib
+import sqlite3
 
 import pytest
-from grimoire import Entry, Grimoire, GrimoireMismatch, InvalidEmbedder, Stats
+from grimoire import (
+    Entry,
+    Grimoire,
+    GrimoireMismatch,
+    GrimoireNotFound,
+    InvalidEmbedder,
+    Stats,
+)
 
 
 class FakeEmbedder:
@@ -22,29 +30,41 @@ class FakeEmbedder:
         return [(b - 128) / 128.0 for b in digest[: self._dimension]]
 
 
-def test_open_creates_file_idempotently(tmp_path):
+class CountingEmbedder(FakeEmbedder):
+    """A FakeEmbedder that records how many times `embed` is called."""
+
+    def __init__(self, *, model: str = "fake-v1", dimension: int = 8) -> None:
+        super().__init__(model=model, dimension=dimension)
+        self.embed_calls = 0
+
+    def embed(self, text: str) -> list[float]:
+        self.embed_calls += 1
+        return super().embed(text)
+
+
+def test_init_creates_file_idempotently(tmp_path):
     db = tmp_path / "store.db"
-    Grimoire.open(db, embedder=FakeEmbedder()).close()
-    Grimoire.open(db, embedder=FakeEmbedder()).close()
+    Grimoire.init(db, embedder=FakeEmbedder()).close()
+    Grimoire.init(db, embedder=FakeEmbedder()).close()
     assert db.exists()
 
 
 def test_embedder_model_mismatch_raises(tmp_path):
     db = tmp_path / "store.db"
-    Grimoire.open(db, embedder=FakeEmbedder(model="alpha")).close()
+    Grimoire.init(db, embedder=FakeEmbedder(model="alpha")).close()
     with pytest.raises(GrimoireMismatch):
         Grimoire.open(db, embedder=FakeEmbedder(model="beta"))
 
 
 def test_embedder_dimension_mismatch_raises(tmp_path):
     db = tmp_path / "store.db"
-    Grimoire.open(db, embedder=FakeEmbedder(dimension=8)).close()
+    Grimoire.init(db, embedder=FakeEmbedder(dimension=8)).close()
     with pytest.raises(GrimoireMismatch):
         Grimoire.open(db, embedder=FakeEmbedder(dimension=16))
 
 
 def test_add_returns_entry(tmp_path):
-    with Grimoire.open(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         entry = g.add(kind="note", content="the moon is full")
         assert isinstance(entry, Entry)
         assert entry.kind == "note"
@@ -52,7 +72,7 @@ def test_add_returns_entry(tmp_path):
 
 
 def test_search_finds_exact_match_first(tmp_path):
-    with Grimoire.open(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         g.add(kind="note", content="the moon is full")
         g.add(kind="note", content="dragons fly at midnight")
         g.add(kind="note", content="potions bubble in the cauldron")
@@ -64,7 +84,7 @@ def test_search_finds_exact_match_first(tmp_path):
 
 
 def test_search_filters_by_kind(tmp_path):
-    with Grimoire.open(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         g.add(kind="spell", content="lumos")
         g.add(kind="potion", content="lumos")
 
@@ -74,7 +94,7 @@ def test_search_filters_by_kind(tmp_path):
 
 
 def test_dynamic_threshold_drops_low_match(tmp_path):
-    with Grimoire.open(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         g.add(kind="note", content="the moon is full", threshold=0.0)
         g.add(kind="note", content="dragons fly at midnight", threshold=0.0)
 
@@ -89,9 +109,9 @@ def test_dynamic_threshold_drops_low_match(tmp_path):
 def test_two_files_are_independent(tmp_path):
     a_path = tmp_path / "a.db"
     b_path = tmp_path / "b.db"
-    with Grimoire.open(a_path, embedder=FakeEmbedder()) as a:
+    with Grimoire.init(a_path, embedder=FakeEmbedder()) as a:
         a.add(kind="note", content="alpha")
-    with Grimoire.open(b_path, embedder=FakeEmbedder()) as b:
+    with Grimoire.init(b_path, embedder=FakeEmbedder()) as b:
         b.add(kind="note", content="beta")
         results = b.search("alpha", k=10)
         assert all(r.content != "alpha" for r in results)
@@ -99,7 +119,7 @@ def test_two_files_are_independent(tmp_path):
 
 def test_data_persists_across_reopens(tmp_path):
     db = tmp_path / "store.db"
-    with Grimoire.open(db, embedder=FakeEmbedder()) as g:
+    with Grimoire.init(db, embedder=FakeEmbedder()) as g:
         g.add(kind="note", content="the moon is full")
 
     with Grimoire.open(db, embedder=FakeEmbedder()) as g:
@@ -109,7 +129,7 @@ def test_data_persists_across_reopens(tmp_path):
 
 
 def test_get_returns_entry(tmp_path):
-    with Grimoire.open(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         added = g.add(kind="note", content="lumos")
         fetched = g.get(added.id)
         assert fetched is not None
@@ -118,12 +138,12 @@ def test_get_returns_entry(tmp_path):
 
 
 def test_get_returns_none_for_missing_id(tmp_path):
-    with Grimoire.open(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         assert g.get("01HXXXXXXXXXXXXXXXXXXXXXXX") is None
 
 
 def test_list_returns_all_entries_in_chronological_order(tmp_path):
-    with Grimoire.open(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         a = g.add(kind="note", content="first")
         b = g.add(kind="note", content="second")
         c = g.add(kind="note", content="third")
@@ -132,7 +152,7 @@ def test_list_returns_all_entries_in_chronological_order(tmp_path):
 
 
 def test_list_filters_by_kind(tmp_path):
-    with Grimoire.open(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         g.add(kind="spell", content="lumos")
         g.add(kind="potion", content="felix felicis")
         g.add(kind="spell", content="alohomora")
@@ -143,7 +163,7 @@ def test_list_filters_by_kind(tmp_path):
 
 
 def test_list_paginates_via_after_id(tmp_path):
-    with Grimoire.open(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         added = [g.add(kind="note", content=f"e{i}") for i in range(5)]
 
         page1 = g.list(limit=2)
@@ -160,14 +180,14 @@ def test_list_paginates_via_after_id(tmp_path):
 
 
 def test_list_respects_limit(tmp_path):
-    with Grimoire.open(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         for i in range(5):
             g.add(kind="note", content=f"e{i}")
         assert len(g.list(limit=3)) == 3
 
 
 def test_delete_removes_entry_and_vector(tmp_path):
-    with Grimoire.open(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         added = g.add(kind="note", content="ephemeral")
         assert g.delete(added.id) is True
         assert g.get(added.id) is None
@@ -178,7 +198,7 @@ def test_delete_removes_entry_and_vector(tmp_path):
 
 
 def test_delete_returns_false_for_missing_id(tmp_path):
-    with Grimoire.open(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         assert g.delete("01HXXXXXXXXXXXXXXXXXXXXXXX") is False
 
 
@@ -224,18 +244,84 @@ class _EmptyModelEmbedder:
 def test_embedder_with_non_int_dimension_rejected(tmp_path):
     db = tmp_path / "store.db"
     with pytest.raises(InvalidEmbedder):
-        Grimoire.open(db, embedder=_BadDimensionEmbedder())
+        Grimoire.init(db, embedder=_BadDimensionEmbedder())
     assert not db.exists() or db.stat().st_size == 0
 
 
 def test_embedder_with_zero_dimension_rejected(tmp_path):
     with pytest.raises(InvalidEmbedder):
-        Grimoire.open(tmp_path / "store.db", embedder=_NonPositiveDimensionEmbedder())
+        Grimoire.init(tmp_path / "store.db", embedder=_NonPositiveDimensionEmbedder())
 
 
 def test_embedder_with_empty_model_rejected(tmp_path):
     with pytest.raises(InvalidEmbedder):
-        Grimoire.open(tmp_path / "store.db", embedder=_EmptyModelEmbedder())
+        Grimoire.init(tmp_path / "store.db", embedder=_EmptyModelEmbedder())
+
+
+# ---------- init ----------
+
+
+def test_init_exercises_embedder_exactly_once_on_create(tmp_path):
+    e = CountingEmbedder()
+    Grimoire.init(tmp_path / "store.db", embedder=e).close()
+    assert e.embed_calls == 1
+
+
+def test_init_exercises_embedder_again_on_reinit(tmp_path):
+    db = tmp_path / "store.db"
+    e = CountingEmbedder()
+    Grimoire.init(db, embedder=e).close()
+    Grimoire.init(db, embedder=e).close()
+    assert e.embed_calls == 2
+
+
+def test_init_creates_parent_directories(tmp_path):
+    nested = tmp_path / "deep" / "nested" / "store.db"
+    Grimoire.init(nested, embedder=FakeEmbedder()).close()
+    assert nested.exists()
+
+
+def test_init_propagates_embedder_errors(tmp_path):
+    class BoomEmbedder(FakeEmbedder):
+        def embed(self, text: str) -> list[float]:
+            raise RuntimeError("model fetch failed")
+
+    with pytest.raises(RuntimeError, match="model fetch failed"):
+        Grimoire.init(tmp_path / "store.db", embedder=BoomEmbedder())
+
+
+def test_init_raises_mismatch_on_lock_conflict(tmp_path):
+    db = tmp_path / "store.db"
+    Grimoire.init(db, embedder=FakeEmbedder(model="alpha")).close()
+    with pytest.raises(GrimoireMismatch):
+        Grimoire.init(db, embedder=FakeEmbedder(model="beta"))
+
+
+# ---------- open ----------
+
+
+def test_open_raises_not_found_for_missing_path(tmp_path):
+    with pytest.raises(GrimoireNotFound):
+        Grimoire.open(tmp_path / "nope.db", embedder=FakeEmbedder())
+
+
+def test_open_raises_not_found_for_non_grimoire_file(tmp_path):
+    db = tmp_path / "stranger.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE other (x INTEGER)")
+    conn.commit()
+    conn.close()
+    with pytest.raises(GrimoireNotFound):
+        Grimoire.open(db, embedder=FakeEmbedder())
+
+
+def test_open_does_not_call_embed(tmp_path):
+    """Regression pin: open() must stay cheap — no embedder.embed() during setup."""
+    db = tmp_path / "store.db"
+    Grimoire.init(db, embedder=FakeEmbedder()).close()
+    e = CountingEmbedder()
+    Grimoire.open(db, embedder=e).close()
+    assert e.embed_calls == 0
 
 
 # ---------- peek ----------
@@ -246,8 +332,6 @@ def test_peek_returns_none_for_missing_file(tmp_path):
 
 
 def test_peek_returns_none_for_non_grimoire_file(tmp_path):
-    import sqlite3
-
     db = tmp_path / "stranger.db"
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE other (x INTEGER)")
@@ -258,7 +342,7 @@ def test_peek_returns_none_for_non_grimoire_file(tmp_path):
 
 def test_peek_returns_stats_for_initialized_grimoire(tmp_path):
     db = tmp_path / "store.db"
-    with Grimoire.open(db, embedder=FakeEmbedder(model="m1", dimension=8)) as g:
+    with Grimoire.init(db, embedder=FakeEmbedder(model="m1", dimension=8)) as g:
         g.add(kind="note", content="alpha")
         g.add(kind="note", content="beta")
         g.add(kind="spell", content="lumos")
@@ -276,7 +360,7 @@ def test_peek_does_not_require_embedder_or_extension(tmp_path):
     # peek must be safe on a freshly-created file from another process,
     # without sqlite-vec or an embedder loaded.
     db = tmp_path / "store.db"
-    Grimoire.open(db, embedder=FakeEmbedder()).close()
+    Grimoire.init(db, embedder=FakeEmbedder()).close()
     stats = Grimoire.peek(db)
     assert stats is not None
     assert stats.entry_count == 0

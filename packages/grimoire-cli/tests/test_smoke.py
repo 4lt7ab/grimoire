@@ -18,13 +18,33 @@ def _set_grimoire_cache(monkeypatch, _grimoire_cache_dir):
     monkeypatch.setenv("GRIMOIRE_CACHE", str(_grimoire_cache_dir))
 
 
+def _init(db) -> None:
+    """Run `grimoire init` on a path; assumes fastembed is available."""
+    pytest.importorskip("fastembed")
+    result = runner.invoke(app, ["init", "--db", str(db)])
+    assert result.exit_code == 0, result.output
+
+
+def _last_json_line(output: str) -> dict:
+    """Return the last `{...}` JSON object in CLI output.
+
+    fastembed's first-time model download prints progress bars to the captured
+    stream; the JSON we emit is always the last single-line object in stdout.
+    """
+    for line in reversed(output.replace("\r", "\n").splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            return json.loads(line)
+    raise ValueError(f"No JSON object found in output: {output!r}")
+
+
 # ---------- help / no-args ----------
 
 
 def test_help_lists_all_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for cmd in ("ingest", "search", "list", "get", "delete", "add", "info"):
+    for cmd in ("init", "ingest", "search", "list", "get", "delete", "add", "info"):
         assert cmd in result.output
 
 
@@ -41,7 +61,7 @@ def test_ingest_help_describes_options():
     result = runner.invoke(app, ["ingest", "--help"])
     assert result.exit_code == 0
     assert "--db" in result.output
-    assert "--model" in result.output
+    assert "--cache-folder" in result.output
 
 
 def test_ingest_missing_file_fails(tmp_path):
@@ -91,7 +111,7 @@ def test_ingest_empty_file_succeeds(tmp_path):
     assert "No records" in result.output
 
 
-# ---------- read-side commands: missing-file rejection (no ST needed) ----------
+# ---------- read-side commands: missing-file rejection ----------
 
 
 @pytest.mark.parametrize(
@@ -109,7 +129,9 @@ def test_command_rejects_missing_db(tmp_path, cmd_args):
     assert result.exit_code != 0
 
 
-@pytest.mark.parametrize("cmd", ["search", "list", "get", "delete", "add", "info"])
+@pytest.mark.parametrize(
+    "cmd", ["init", "search", "list", "get", "delete", "add", "info"]
+)
 def test_command_help_describes_db_option(cmd):
     result = runner.invoke(app, [cmd, "--help"])
     assert result.exit_code == 0
@@ -117,7 +139,9 @@ def test_command_help_describes_db_option(cmd):
     assert "GRIMOIRE_DB" in result.output
 
 
-@pytest.mark.parametrize("cmd", ["search", "list", "get", "delete", "add", "ingest"])
+@pytest.mark.parametrize(
+    "cmd", ["init", "search", "list", "get", "delete", "add", "ingest"]
+)
 def test_command_help_describes_cache_folder(cmd):
     result = runner.invoke(app, [cmd, "--help"])
     assert result.exit_code == 0
@@ -128,6 +152,7 @@ def test_command_help_describes_cache_folder(cmd):
 @pytest.mark.parametrize(
     "cmd_args",
     [
+        ["init"],
         ["info"],
         ["list"],
         ["search", "query"],
@@ -157,6 +182,69 @@ def test_envvar_supplies_db_path(monkeypatch, tmp_path):
     assert "No grimoire at" in result.output
 
 
+# ---------- init ----------
+
+
+def test_init_creates_db_and_prints_info(tmp_path):
+    pytest.importorskip("fastembed")
+    db = tmp_path / "store.db"
+    result = runner.invoke(app, ["init", "--db", str(db)])
+    assert result.exit_code == 0, result.output
+    parsed = _last_json_line(result.output)
+    assert parsed["path"] == str(db)
+    assert parsed["model"]
+    assert parsed["dimension"] > 0
+    assert parsed["schema_version"] == 1
+    assert parsed["entry_count"] == 0
+    assert parsed["kinds"] == {}
+    assert db.exists()
+
+
+def test_init_is_idempotent(tmp_path):
+    pytest.importorskip("fastembed")
+    db = tmp_path / "store.db"
+    first = runner.invoke(app, ["init", "--db", str(db)])
+    assert first.exit_code == 0
+    second = runner.invoke(app, ["init", "--db", str(db)])
+    assert second.exit_code == 0
+    assert _last_json_line(first.output) == _last_json_line(second.output)
+
+
+def test_init_strict_mismatch_on_explicit_model(tmp_path):
+    pytest.importorskip("fastembed")
+    db = tmp_path / "store.db"
+    assert runner.invoke(app, ["init", "--db", str(db)]).exit_code == 0
+
+    result = runner.invoke(
+        app, ["init", "--db", str(db), "--model", "some-other-model"]
+    )
+    assert result.exit_code == 1
+    assert "locked to model" in result.output
+
+
+# ---------- write commands against a missing db ----------
+
+
+def test_add_against_missing_db_says_run_init_first(tmp_path):
+    pytest.importorskip("fastembed")
+    db = tmp_path / "nope.db"
+    result = runner.invoke(app, ["add", "hello", "--db", str(db)])
+    assert result.exit_code == 1
+    assert "no grimoire at" in result.output
+    assert "grimoire init" in result.output
+
+
+def test_ingest_against_missing_db_says_run_init_first(tmp_path):
+    pytest.importorskip("fastembed")
+    db = tmp_path / "nope.db"
+    data = tmp_path / "records.jsonl"
+    data.write_text(json.dumps({"kind": "note", "content": "hello"}) + "\n")
+    result = runner.invoke(app, ["ingest", str(data), "--db", str(db)])
+    assert result.exit_code == 1
+    assert "no grimoire at" in result.output
+    assert "grimoire init" in result.output
+
+
 # ---------- end-to-end (gated on fastembed) ----------
 
 
@@ -165,6 +253,7 @@ def populated_db(tmp_path):
     pytest.importorskip("fastembed")
 
     db = tmp_path / "store.db"
+    _init(db)
     data = tmp_path / "records.jsonl"
     data.write_text(
         json.dumps({"kind": "note", "content": "the moon is full"})
@@ -295,6 +384,7 @@ def test_add_inserts_a_single_record(tmp_path):
     pytest.importorskip("fastembed")
 
     db = tmp_path / "store.db"
+    _init(db)
     add_result = runner.invoke(
         app, ["add", "the moon is full", "--kind", "note", "--db", str(db)]
     )
@@ -339,6 +429,7 @@ def test_search_dynamic_threshold_filters_results(tmp_path):
     pytest.importorskip("fastembed")
 
     db = tmp_path / "store.db"
+    _init(db)
     # Two entries both gated on a very tight threshold (0.0); only an
     # exact-match query should make it through.
     data = tmp_path / "records.jsonl"

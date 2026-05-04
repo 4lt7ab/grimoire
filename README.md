@@ -59,7 +59,13 @@ grimoire info
 
 You should see `Error: No grimoire at <full path>` (exit 1).
 
-Add a few entries. The first call downloads the default embedding model (`BAAI/bge-small-en-v1.5`, ~30MB ONNX) into `GRIMOIRE_CACHE`.
+Initialize the datastore. This creates the SQLite file, writes the embedder lock, and downloads the default embedding model (`BAAI/bge-small-en-v1.5`, ~30MB ONNX) into `GRIMOIRE_CACHE` — one deliberate setup step.
+
+```sh
+grimoire init
+```
+
+Add a few entries. No download this time — `init` already warmed the model.
 
 ```sh
 grimoire add "the moon is full tonight"
@@ -131,7 +137,7 @@ uv tool uninstall 4lt7ab-grimoire-cli
 uv add '4lt7ab-grimoire[fastembed]'
 ```
 
-A grimoire is a single SQLite file. `Grimoire.open(path, embedder=...)` is idempotent — it creates the file if missing, opens it if present.
+A grimoire is a single SQLite file. `Grimoire.init(path, embedder=...)` is the one-time setup ritual: it creates the file if missing, writes the embedder lock, validates against any existing lock, and exercises the embedder once so deferred work (model download, weight load) happens at a known moment. After that, `Grimoire.open(path, embedder=...)` opens the existing file cheaply; missing or non-grimoire paths raise `GrimoireNotFound`.
 
 A record has two parts. `content` is the text grimoire embeds and searches against — the description of the thing. `payload` is the optional structured object that description resolves to — the thing itself, the object you actually wanted to find with the query. You search by meaning and get back what the meaning was pointing at.
 
@@ -141,7 +147,7 @@ from grimoire.embedders import FastembedEmbedder
 
 embedder = FastembedEmbedder(cache_folder=".grimoire/models")
 
-with Grimoire.open(".grimoire/memory.db", embedder=embedder) as g:
+with Grimoire.init(".grimoire/memory.db", embedder=embedder) as g:
     g.add(
         kind="creature",
         content="A solar phoenix reborn from its own ashes at dawn",
@@ -177,7 +183,8 @@ if stats:
 
 ### Full API
 
-- `Grimoire.open(path, *, embedder)` — open or create.
+- `Grimoire.init(path, *, embedder)` — create or open the file, validate the embedder lock, exercise the embedder once. The deliberate setup step.
+- `Grimoire.open(path, *, embedder)` — open an existing grimoire. Raises `GrimoireNotFound` if the file is missing or not a grimoire.
 - `Grimoire.peek(path)` — return `Stats` (or `None` if missing/non-grimoire) without loading the embedder.
 - `add(*, kind, content, payload=None, threshold=None)` — insert.
 - `get(entry_id)` — fetch by id, or `None`.
@@ -186,7 +193,7 @@ if stats:
 - `delete(entry_id)` — returns `True` if removed, `False` if absent.
 - `close()` — also handled by the context manager.
 
-Errors derive from `GrimoireError`: `GrimoireMismatch` (embedder doesn't match what the file was created with), `SchemaVersionError`, `InvalidEmbedder`.
+Errors derive from `GrimoireError`: `GrimoireMismatch` (embedder doesn't match what the file was created with), `GrimoireNotFound` (raised by `open` when the path doesn't point to an existing grimoire), `SchemaVersionError`, `InvalidEmbedder`.
 
 ### Custom embedders
 
@@ -219,6 +226,7 @@ Flags override env vars: `--db <path>` over `GRIMOIRE_DB`, `--cache-folder <path
 ### Commands
 
 ```sh
+grimoire init
 grimoire add "<content>" [--kind K] [--payload '{...}'] [--threshold N]
 grimoire ingest <jsonl-file>
 grimoire search "<query>" [--k N] [--kind K] [--dynamic-threshold]

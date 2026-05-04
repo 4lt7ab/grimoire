@@ -37,7 +37,7 @@ def test_embed_returns_correct_length_vector(cache_dir):
 
 def test_round_trip_through_grimoire(tmp_path, cache_dir):
     e = FastembedEmbedder(cache_folder=cache_dir)
-    with Grimoire.open(tmp_path / "store.db", embedder=e) as g:
+    with Grimoire.init(tmp_path / "store.db", embedder=e) as g:
         g.add(kind="note", content="the moon is full tonight")
         g.add(kind="note", content="dragons fly at midnight")
 

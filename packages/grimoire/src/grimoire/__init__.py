@@ -3,6 +3,7 @@ from grimoire.embedder import Embedder
 from grimoire.errors import (
     GrimoireError,
     GrimoireMismatch,
+    GrimoireNotFound,
     InvalidEmbedder,
     SchemaVersionError,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "Grimoire",
     "GrimoireError",
     "GrimoireMismatch",
+    "GrimoireNotFound",
     "InvalidEmbedder",
     "SchemaVersionError",
     "Stats",
