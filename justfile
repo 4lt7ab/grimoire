@@ -22,11 +22,25 @@ bump level="patch":
     uv run python scripts/bump_version.py {{level}}
 
 publish: _publish-preflight
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "${UV_PUBLISH_TOKEN:-}" ]; then
+        read -rsp "PyPI API token: " UV_PUBLISH_TOKEN
+        echo
+        export UV_PUBLISH_TOKEN
+    fi
     rm -rf dist
     uv build --all-packages
     uv publish
 
 test-publish: _publish-preflight
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "${UV_PUBLISH_TOKEN:-}" ]; then
+        read -rsp "TestPyPI API token: " UV_PUBLISH_TOKEN
+        echo
+        export UV_PUBLISH_TOKEN
+    fi
     rm -rf dist
     uv build --all-packages
     uv publish --publish-url https://test.pypi.org/legacy/
