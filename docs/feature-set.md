@@ -18,7 +18,7 @@
 - **Embedder Protocol.** Callers supply any object satisfying the `Embedder` Protocol (`model`, `dimension`, `embed`). A `FastembedEmbedder` is bundled behind the `fastembed` extra.
 - **Embedder lock.** The embedding model name and dimension are written into the file on first open. Reopening with a mismatched embedder raises `GrimoireMismatch` rather than silently producing nonsense vectors.
 - **File inspection without opening.** `Grimoire.peek(path)` returns model, dimension, schema version, total entry count, and per-kind counts without loading sqlite-vec or requiring an embedder.
-- **CLI.** `grimoire {init, info, add, ingest, search, list, get, delete}` operates on a grimoire file. JSONL output everywhere makes it pipeable to `jq`.
+- **CLI.** `grimoire {init, info, add, ingest, search, list, get, delete}` operates on a grimoire mount directory (`--mount <dir>` / `GRIMOIRE_MOUNT`), which holds the SQLite file and the embedder model cache. JSONL output everywhere makes it pipeable to `jq`.
 
 ## What this does not do
 

@@ -47,8 +47,7 @@ Stage a local working directory. Everything below lives under `.grimoire/`, whic
 
 ```sh
 mkdir -p .grimoire
-export GRIMOIRE_DB=$PWD/.grimoire/memory.db
-export GRIMOIRE_CACHE=$PWD/.grimoire/models
+export GRIMOIRE_MOUNT=$PWD/.grimoire
 ```
 
 Confirm there's no grimoire there yet — also doubles as a check that your env vars resolved to the path you expected:
@@ -59,7 +58,7 @@ grimoire info
 
 You should see `Error: No grimoire at <full path>` (exit 1).
 
-Initialize the datastore. This creates the SQLite file, writes the embedder lock, and downloads the default embedding model (`BAAI/bge-small-en-v1.5`, ~30MB ONNX) into `GRIMOIRE_CACHE` — one deliberate setup step.
+Initialize the datastore. This creates `<mount>/grimoire.db`, writes the embedder lock, and downloads the default embedding model (`BAAI/bge-small-en-v1.5`, ~30MB ONNX) into `<mount>/models/` — one deliberate setup step.
 
 ```sh
 grimoire init
@@ -212,16 +211,15 @@ The `model` and `dimension` are written into the file on first open and locked. 
 
 ## CLI reference
 
-Every command needs a grimoire path. Commands that load the embedder also need a model cache directory. `info` is the only command that reads neither — it inspects the file via `Grimoire.peek`.
+Every command operates over a grimoire mount: a directory that holds the SQLite file (`<mount>/grimoire.db`) and the embedder model cache (`<mount>/models/`). `info` is the one command that doesn't load the embedder — it inspects the file via `Grimoire.peek` — but it still resolves the db path through the mount.
 
-Pass paths explicitly with flags, or set environment variables once for the shell:
+Pass it explicitly with `--mount <dir>`, or set the environment variable once for the shell:
 
 ```sh
-export GRIMOIRE_DB=$PWD/.grimoire/memory.db
-export GRIMOIRE_CACHE=$PWD/.grimoire/models
+export GRIMOIRE_MOUNT=$PWD/.grimoire
 ```
 
-Flags override env vars: `--db <path>` over `GRIMOIRE_DB`, `--cache-folder <path>` over `GRIMOIRE_CACHE`.
+The flag overrides the env var: `--mount <dir>` over `GRIMOIRE_MOUNT`.
 
 ### Commands
 
@@ -250,8 +248,8 @@ One object per line. `kind` and `content` are required; `payload` and `threshold
 ## How it works
 
 - **One file, one model.** The embedder's `model` name and `dimension` are written into the grimoire when it's first created. Reopening with a different embedder raises `GrimoireMismatch` rather than silently producing nonsense vectors. Use `grimoire info` (or `Grimoire.peek` from Python) to see what a file is bound to.
-- **Cache is reusable.** Multiple grimoires using the same embedding model can share one `GRIMOIRE_CACHE` directory. The model only downloads once.
-- **No defaults for paths.** The CLI does not invent a `--db` or `--cache-folder` location for you. Setting `GRIMOIRE_DB` / `GRIMOIRE_CACHE` to `$PWD`-anchored paths is the recommended way to keep them stable across `cd`.
+- **Mount is self-contained.** Each mount carries its own `grimoire.db` and its own `models/` cache. The library API is unchanged — it still takes a path to the SQLite file directly; the mount is a CLI convention.
+- **No default mount.** The CLI does not invent a `--mount` location for you. Setting `GRIMOIRE_MOUNT` to a `$PWD`-anchored path is the recommended way to keep it stable across `cd`.
 
 ## Documentation
 

@@ -9,6 +9,8 @@ RECOGNIZED_FIELDS = {"kind", "content", "payload", "threshold"}
 REQUIRED_FIELDS = {"kind", "content"}
 PROGRESS_EVERY = 1000
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
+DB_FILENAME = "grimoire.db"
+MODELS_DIRNAME = "models"
 
 app = typer.Typer(
     name="grimoire",
@@ -24,19 +26,11 @@ def _callback() -> None:
 
 @app.command()
 def init(
-    db: Annotated[
+    mount: Annotated[
         Path,
         typer.Option(
-            help="Path to the grimoire SQLite file.",
-            envvar="GRIMOIRE_DB",
-        ),
-    ],
-    cache_folder: Annotated[
-        Path,
-        typer.Option(
-            "--cache-folder",
-            help="Directory for the embedder's model cache.",
-            envvar="GRIMOIRE_CACHE",
+            help="Path to the grimoire mount directory.",
+            envvar="GRIMOIRE_MOUNT",
         ),
     ],
     model: Annotated[
@@ -51,14 +45,16 @@ def init(
     ] = None,
 ) -> None:
     """Create or verify a grimoire and warm its embedder. One-time setup."""
-    db.parent.mkdir(parents=True, exist_ok=True)
+    db = mount / DB_FILENAME
+    cache_folder = mount / MODELS_DIRNAME
+    mount.mkdir(parents=True, exist_ok=True)
     cache_folder.mkdir(parents=True, exist_ok=True)
 
     stats = Grimoire.peek(db)
     if stats is not None and model is not None and model != stats.model:
         _fail(
             f"file is locked to model {stats.model!r}; "
-            f"drop --model or use a different --db path"
+            f"drop --model or use a different --mount path"
         )
 
     model_name = stats.model if stats else (model or DEFAULT_MODEL)
@@ -90,19 +86,11 @@ def ingest(
             readable=True,
         ),
     ],
-    db: Annotated[
+    mount: Annotated[
         Path,
         typer.Option(
-            help="Path to the grimoire SQLite file.",
-            envvar="GRIMOIRE_DB",
-        ),
-    ],
-    cache_folder: Annotated[
-        Path,
-        typer.Option(
-            "--cache-folder",
-            help="Directory for the embedder's model cache.",
-            envvar="GRIMOIRE_CACHE",
+            help="Path to the grimoire mount directory.",
+            envvar="GRIMOIRE_MOUNT",
         ),
     ],
 ) -> None:
@@ -112,7 +100,7 @@ def ingest(
         typer.echo(f"No records to ingest from {file}")
         return
 
-    with _open_grimoire(db, cache_folder) as g:
+    with _open_grimoire(mount) as g:
         for i, record in enumerate(records, 1):
             g.add(
                 kind=record["kind"],
@@ -123,26 +111,17 @@ def ingest(
             if i % PROGRESS_EVERY == 0:
                 typer.echo(f"  ingested {i}...", err=True)
 
-    typer.echo(f"Ingested {len(records)} records into {db}")
+    typer.echo(f"Ingested {len(records)} records into {mount / DB_FILENAME}")
 
 
 @app.command()
 def search(
     query: Annotated[str, typer.Argument(help="Query text to embed and search for.")],
-    db: Annotated[
+    mount: Annotated[
         Path,
         typer.Option(
-            help="Path to the grimoire SQLite file.",
-            envvar="GRIMOIRE_DB",
-            exists=True,
-        ),
-    ],
-    cache_folder: Annotated[
-        Path,
-        typer.Option(
-            "--cache-folder",
-            help="Directory for the embedder's model cache.",
-            envvar="GRIMOIRE_CACHE",
+            help="Path to the grimoire mount directory.",
+            envvar="GRIMOIRE_MOUNT",
         ),
     ],
     kind: Annotated[
@@ -158,7 +137,7 @@ def search(
     ] = False,
 ) -> None:
     """Run a semantic search against a grimoire."""
-    with _open_grimoire(db, cache_folder) as g:
+    with _open_grimoire(mount) as g:
         for entry in g.search(
             query, kind=kind, k=k, dynamic_threshold=dynamic_threshold
         ):
@@ -168,19 +147,11 @@ def search(
 @app.command()
 def add(
     content: Annotated[str, typer.Argument(help="Content text for the new entry.")],
-    db: Annotated[
+    mount: Annotated[
         Path,
         typer.Option(
-            help="Path to the grimoire SQLite file.",
-            envvar="GRIMOIRE_DB",
-        ),
-    ],
-    cache_folder: Annotated[
-        Path,
-        typer.Option(
-            "--cache-folder",
-            help="Directory for the embedder's model cache.",
-            envvar="GRIMOIRE_CACHE",
+            help="Path to the grimoire mount directory.",
+            envvar="GRIMOIRE_MOUNT",
         ),
     ],
     kind: Annotated[str, typer.Option(help="Kind label for the entry.")] = "note",
@@ -203,7 +174,7 @@ def add(
         if not isinstance(parsed, dict):
             _fail("--payload must be a JSON object")
         payload_obj = parsed
-    with _open_grimoire(db, cache_folder) as g:
+    with _open_grimoire(mount) as g:
         entry = g.add(
             kind=kind,
             content=content,
@@ -215,34 +186,25 @@ def add(
 
 @app.command()
 def info(
-    db: Annotated[
+    mount: Annotated[
         Path,
         typer.Option(
-            help="Path to the grimoire SQLite file.",
-            envvar="GRIMOIRE_DB",
+            help="Path to the grimoire mount directory.",
+            envvar="GRIMOIRE_MOUNT",
         ),
     ],
 ) -> None:
     """Show metadata and counts for a grimoire file."""
-    _emit_info(db)
+    _emit_info(mount / DB_FILENAME)
 
 
 @app.command(name="list")
 def list_entries(
-    db: Annotated[
+    mount: Annotated[
         Path,
         typer.Option(
-            help="Path to the grimoire SQLite file.",
-            envvar="GRIMOIRE_DB",
-            exists=True,
-        ),
-    ],
-    cache_folder: Annotated[
-        Path,
-        typer.Option(
-            "--cache-folder",
-            help="Directory for the embedder's model cache.",
-            envvar="GRIMOIRE_CACHE",
+            help="Path to the grimoire mount directory.",
+            envvar="GRIMOIRE_MOUNT",
         ),
     ],
     kind: Annotated[
@@ -256,7 +218,7 @@ def list_entries(
     ] = None,
 ) -> None:
     """Paginate entries in chronological order (by id)."""
-    with _open_grimoire(db, cache_folder) as g:
+    with _open_grimoire(mount) as g:
         for entry in g.list(kind=kind, limit=limit, after_id=after_id):
             _print_entry(entry)
 
@@ -264,25 +226,16 @@ def list_entries(
 @app.command()
 def get(
     entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
-    db: Annotated[
+    mount: Annotated[
         Path,
         typer.Option(
-            help="Path to the grimoire SQLite file.",
-            envvar="GRIMOIRE_DB",
-            exists=True,
-        ),
-    ],
-    cache_folder: Annotated[
-        Path,
-        typer.Option(
-            "--cache-folder",
-            help="Directory for the embedder's model cache.",
-            envvar="GRIMOIRE_CACHE",
+            help="Path to the grimoire mount directory.",
+            envvar="GRIMOIRE_MOUNT",
         ),
     ],
 ) -> None:
     """Fetch a single entry by id."""
-    with _open_grimoire(db, cache_folder) as g:
+    with _open_grimoire(mount) as g:
         entry = g.get(entry_id)
         if entry is None:
             _fail(f"No entry with id {entry_id!r}")
@@ -292,35 +245,28 @@ def get(
 @app.command()
 def delete(
     entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
-    db: Annotated[
+    mount: Annotated[
         Path,
         typer.Option(
-            help="Path to the grimoire SQLite file.",
-            envvar="GRIMOIRE_DB",
-            exists=True,
-        ),
-    ],
-    cache_folder: Annotated[
-        Path,
-        typer.Option(
-            "--cache-folder",
-            help="Directory for the embedder's model cache.",
-            envvar="GRIMOIRE_CACHE",
+            help="Path to the grimoire mount directory.",
+            envvar="GRIMOIRE_MOUNT",
         ),
     ],
 ) -> None:
     """Delete an entry by id."""
-    with _open_grimoire(db, cache_folder) as g:
+    with _open_grimoire(mount) as g:
         if not g.delete(entry_id):
             _fail(f"No entry with id {entry_id!r}")
     typer.echo(f"Deleted {entry_id}")
 
 
-def _open_grimoire(db: Path, cache_folder: Path) -> Grimoire:
-    """Open an existing grimoire, auto-detecting the embedding model from the file.
+def _open_grimoire(mount: Path) -> Grimoire:
+    """Open the grimoire under `mount`, auto-detecting the model from the file.
 
     Surfaces `GrimoireNotFound` as a friendly "run grimoire init first" error.
     """
+    db = mount / DB_FILENAME
+    cache_folder = mount / MODELS_DIRNAME
     cache_folder.mkdir(parents=True, exist_ok=True)
     stats = Grimoire.peek(db)
     if stats is None:
