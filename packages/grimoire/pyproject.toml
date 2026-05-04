@@ -1,8 +1,8 @@
 [project]
 name = "4lt7ab-grimoire"
-version = "0.0.1"
+version = "0.0.2"
 description = "SQLite + sqlite-vec semantic search datastore"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = [
     "python-ulid>=3.0",
     "sqlite-vec>=0.1.6",

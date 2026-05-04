@@ -13,6 +13,25 @@ Aimed at developers who want search-indexed memory without spinning up a vector 
 
 ## Install
 
+### CLI
+
+```sh
+uv tool install '4lt7ab-grimoire-cli[fastembed]'
+# or: pipx install '4lt7ab-grimoire-cli[fastembed]'
+```
+
+Both install into an isolated venv — clean uninstall, no impact on your system Python.
+
+### As a dependency
+
+```sh
+uv add '4lt7ab-grimoire[fastembed]'
+```
+
+The `fastembed` extra pulls the bundled `FastembedEmbedder` (ONNX-based, no service required). To bring your own embedder instead, drop the extra and implement the `Embedder` Protocol — see [Custom embedders](#custom-embedders).
+
+### From source
+
 Requires [`asdf`](https://asdf-vm.com/). Python, `uv`, and `just` are pinned via `.tool-versions`.
 
 ```sh
@@ -20,15 +39,9 @@ asdf install
 uv sync --extra fastembed
 ```
 
-The `fastembed` extra pulls the bundled `FastembedEmbedder` (ONNX-based, no service required). To bring your own embedder instead, drop the extra and implement the `Embedder` Protocol — see [Custom embedders](#custom-embedders).
-
 ## Quickstart
 
-Activate the venv so `grimoire` is on your `PATH`:
-
-```sh
-source .venv/bin/activate
-```
+Once installed, the `grimoire` command is on your `PATH`.
 
 Stage a local working directory. Everything below lives under `.grimoire/`, which is already git-ignored.
 
@@ -105,7 +118,18 @@ Reset everything:
 rm -rf .grimoire
 ```
 
+Uninstall:
+
+```sh
+uv tool uninstall 4lt7ab-grimoire-cli
+# or: pipx uninstall 4lt7ab-grimoire-cli
+```
+
 ## Library
+
+```sh
+uv add '4lt7ab-grimoire[fastembed]'
+```
 
 A grimoire is a single SQLite file. `Grimoire.open(path, embedder=...)` is idempotent — it creates the file if missing, opens it if present.
 
