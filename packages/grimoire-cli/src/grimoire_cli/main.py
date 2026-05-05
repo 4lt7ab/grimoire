@@ -340,10 +340,7 @@ def _print_entry(entry: Entry) -> None:
         "content": entry.content,
     }
     if entry.payload is not None:
-        try:
-            record["payload"] = json.loads(entry.payload)
-        except json.JSONDecodeError:
-            record["payload"] = entry.payload
+        record["payload"] = entry.payload
     if entry.threshold is not None:
         record["threshold"] = entry.threshold
     if entry.distance is not None:

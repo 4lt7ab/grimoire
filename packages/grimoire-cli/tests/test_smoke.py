@@ -9,9 +9,11 @@ runner = CliRunner()
 
 
 @pytest.fixture(scope="session")
-def _shared_models_cache(tmp_path_factory):
-    """A session-shared cache so the embedder model downloads once across tests."""
-    return tmp_path_factory.mktemp("grimoire-models")
+def _shared_models_cache():
+    """A repo-local cache so the embedder model downloads once across runs."""
+    cache = Path(__file__).resolve().parents[3] / ".local" / "grimoire-test-models"
+    cache.mkdir(parents=True, exist_ok=True)
+    return cache
 
 
 @pytest.fixture(autouse=True)
@@ -38,13 +40,21 @@ def _init(mount: Path) -> None:
 def _last_json_line(output: str) -> dict:
     """Return the last `{...}` JSON object in CLI output.
 
-    fastembed's first-time model download prints progress bars to the captured
-    stream; the JSON we emit is always the last single-line object in stdout.
+    fastembed's first-time model download prints tqdm progress bars whose final
+    update lacks a trailing newline, so a subsequent `typer.echo(json...)` can
+    end up glued to the tail of a `Fetching ...` line. Tolerate that by parsing
+    from the rightmost `{` of any line that ends in `}`.
     """
     for line in reversed(output.replace("\r", "\n").splitlines()):
         line = line.strip()
-        if line.startswith("{") and line.endswith("}"):
-            return json.loads(line)
+        if not line.endswith("}"):
+            continue
+        i = 0
+        while (start := line.find("{", i)) != -1:
+            try:
+                return json.loads(line[start:])
+            except json.JSONDecodeError:
+                i = start + 1
     raise ValueError(f"No JSON object found in output: {output!r}")
 
 

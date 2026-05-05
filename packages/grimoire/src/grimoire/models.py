@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -6,7 +7,7 @@ class Entry:
     id: str
     kind: str
     content: str
-    payload: str | None = None
+    payload: dict[str, Any] | None = None
     threshold: float | None = None
     distance: float | None = None
 

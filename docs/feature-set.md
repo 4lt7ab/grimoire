@@ -14,7 +14,7 @@
 - **Kind partitioning.** Every entry has a `kind` label. Reads (`search`, `list`) accept an optional `kind=` filter; the vector index is partitioned on `kind` so filtered search stays cheap.
 - **Per-record similarity thresholds.** Records can carry a `threshold`. `search(..., dynamic_threshold=True)` drops results that don't clear each record's own gate — useful for heuristic-driven filtering where different records demand different match tightness.
 - **ULID identifiers.** Entries are addressed by ULID, so chronological order is implicit in the id (`list` paginates via `after_id`).
-- **Optional payloads.** Each entry carries an opaque JSON payload alongside its content for caller-specific metadata.
+- **Optional payloads.** Each entry carries an optional JSON-object payload alongside its content for caller-specific metadata. Passed in and returned as a `dict` — callers can pipe it straight into a Pydantic model or dataclass without re-parsing.
 - **Embedder Protocol.** Callers supply any object satisfying the `Embedder` Protocol (`model`, `dimension`, `embed`). A `FastembedEmbedder` is bundled behind the `fastembed` extra.
 - **Embedder lock.** The embedding model name and dimension are written into the file on first open. Reopening with a mismatched embedder raises `GrimoireMismatch` rather than silently producing nonsense vectors.
 - **File inspection without opening.** `Grimoire.peek(path)` returns model, dimension, schema version, total entry count, and per-kind counts without loading sqlite-vec or requiring an embedder.

@@ -127,7 +127,7 @@ class Grimoire:
             id=entry_id,
             kind=kind,
             content=content,
-            payload=payload_json,
+            payload=payload,
             threshold=threshold,
         )
 
@@ -197,7 +197,7 @@ class Grimoire:
                 id=r[0],
                 kind=r[1],
                 content=r[2],
-                payload=r[3],
+                payload=json.loads(r[3]) if r[3] is not None else None,
                 threshold=r[4],
                 distance=r[5],
             )
@@ -237,6 +237,6 @@ def _row_to_entry(row: tuple) -> Entry:
         id=row[0],
         kind=row[1],
         content=row[2],
-        payload=row[3],
+        payload=json.loads(row[3]) if row[3] is not None else None,
         threshold=row[4],
     )
