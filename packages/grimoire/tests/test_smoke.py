@@ -523,3 +523,93 @@ def test_peek_does_not_require_embedder_or_extension(tmp_path):
     assert stats is not None
     assert stats.entry_count == 0
     assert stats.kinds == {}
+
+
+# ---------- keywords ----------
+
+
+def test_add_round_trips_keywords(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        added = g.add(kind="note", content="hello", keywords=["alpha", "beta"])
+        assert added.keywords == ["alpha", "beta"]
+        fetched = g.get(added.id)
+        assert fetched is not None
+        assert fetched.keywords == ["alpha", "beta"]
+
+
+def test_add_keywords_default_to_none(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        added = g.add(kind="note", content="hello")
+        assert added.keywords is None
+        fetched = g.get(added.id)
+        assert fetched is not None
+        assert fetched.keywords is None
+
+
+def test_add_empty_keywords_list_stored_as_list(tmp_path):
+    # An explicit empty list is distinct from None — preserve caller intent.
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        added = g.add(kind="note", content="hello", keywords=[])
+        fetched = g.get(added.id)
+        assert fetched is not None
+        assert fetched.keywords == []
+
+
+def test_keyword_search_finds_entry_by_keyword_alone(tmp_path):
+    # The token "phoenix" appears only in keywords, not in content.
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        g.add(kind="note", content="A bird sings at dawn", keywords=["phoenix"])
+        g.add(kind="note", content="Dragons fly at midnight")
+        results = g.keyword_search("phoenix")
+        assert len(results) == 1
+        assert results[0].keywords == ["phoenix"]
+
+
+def test_keyword_search_keyword_match_outranks_content_match(tmp_path):
+    # Two entries: one matches the query via keywords, the other via content.
+    # With 5x weighting on the keywords column, the keyword match wins.
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        content_match = g.add(
+            kind="note",
+            content="dawn rises on a quiet field",
+            keywords=["morning"],
+        )
+        keyword_match = g.add(
+            kind="note",
+            content="A solar phoenix reborn from ashes",
+            keywords=["dawn"],
+        )
+        results = g.keyword_search("dawn")
+        assert {r.id for r in results} == {content_match.id, keyword_match.id}
+        # FTS5 bm25() returns negative values; smaller (more negative) is better.
+        assert results[0].id == keyword_match.id
+        assert results[0].rank < results[1].rank
+
+
+def test_keyword_search_column_scoped_query_targets_keywords(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        in_content = g.add(kind="note", content="phoenix in the sky")
+        in_keywords = g.add(kind="note", content="A bird sings", keywords=["phoenix"])
+        results = g.keyword_search("keywords:phoenix")
+        assert {r.id for r in results} == {in_keywords.id}
+        assert in_content.id not in {r.id for r in results}
+
+
+def test_delete_removes_keyword_index_entry_too(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        added = g.add(kind="note", content="A bird sings", keywords=["phoenix"])
+        assert g.delete(added.id) is True
+        assert g.keyword_search("phoenix") == []
+
+
+def test_keywords_returned_by_list_and_search(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        g.add(kind="note", content="hello", keywords=["alpha"])
+        listed = g.list()
+        assert listed[0].keywords == ["alpha"]
+        # Also via vector_search
+        v_results = g.vector_search("hello", k=1)
+        assert v_results[0].keywords == ["alpha"]
+        # And via keyword_search
+        k_results = g.keyword_search("alpha")
+        assert k_results[0].keywords == ["alpha"]

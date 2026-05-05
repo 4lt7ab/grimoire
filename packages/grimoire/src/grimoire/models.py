@@ -12,6 +12,7 @@ class Entry:
     content: str
     payload: dict[str, Any] | None = None
     threshold: float | None = None
+    keywords: list[str] | None = None
     distance: float | None = None
     rank: float | None = None
 

@@ -568,3 +568,88 @@ def test_search_dynamic_threshold_filters_results(tmp_path, _shared_models_cache
     gated_lines = [line for line in gated.output.splitlines() if line.strip()]
     assert len(gated_lines) == 1
     assert json.loads(gated_lines[0])["content"] == "the moon is full"
+
+
+# ---------- keywords ----------
+
+
+def test_add_with_repeatable_keyword_flag(tmp_path, _shared_models_cache):
+    pytest.importorskip("fastembed")
+    mount = _new_mount(tmp_path, _shared_models_cache)
+    _init(mount)
+    result = runner.invoke(
+        app,
+        [
+            "add",
+            "hello world",
+            "--mount",
+            str(mount),
+            "--keyword",
+            "alpha",
+            "--keyword",
+            "beta",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    parsed = _last_json_line(result.output)
+    assert parsed["keywords"] == ["alpha", "beta"]
+
+
+def test_add_without_keyword_flag_omits_keywords_in_output(
+    tmp_path, _shared_models_cache
+):
+    pytest.importorskip("fastembed")
+    mount = _new_mount(tmp_path, _shared_models_cache)
+    _init(mount)
+    result = runner.invoke(app, ["add", "hello world", "--mount", str(mount)])
+    assert result.exit_code == 0, result.output
+    parsed = _last_json_line(result.output)
+    assert "keywords" not in parsed
+
+
+def test_ingest_carries_keywords_through(tmp_path, _shared_models_cache):
+    pytest.importorskip("fastembed")
+    mount = _new_mount(tmp_path, _shared_models_cache)
+    _init(mount)
+    data = tmp_path / "records.jsonl"
+    data.write_text(
+        json.dumps(
+            {
+                "kind": "spell",
+                "content": "Coaxes a locked door to forget its keeper",
+                "keywords": ["lockpick", "skeleton-key"],
+            }
+        )
+        + "\n"
+    )
+    assert (
+        runner.invoke(app, ["ingest", str(data), "--mount", str(mount)]).exit_code == 0
+    )
+
+    list_result = runner.invoke(app, ["list", "--mount", str(mount)])
+    assert list_result.exit_code == 0
+    parsed = json.loads(list_result.output.strip())
+    assert parsed["keywords"] == ["lockpick", "skeleton-key"]
+
+
+def test_keyword_search_finds_via_keywords_field(tmp_path, _shared_models_cache):
+    pytest.importorskip("fastembed")
+    mount = _new_mount(tmp_path, _shared_models_cache)
+    _init(mount)
+    data = tmp_path / "records.jsonl"
+    data.write_text(
+        json.dumps(
+            {
+                "kind": "spell",
+                "content": "Coaxes a locked door to forget its keeper",
+                "keywords": ["lockpick"],
+            }
+        )
+        + "\n"
+    )
+    runner.invoke(app, ["ingest", str(data), "--mount", str(mount)])
+    result = runner.invoke(app, ["keyword-search", "lockpick", "--mount", str(mount)])
+    assert result.exit_code == 0
+    parsed = json.loads(result.output.strip())
+    assert parsed["content"] == "Coaxes a locked door to forget its keeper"
+    assert parsed["keywords"] == ["lockpick"]

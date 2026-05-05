@@ -73,6 +73,12 @@ grimoire add "potions bubble in the cauldron"
 grimoire add "knights joust at dawn" --kind tale
 ```
 
+Attach explicit keywords with repeatable `--keyword` — useful for terms a query might use that don't appear in the prose:
+
+```sh
+grimoire add "the silver crown rests on velvet" --kind tale --keyword regalia --keyword treasure
+```
+
 Inspect the file — model, dimension, entry count, kinds:
 
 ```sh
@@ -93,13 +99,19 @@ grimoire keyword-search "moon"
 grimoire keyword-search "knights" --kind tale
 ```
 
+Or by a keyword attached above — `treasure` isn't in any prose, but the silver crown was tagged with it:
+
+```sh
+grimoire keyword-search "treasure" --kind tale
+```
+
 Bulk-load from JSONL. Each row carries a `payload` — the structured object the description is pointing at:
 
 ```sh
 cat > .grimoire/data.jsonl <<'EOF'
-{"kind": "spell", "content": "Summons a sphere of silver light that wards undead and warms cold hands", "payload": {"id": "lumara", "school": "abjuration", "tier": 2}}
-{"kind": "spell", "content": "Coaxes a locked door, chest, or cage to forget its keeper", "payload": {"id": "skeleton-key", "school": "transmutation", "tier": 1}}
-{"kind": "spell", "content": "Wraps the caster in a curtain of silence so footfalls and whispers vanish", "payload": {"id": "hush", "school": "illusion", "tier": 1}}
+{"kind": "spell", "content": "Summons a sphere of silver light that wards undead and warms cold hands", "payload": {"id": "lumara", "school": "abjuration", "tier": 2}, "keywords": ["lumara", "light"]}
+{"kind": "spell", "content": "Coaxes a locked door, chest, or cage to forget its keeper", "payload": {"id": "skeleton-key", "school": "transmutation", "tier": 1}, "keywords": ["skeleton-key", "lockpick"]}
+{"kind": "spell", "content": "Wraps the caster in a curtain of silence so footfalls and whispers vanish", "payload": {"id": "hush", "school": "illusion", "tier": 1}, "keywords": ["hush", "stealth"]}
 EOF
 grimoire ingest .grimoire/data.jsonl
 ```
@@ -116,6 +128,12 @@ Or find spells whose description literally mentions "door":
 
 ```sh
 grimoire keyword-search "door" --kind spell
+```
+
+Or by an explicit keyword that doesn't appear in the prose — `lockpick` is in the spell's `keywords` list, not its description:
+
+```sh
+grimoire keyword-search "lockpick" --kind spell
 ```
 
 List entries chronologically (results are JSON, one per line):
@@ -153,6 +171,8 @@ A grimoire is a single SQLite file. `Grimoire.init(path, embedder=...)` is the o
 
 A record has two parts. `content` is the text grimoire embeds and searches against — the description of the thing. `payload` is the optional structured object that description resolves to — the thing itself, the object you actually wanted to find with the query. You search by meaning and get back what the meaning was pointing at.
 
+Records can also carry `keywords` — explicit search terms (aliases, IDs, alternate names) that boost recall in `keyword_search` beyond what the prose alone would match.
+
 ```python
 from grimoire import Grimoire
 from grimoire.embedders import FastembedEmbedder
@@ -164,6 +184,7 @@ with Grimoire.init(".grimoire/memory.db", embedder=embedder) as g:
         kind="creature",
         content="A solar phoenix reborn from its own ashes at dawn",
         payload={"id": "phoenix-001", "habitat": "volcano"},
+        keywords=["phoenix", "fire-bird"],
     )
     g.add(
         kind="creature",
@@ -201,11 +222,11 @@ if stats:
 - `Grimoire.init(path, *, embedder)` — create or open the file, validate the embedder lock, exercise the embedder once. The deliberate setup step.
 - `Grimoire.open(path, *, embedder)` — open an existing grimoire. Raises `GrimoireNotFound` if the file is missing or not a grimoire.
 - `Grimoire.peek(path)` — return `Stats` (or `None` if missing/non-grimoire) without loading the embedder.
-- `add(*, kind, content, payload=None, threshold=None)` — insert.
+- `add(*, kind, content, payload=None, threshold=None, keywords=None)` — insert. `keywords` is an optional list of explicit search terms; they're indexed in FTS5 alongside `content` and weighted 5× higher in `keyword_search` ranking.
 - `get(entry_id)` — fetch by id, or `None`.
 - `list(*, kind=None, limit=100, after_id=None)` — chronological pagination.
 - `vector_search(query, *, kind=None, k=10, dynamic_threshold=False, created_after=None, created_before=None)` — vector search ranked by embedder distance; `dynamic_threshold` filters results by each record's stored similarity gate.
-- `keyword_search(query, *, kind=None, k=10, created_after=None, created_before=None)` — keyword search via SQLite FTS5, ranked by BM25. The query string accepts FTS5 syntax (phrases, prefix, boolean operators).
+- `keyword_search(query, *, kind=None, k=10, created_after=None, created_before=None)` — keyword search via SQLite FTS5, ranked by BM25 against `content` and `keywords` (keywords weighted 5× higher). The query string accepts FTS5 syntax (phrases, prefix, boolean operators, column scoping like `keywords:phoenix`).
 - `delete(entry_id)` — returns `True` if removed, `False` if absent.
 - `close()` — also handled by the context manager.
 
@@ -244,7 +265,7 @@ The flag overrides the env var: `--mount <dir>` over `GRIMOIRE_MOUNT`.
 
 ```sh
 grimoire init
-grimoire add "<content>" [--kind K] [--payload '{...}'] [--threshold N]
+grimoire add "<content>" [--kind K] [--payload '{...}'] [--threshold N] [--keyword K ...]
 grimoire ingest <jsonl-file>
 grimoire vector-search "<query>" [--k N] [--kind K] [--dynamic-threshold]
 grimoire keyword-search "<query>" [--k N] [--kind K]
@@ -258,11 +279,11 @@ All read commands print one JSON object per line — pipe to `jq` for filtering.
 
 ### JSONL format for `ingest`
 
-One object per line. `kind` and `content` are required; `payload` and `threshold` are optional. `content` is the text that gets embedded and searched; `payload` is the structured object returned alongside a match — the thing the content describes.
+One object per line. `kind` and `content` are required; `payload`, `threshold`, and `keywords` are optional. `content` is the text that gets embedded and searched; `payload` is the structured object returned alongside a match — the thing the content describes; `keywords` is a list of explicit search terms that augment recall in `keyword_search`.
 
 ```jsonl
-{"kind": "creature", "content": "A solar phoenix reborn from its own ashes", "payload": {"id": "phoenix-001", "habitat": "volcano"}}
-{"kind": "creature", "content": "An ancient wyrm hoarding obsidian in the Ash Peaks", "payload": {"id": "wyrm-014", "habitat": "mountain"}, "threshold": 0.5}
+{"kind": "creature", "content": "A solar phoenix reborn from its own ashes", "payload": {"id": "phoenix-001", "habitat": "volcano"}, "keywords": ["phoenix", "fire-bird"]}
+{"kind": "creature", "content": "An ancient wyrm hoarding obsidian in the Ash Peaks", "payload": {"id": "wyrm-014", "habitat": "mountain"}, "threshold": 0.5, "keywords": ["wyrm", "dragon"]}
 ```
 
 ## How it works

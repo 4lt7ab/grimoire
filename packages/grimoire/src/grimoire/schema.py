@@ -25,6 +25,7 @@ def create(conn: sqlite3.Connection, embedder: Embedder) -> None:
             id         TEXT PRIMARY KEY,
             kind       TEXT NOT NULL,
             content    TEXT NOT NULL,
+            keywords   TEXT,
             payload    TEXT,
             threshold  REAL
         );
@@ -36,6 +37,7 @@ def create(conn: sqlite3.Connection, embedder: Embedder) -> None:
         );
         CREATE VIRTUAL TABLE entries_fts USING fts5(
             content,
+            keywords,
             entry_id UNINDEXED
         );
         """

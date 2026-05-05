@@ -21,7 +21,7 @@ dev = [
 
 [[package]]
 name = "4lt7ab-grimoire"
-version = "0.0.2"
+version = "0.0.3"
 source = { editable = "packages/grimoire" }
 dependencies = [
     { name = "python-ulid" },
@@ -47,7 +47,7 @@ provides-extras = ["fastembed"]
 
 [[package]]
 name = "4lt7ab-grimoire-cli"
-version = "0.0.2"
+version = "0.0.3"
 source = { editable = "packages/grimoire-cli" }
 dependencies = [
     { name = "4lt7ab-grimoire" },

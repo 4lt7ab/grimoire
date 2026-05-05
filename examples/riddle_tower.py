@@ -113,7 +113,7 @@ def play(g: Grimoire) -> None:
                 print("You retreat down the stairs. The tower waits.")
                 return
 
-            matches = g.search(
+            matches = g.vector_search(
                 guess, kind=f"floor_{floor}", k=3, dynamic_threshold=True
             )
             if matches:

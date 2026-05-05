@@ -17,6 +17,11 @@ from grimoire.schema import create, validate
 
 _WARMUP_PROBE = " "
 
+# BM25 column weights for keyword_search: (content, keywords).
+# Keyword matches outrank content matches by this ratio. Tunable here.
+KEYWORD_BM25_WEIGHTS = (1.0, 5.0)
+_BM25_RANK = f"bm25(entries_fts, {KEYWORD_BM25_WEIGHTS[0]}, {KEYWORD_BM25_WEIGHTS[1]})"
+
 
 class Grimoire:
     """A semantically-indexed datastore backed by one SQLite file."""
@@ -106,26 +111,30 @@ class Grimoire:
         content: str,
         payload: dict[str, Any] | None = None,
         threshold: float | None = None,
+        keywords: list[str] | None = None,
     ) -> Entry:
         entry_id = str(ULID())
         vector = self._embedder.embed(content)
         payload_json = json.dumps(payload) if payload is not None else None
+        keywords_json = json.dumps(keywords) if keywords is not None else None
+        keywords_text = " ".join(keywords) if keywords else ""
 
         with self._conn:
             self._conn.execute(
                 """
-                INSERT INTO entries (id, kind, content, payload, threshold)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO entries (id, kind, content, keywords, payload, threshold)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (entry_id, kind, content, payload_json, threshold),
+                (entry_id, kind, content, keywords_json, payload_json, threshold),
             )
             self._conn.execute(
                 "INSERT INTO vectors (entry_id, kind, embedding) VALUES (?, ?, ?)",
                 (entry_id, kind, _pack(vector)),
             )
             self._conn.execute(
-                "INSERT INTO entries_fts (content, entry_id) VALUES (?, ?)",
-                (content, entry_id),
+                "INSERT INTO entries_fts (content, keywords, entry_id) "
+                "VALUES (?, ?, ?)",
+                (content, keywords_text, entry_id),
             )
 
         return Entry(
@@ -134,11 +143,13 @@ class Grimoire:
             content=content,
             payload=payload,
             threshold=threshold,
+            keywords=keywords,
         )
 
     def get(self, entry_id: str) -> Entry | None:
         row = self._conn.execute(
-            "SELECT id, kind, content, payload, threshold FROM entries WHERE id = ?",
+            "SELECT id, kind, content, keywords, payload, threshold "
+            "FROM entries WHERE id = ?",
             (entry_id,),
         ).fetchone()
         return _row_to_entry(row) if row is not None else None
@@ -152,7 +163,7 @@ class Grimoire:
         created_after: datetime | None = None,
         created_before: datetime | None = None,
     ) -> list[Entry]:
-        sql = "SELECT id, kind, content, payload, threshold FROM entries"
+        sql = "SELECT id, kind, content, keywords, payload, threshold FROM entries"
         params: list[Any] = []
         clauses: list[str] = []
         if kind is not None:
@@ -199,7 +210,8 @@ class Grimoire:
         vector = self._embedder.embed(query)
 
         sql = (
-            "SELECT e.id, e.kind, e.content, e.payload, e.threshold, v.distance "
+            "SELECT e.id, e.kind, e.content, e.keywords, e.payload, e.threshold, "
+            "v.distance "
             "FROM vectors v JOIN entries e ON e.id = v.entry_id "
             "WHERE v.embedding MATCH ? AND k = ?"
         )
@@ -221,9 +233,10 @@ class Grimoire:
                 id=r[0],
                 kind=r[1],
                 content=r[2],
-                payload=json.loads(r[3]) if r[3] is not None else None,
-                threshold=r[4],
-                distance=r[5],
+                keywords=json.loads(r[3]) if r[3] is not None else None,
+                payload=json.loads(r[4]) if r[4] is not None else None,
+                threshold=r[5],
+                distance=r[6],
             )
             for r in rows
         ]
@@ -243,7 +256,8 @@ class Grimoire:
         created_before: datetime | None = None,
     ) -> list[Entry]:
         sql = (
-            "SELECT e.id, e.kind, e.content, e.payload, e.threshold, entries_fts.rank "
+            f"SELECT e.id, e.kind, e.content, e.keywords, e.payload, e.threshold, "
+            f"{_BM25_RANK} AS rank "
             "FROM entries_fts JOIN entries e ON e.id = entries_fts.entry_id "
             "WHERE entries_fts MATCH ?"
         )
@@ -257,7 +271,7 @@ class Grimoire:
         if created_before is not None:
             sql += " AND e.id < ?"
             params.append(_ulid_floor(created_before))
-        sql += " ORDER BY entries_fts.rank LIMIT ?"
+        sql += f" ORDER BY {_BM25_RANK} LIMIT ?"
         params.append(k)
 
         rows = self._conn.execute(sql, params).fetchall()
@@ -266,9 +280,10 @@ class Grimoire:
                 id=r[0],
                 kind=r[1],
                 content=r[2],
-                payload=json.loads(r[3]) if r[3] is not None else None,
-                threshold=r[4],
-                rank=r[5],
+                keywords=json.loads(r[3]) if r[3] is not None else None,
+                payload=json.loads(r[4]) if r[4] is not None else None,
+                threshold=r[5],
+                rank=r[6],
             )
             for r in rows
         ]
@@ -305,6 +320,7 @@ def _row_to_entry(row: tuple) -> Entry:
         id=row[0],
         kind=row[1],
         content=row[2],
-        payload=json.loads(row[3]) if row[3] is not None else None,
-        threshold=row[4],
+        keywords=json.loads(row[3]) if row[3] is not None else None,
+        payload=json.loads(row[4]) if row[4] is not None else None,
+        threshold=row[5],
     )

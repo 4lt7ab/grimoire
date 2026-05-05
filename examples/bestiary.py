@@ -23,7 +23,7 @@ def cmd_add(g: Grimoire, args: argparse.Namespace) -> None:
 
 
 def cmd_find(g: Grimoire, args: argparse.Namespace) -> None:
-    results = g.search(args.query, kind=args.kind, k=args.k)
+    results = g.vector_search(args.query, kind=args.kind, k=args.k)
     if not results:
         print("(no matching creatures)")
         return

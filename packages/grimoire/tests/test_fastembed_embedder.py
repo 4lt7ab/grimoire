@@ -41,7 +41,7 @@ def test_round_trip_through_grimoire(tmp_path, cache_dir):
         g.add(kind="note", content="the moon is full tonight")
         g.add(kind="note", content="dragons fly at midnight")
 
-        results = g.search("the moon is full tonight", k=2)
+        results = g.vector_search("the moon is full tonight", k=2)
         assert len(results) == 2
         assert results[0].content == "the moon is full tonight"
         assert results[0].distance < results[1].distance

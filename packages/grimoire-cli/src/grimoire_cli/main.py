@@ -6,7 +6,7 @@ from typing import Annotated, NoReturn
 import typer
 from grimoire import Entry, Grimoire, GrimoireError, GrimoireNotFound
 
-RECOGNIZED_FIELDS = {"kind", "content", "payload", "threshold"}
+RECOGNIZED_FIELDS = {"kind", "content", "payload", "threshold", "keywords"}
 REQUIRED_FIELDS = {"kind", "content"}
 PROGRESS_EVERY = 1000
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
@@ -124,6 +124,7 @@ def ingest(
                 content=record["content"],
                 payload=record.get("payload"),
                 threshold=record.get("threshold"),
+                keywords=record.get("keywords"),
             )
             if i % PROGRESS_EVERY == 0:
                 typer.echo(f"  ingested {i}...", err=True)
@@ -252,6 +253,16 @@ def add(
         float | None,
         typer.Option(help="Optional per-entry similarity threshold."),
     ] = None,
+    keyword: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--keyword",
+            help=(
+                "Add an explicit search keyword to boost recall in keyword-search. "
+                "Repeatable: --keyword foo --keyword bar."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Add a single record to a grimoire."""
     payload_obj: dict | None = None
@@ -269,6 +280,7 @@ def add(
             content=content,
             payload=payload_obj,
             threshold=threshold,
+            keywords=keyword or None,
         )
     _print_entry(entry)
 
@@ -450,6 +462,8 @@ def _print_entry(entry: Entry) -> None:
         "kind": entry.kind,
         "content": entry.content,
     }
+    if entry.keywords is not None:
+        record["keywords"] = entry.keywords
     if entry.payload is not None:
         record["payload"] = entry.payload
     if entry.threshold is not None:
