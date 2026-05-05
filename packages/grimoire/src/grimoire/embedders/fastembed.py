@@ -47,3 +47,6 @@ class FastembedEmbedder:
     def embed(self, text: str) -> list[float]:
         [vector] = list(self._model.embed([text]))
         return vector.tolist()
+
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        return [v.tolist() for v in self._model.embed(texts)]

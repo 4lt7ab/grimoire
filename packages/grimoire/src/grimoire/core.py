@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import struct
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Self
@@ -146,6 +147,75 @@ class Grimoire:
             keywords=keywords,
         )
 
+    def add_many(self, records: Iterable[Mapping[str, Any]]) -> list[Entry]:
+        """Insert many records in one transaction with one batched embed call.
+
+        Each record is a mapping accepting the same keys as `add`'s kwargs:
+        `kind` and `content` are required; `payload`, `threshold`, and
+        `keywords` are optional. Returns the inserted entries in input order.
+
+        Atomic: if embedding or any insert fails, nothing is committed —
+        unlike a loop over `add`, which would leave partial state behind.
+        """
+        records = list(records)
+        if not records:
+            return []
+
+        contents = [r["content"] for r in records]
+        vectors = self._embedder.embed_many(contents)
+
+        entries: list[Entry] = []
+        entries_rows: list[tuple] = []
+        vectors_rows: list[tuple] = []
+        fts_rows: list[tuple] = []
+
+        for record, vector in zip(records, vectors, strict=True):
+            entry_id = str(ULID())
+            kind = record["kind"]
+            content = record["content"]
+            payload = record.get("payload")
+            threshold = record.get("threshold")
+            keywords = record.get("keywords")
+
+            payload_json = json.dumps(payload) if payload is not None else None
+            keywords_json = json.dumps(keywords) if keywords is not None else None
+            keywords_text = " ".join(keywords) if keywords else ""
+
+            entries_rows.append(
+                (entry_id, kind, content, keywords_json, payload_json, threshold)
+            )
+            vectors_rows.append((entry_id, kind, _pack(vector)))
+            fts_rows.append((content, keywords_text, entry_id))
+
+            entries.append(
+                Entry(
+                    id=entry_id,
+                    kind=kind,
+                    content=content,
+                    payload=payload,
+                    threshold=threshold,
+                    keywords=keywords,
+                )
+            )
+
+        with self._conn:
+            self._conn.executemany(
+                "INSERT INTO entries (id, kind, content, keywords, payload, threshold) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                entries_rows,
+            )
+            self._conn.executemany(
+                "INSERT INTO vectors (entry_id, kind, embedding) VALUES (?, ?, ?)",
+                vectors_rows,
+            )
+            self._conn.executemany(
+                "INSERT INTO entries_fts (content, keywords, entry_id) "
+                "VALUES (?, ?, ?)",
+                fts_rows,
+            )
+
+        return entries
+
     def get(self, entry_id: str) -> Entry | None:
         row = self._conn.execute(
             "SELECT id, kind, content, keywords, payload, threshold "
@@ -207,6 +277,18 @@ class Grimoire:
         created_after: datetime | None = None,
         created_before: datetime | None = None,
     ) -> list[Entry]:
+        """Return up to `k` entries ranked by vector distance to `query`.
+
+        Filters interact with the KNN in two different ways:
+
+        - `kind` is pushed into the vector index's partition key, so the
+          KNN considers only entries of that kind from the start.
+        - `created_after`, `created_before`, and `dynamic_threshold` apply
+          AFTER the KNN returns its top-k. With a narrow time window or
+          tight per-record thresholds, this can return fewer than `k`
+          results — even when many qualifying entries exist further down
+          the similarity ranking. Raise `k` to compensate.
+        """
         vector = self._embedder.embed(query)
 
         sql = (

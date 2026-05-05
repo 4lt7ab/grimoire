@@ -624,6 +624,26 @@ def test_ingest_carries_keywords_through(tmp_path, _shared_models_cache):
     assert parsed["keywords"] == ["lockpick", "skeleton-key"]
 
 
+def test_ingest_handles_non_ascii_content(tmp_path, _shared_models_cache):
+    """JSONL is utf-8 by spec; ingest must not depend on the locale encoding."""
+    pytest.importorskip("fastembed")
+    mount = _new_mount(tmp_path, _shared_models_cache)
+    _init(mount)
+    data = tmp_path / "utf8.jsonl"
+    payload = "über naïve café — 日本語 🜂"
+    data.write_text(
+        json.dumps({"kind": "note", "content": payload}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    result = runner.invoke(app, ["ingest", str(data), "--mount", str(mount)])
+    assert result.exit_code == 0, result.output
+
+    list_result = runner.invoke(app, ["list", "--mount", str(mount)])
+    assert list_result.exit_code == 0
+    parsed = json.loads(list_result.output.strip())
+    assert parsed["content"] == payload
+
+
 def test_keyword_search_finds_via_keywords_field(tmp_path, _shared_models_cache):
     pytest.importorskip("fastembed")
     mount = _new_mount(tmp_path, _shared_models_cache)

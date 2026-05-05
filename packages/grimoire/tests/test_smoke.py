@@ -32,17 +32,27 @@ class FakeEmbedder:
         digest = hashlib.sha256(text.encode()).digest()
         return [(b - 128) / 128.0 for b in digest[: self._dimension]]
 
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        return [self.embed(t) for t in texts]
+
 
 class CountingEmbedder(FakeEmbedder):
-    """A FakeEmbedder that records how many times `embed` is called."""
+    """A FakeEmbedder that records how many times `embed`/`embed_many` is called."""
 
     def __init__(self, *, model: str = "fake-v1", dimension: int = 8) -> None:
         super().__init__(model=model, dimension=dimension)
         self.embed_calls = 0
+        self.embed_many_calls = 0
 
     def embed(self, text: str) -> list[float]:
         self.embed_calls += 1
-        return super().embed(text)
+        return FakeEmbedder.embed(self, text)
+
+    def embed_many(self, texts: list[str]) -> list[list[float]]:
+        self.embed_many_calls += 1
+        # Bypass `self.embed` so callers can distinguish a true batch call
+        # from N single-record calls via `embed_calls` alone.
+        return [FakeEmbedder.embed(self, t) for t in texts]
 
 
 def test_init_creates_file_idempotently(tmp_path):
@@ -613,3 +623,96 @@ def test_keywords_returned_by_list_and_search(tmp_path):
         # And via keyword_search
         k_results = g.keyword_search("alpha")
         assert k_results[0].keywords == ["alpha"]
+
+
+# ---------- add_many ----------
+
+
+def test_add_many_round_trips(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        records = [
+            {"kind": "note", "content": "alpha"},
+            {"kind": "spell", "content": "lumos"},
+            {
+                "kind": "note",
+                "content": "beta",
+                "keywords": ["b"],
+                "payload": {"weight": 1},
+                "threshold": 0.5,
+            },
+        ]
+        added = g.add_many(records)
+        assert [e.content for e in added] == ["alpha", "lumos", "beta"]
+        assert [e.kind for e in added] == ["note", "spell", "note"]
+        assert added[2].keywords == ["b"]
+        assert added[2].payload == {"weight": 1}
+        assert added[2].threshold == 0.5
+        # Persisted: each entry is fetchable, searchable.
+        for entry in added:
+            fetched = g.get(entry.id)
+            assert fetched is not None
+            assert fetched.content == entry.content
+
+
+def test_add_many_returns_empty_list_on_empty_input(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        assert g.add_many([]) == []
+        assert g.list() == []
+
+
+def test_add_many_calls_embed_many_once(tmp_path):
+    db = tmp_path / "store.db"
+    Grimoire.init(db, embedder=CountingEmbedder()).close()
+
+    e = CountingEmbedder()
+    with Grimoire.open(db, embedder=e) as g:
+        e.embed_calls = 0
+        e.embed_many_calls = 0
+        records = [{"kind": "note", "content": f"e{i}"} for i in range(5)]
+        g.add_many(records)
+        # One batch call, not five single-embed calls.
+        assert e.embed_many_calls == 1
+        assert e.embed_calls == 0
+
+
+def test_add_many_atomic_on_embed_failure(tmp_path):
+    """If embedding fails, no records leak through partially."""
+
+    class FailEmbedMany(FakeEmbedder):
+        def embed_many(self, texts):
+            raise RuntimeError("embed batch failed")
+
+    db = tmp_path / "store.db"
+    with Grimoire.init(db, embedder=FakeEmbedder()) as g:
+        g.add(kind="note", content="existing")
+
+    with Grimoire.open(db, embedder=FailEmbedMany()) as g:
+        with pytest.raises(RuntimeError, match="embed batch failed"):
+            g.add_many([{"kind": "note", "content": "new"}])
+        remaining = g.list()
+        assert len(remaining) == 1
+        assert remaining[0].content == "existing"
+
+
+def test_add_many_results_are_searchable(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        g.add_many(
+            [
+                {"kind": "note", "content": "the moon is full"},
+                {"kind": "note", "content": "dragons fly at midnight"},
+            ]
+        )
+        v_results = g.vector_search("the moon is full", k=2)
+        assert v_results[0].content == "the moon is full"
+        k_results = g.keyword_search("dragons")
+        assert len(k_results) == 1
+
+
+def test_add_many_assigns_distinct_ids_in_input_order(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        added = g.add_many([{"kind": "note", "content": f"e{i}"} for i in range(10)])
+        ids = [e.id for e in added]
+        assert len(set(ids)) == 10
+        # ULIDs sort lexicographically by creation time, and add_many assigns
+        # them in input order — so the input ordering matches the id ordering.
+        assert ids == sorted(ids)

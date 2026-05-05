@@ -8,10 +8,45 @@ from grimoire import Entry, Grimoire, GrimoireError, GrimoireNotFound
 
 RECOGNIZED_FIELDS = {"kind", "content", "payload", "threshold", "keywords"}
 REQUIRED_FIELDS = {"kind", "content"}
+# Each batch is one atomic transaction; on failure, only the in-flight batch
+# rolls back. Smaller = better recovery granularity, slightly more overhead.
+# 200 captures ~95% of fastembed's batching speedup vs single calls.
+INGEST_BATCH_SIZE = 200
 PROGRESS_EVERY = 1000
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 DB_FILENAME = "grimoire.db"
 MODELS_DIRNAME = "models"
+
+# Reusable annotations — every command needs --mount, and the read commands
+# share --kind, --k, --created-after, and --created-before. Defining them
+# once keeps help text in lockstep across the CLI.
+Mount = Annotated[
+    Path,
+    typer.Option(
+        help="Path to the grimoire mount directory.",
+        envvar="GRIMOIRE_MOUNT",
+    ),
+]
+Kind = Annotated[
+    str | None,
+    typer.Option(help="Restrict results to entries of this kind."),
+]
+K = Annotated[int, typer.Option(help="Number of results to return.")]
+CreatedAfter = Annotated[
+    str | None,
+    typer.Option(
+        "--created-after",
+        help="ISO 8601 lower bound on entry creation time (inclusive).",
+    ),
+]
+CreatedBefore = Annotated[
+    str | None,
+    typer.Option(
+        "--created-before",
+        help="ISO 8601 upper bound on entry creation time (exclusive).",
+    ),
+]
+
 
 app = typer.Typer(
     name="grimoire",
@@ -43,13 +78,7 @@ def _callback() -> None:
 
 @app.command()
 def init(
-    mount: Annotated[
-        Path,
-        typer.Option(
-            help="Path to the grimoire mount directory.",
-            envvar="GRIMOIRE_MOUNT",
-        ),
-    ],
+    mount: Mount,
     model: Annotated[
         str | None,
         typer.Option(
@@ -103,13 +132,7 @@ def ingest(
             readable=True,
         ),
     ],
-    mount: Annotated[
-        Path,
-        typer.Option(
-            help="Path to the grimoire mount directory.",
-            envvar="GRIMOIRE_MOUNT",
-        ),
-    ],
+    mount: Mount,
 ) -> None:
     """Bulk-ingest records into a grimoire."""
     records = _load_records(file)
@@ -117,17 +140,17 @@ def ingest(
         typer.echo(f"No records to ingest from {file}")
         return
 
+    total = 0
+    last_milestone = 0
     with _open_grimoire(mount) as g:
-        for i, record in enumerate(records, 1):
-            g.add(
-                kind=record["kind"],
-                content=record["content"],
-                payload=record.get("payload"),
-                threshold=record.get("threshold"),
-                keywords=record.get("keywords"),
-            )
-            if i % PROGRESS_EVERY == 0:
-                typer.echo(f"  ingested {i}...", err=True)
+        for chunk_start in range(0, len(records), INGEST_BATCH_SIZE):
+            chunk = records[chunk_start : chunk_start + INGEST_BATCH_SIZE]
+            g.add_many(chunk)
+            total += len(chunk)
+            milestone = total // PROGRESS_EVERY
+            if milestone > last_milestone and total < len(records):
+                typer.echo(f"  ingested {total}...", err=True)
+                last_milestone = milestone
 
     typer.echo(f"Ingested {len(records)} records into {mount / DB_FILENAME}")
 
@@ -135,17 +158,9 @@ def ingest(
 @app.command(name="vector-search")
 def vector_search(
     query: Annotated[str, typer.Argument(help="Query text to embed and search for.")],
-    mount: Annotated[
-        Path,
-        typer.Option(
-            help="Path to the grimoire mount directory.",
-            envvar="GRIMOIRE_MOUNT",
-        ),
-    ],
-    kind: Annotated[
-        str | None, typer.Option(help="Restrict results to entries of this kind.")
-    ] = None,
-    k: Annotated[int, typer.Option(help="Number of results to return.")] = 10,
+    mount: Mount,
+    kind: Kind = None,
+    k: K = 10,
     dynamic_threshold: Annotated[
         bool,
         typer.Option(
@@ -153,20 +168,8 @@ def vector_search(
             help="Filter results by each entry's stored similarity threshold.",
         ),
     ] = False,
-    created_after: Annotated[
-        str | None,
-        typer.Option(
-            "--created-after",
-            help="ISO 8601 lower bound on entry creation time (inclusive).",
-        ),
-    ] = None,
-    created_before: Annotated[
-        str | None,
-        typer.Option(
-            "--created-before",
-            help="ISO 8601 upper bound on entry creation time (exclusive).",
-        ),
-    ] = None,
+    created_after: CreatedAfter = None,
+    created_before: CreatedBefore = None,
 ) -> None:
     """Run a vector (semantic) search against a grimoire."""
     after = _parse_iso("--created-after", created_after)
@@ -194,31 +197,11 @@ def keyword_search(
             ),
         ),
     ],
-    mount: Annotated[
-        Path,
-        typer.Option(
-            help="Path to the grimoire mount directory.",
-            envvar="GRIMOIRE_MOUNT",
-        ),
-    ],
-    kind: Annotated[
-        str | None, typer.Option(help="Restrict results to entries of this kind.")
-    ] = None,
-    k: Annotated[int, typer.Option(help="Number of results to return.")] = 10,
-    created_after: Annotated[
-        str | None,
-        typer.Option(
-            "--created-after",
-            help="ISO 8601 lower bound on entry creation time (inclusive).",
-        ),
-    ] = None,
-    created_before: Annotated[
-        str | None,
-        typer.Option(
-            "--created-before",
-            help="ISO 8601 upper bound on entry creation time (exclusive).",
-        ),
-    ] = None,
+    mount: Mount,
+    kind: Kind = None,
+    k: K = 10,
+    created_after: CreatedAfter = None,
+    created_before: CreatedBefore = None,
 ) -> None:
     """Run a keyword (FTS5) search against a grimoire."""
     after = _parse_iso("--created-after", created_after)
@@ -237,13 +220,7 @@ def keyword_search(
 @app.command()
 def add(
     content: Annotated[str, typer.Argument(help="Content text for the new entry.")],
-    mount: Annotated[
-        Path,
-        typer.Option(
-            help="Path to the grimoire mount directory.",
-            envvar="GRIMOIRE_MOUNT",
-        ),
-    ],
+    mount: Mount,
     kind: Annotated[str, typer.Option(help="Kind label for the entry.")] = "note",
     payload: Annotated[
         str | None,
@@ -286,51 +263,23 @@ def add(
 
 
 @app.command()
-def info(
-    mount: Annotated[
-        Path,
-        typer.Option(
-            help="Path to the grimoire mount directory.",
-            envvar="GRIMOIRE_MOUNT",
-        ),
-    ],
-) -> None:
+def info(mount: Mount) -> None:
     """Show metadata and counts for a grimoire file."""
     _emit_info(mount / DB_FILENAME)
 
 
 @app.command(name="list")
 def list_entries(
-    mount: Annotated[
-        Path,
-        typer.Option(
-            help="Path to the grimoire mount directory.",
-            envvar="GRIMOIRE_MOUNT",
-        ),
-    ],
-    kind: Annotated[
-        str | None, typer.Option(help="Restrict to entries of this kind.")
-    ] = None,
+    mount: Mount,
+    kind: Kind = None,
     limit: Annotated[
         int, typer.Option(help="Maximum number of entries to return.")
     ] = 100,
     after_id: Annotated[
         str | None, typer.Option(help="Cursor: return entries with id > this value.")
     ] = None,
-    created_after: Annotated[
-        str | None,
-        typer.Option(
-            "--created-after",
-            help="ISO 8601 lower bound on entry creation time (inclusive).",
-        ),
-    ] = None,
-    created_before: Annotated[
-        str | None,
-        typer.Option(
-            "--created-before",
-            help="ISO 8601 upper bound on entry creation time (exclusive).",
-        ),
-    ] = None,
+    created_after: CreatedAfter = None,
+    created_before: CreatedBefore = None,
 ) -> None:
     """Paginate entries in chronological order (by id)."""
     after = _parse_iso("--created-after", created_after)
@@ -349,13 +298,7 @@ def list_entries(
 @app.command()
 def get(
     entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
-    mount: Annotated[
-        Path,
-        typer.Option(
-            help="Path to the grimoire mount directory.",
-            envvar="GRIMOIRE_MOUNT",
-        ),
-    ],
+    mount: Mount,
 ) -> None:
     """Fetch a single entry by id."""
     with _open_grimoire(mount) as g:
@@ -368,13 +311,7 @@ def get(
 @app.command()
 def delete(
     entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
-    mount: Annotated[
-        Path,
-        typer.Option(
-            help="Path to the grimoire mount directory.",
-            envvar="GRIMOIRE_MOUNT",
-        ),
-    ],
+    mount: Mount,
 ) -> None:
     """Delete an entry by id."""
     with _open_grimoire(mount) as g:
@@ -428,7 +365,7 @@ def _emit_info(db: Path) -> None:
 
 def _load_records(path: Path) -> list[dict]:
     records: list[dict] = []
-    with path.open() as f:
+    with path.open(encoding="utf-8") as f:
         for line_no, raw in enumerate(f, 1):
             line = raw.strip()
             if not line:
