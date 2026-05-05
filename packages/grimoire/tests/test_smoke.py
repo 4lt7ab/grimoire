@@ -1,5 +1,7 @@
 import hashlib
 import sqlite3
+import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from grimoire import (
@@ -10,6 +12,7 @@ from grimoire import (
     InvalidEmbedder,
     Stats,
 )
+from ulid import ULID
 
 
 class FakeEmbedder:
@@ -354,6 +357,88 @@ def test_peek_returns_stats_for_initialized_grimoire(tmp_path):
     assert stats.schema_version == 1
     assert stats.entry_count == 3
     assert stats.kinds == {"note": 2, "spell": 1}
+
+
+# ---------- age-windowed reads ----------
+
+
+def test_entry_created_at_round_trips_to_ulid_timestamp():
+    moment = datetime(2026, 5, 4, 10, 30, 0, tzinfo=UTC)
+    entry_id = str(ULID.from_datetime(moment))
+    entry = Entry(id=entry_id, kind="note", content="x")
+    assert entry.created_at == moment
+
+
+def test_list_created_after_is_inclusive_lower_bound(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        a = g.add(kind="note", content="a")
+        time.sleep(0.005)
+        b = g.add(kind="note", content="b")
+        time.sleep(0.005)
+        c = g.add(kind="note", content="c")
+
+        results = g.list(created_after=b.created_at)
+        assert [r.id for r in results] == [b.id, c.id]
+        assert a.id not in [r.id for r in results]
+
+
+def test_list_created_before_is_exclusive_upper_bound(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        a = g.add(kind="note", content="a")
+        time.sleep(0.005)
+        b = g.add(kind="note", content="b")
+        time.sleep(0.005)
+        c = g.add(kind="note", content="c")
+
+        results = g.list(created_before=c.created_at)
+        assert [r.id for r in results] == [a.id, b.id]
+
+
+def test_list_combines_both_bounds(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        g.add(kind="note", content="a")
+        time.sleep(0.005)
+        b = g.add(kind="note", content="b")
+        time.sleep(0.005)
+        c = g.add(kind="note", content="c")
+        time.sleep(0.005)
+        g.add(kind="note", content="d")
+
+        results = g.list(created_after=b.created_at, created_before=c.created_at)
+        assert [r.id for r in results] == [b.id]
+
+
+def test_search_honors_created_after(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        old = g.add(kind="note", content="lumos")
+        time.sleep(0.005)
+        new = g.add(kind="note", content="lumos")
+
+        results = g.search("lumos", k=10, created_after=new.created_at)
+        ids = [r.id for r in results]
+        assert new.id in ids
+        assert old.id not in ids
+
+
+def test_search_honors_created_before(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        old = g.add(kind="note", content="lumos")
+        time.sleep(0.005)
+        new = g.add(kind="note", content="lumos")
+
+        results = g.search("lumos", k=10, created_before=new.created_at)
+        ids = [r.id for r in results]
+        assert old.id in ids
+        assert new.id not in ids
+
+
+def test_list_window_excludes_everything_before_grimoire(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        g.add(kind="note", content="a")
+        g.add(kind="note", content="b")
+
+        far_future = datetime.now(tz=UTC) + timedelta(days=365)
+        assert g.list(created_after=far_future) == []
 
 
 def test_peek_does_not_require_embedder_or_extension(tmp_path):

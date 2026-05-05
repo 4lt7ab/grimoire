@@ -13,12 +13,13 @@
 - **Semantic search.** `search(query, k=...)` returns entries ranked by vector distance against the embedded query.
 - **Kind partitioning.** Every entry has a `kind` label. Reads (`search`, `list`) accept an optional `kind=` filter; the vector index is partitioned on `kind` so filtered search stays cheap.
 - **Per-record similarity thresholds.** Records can carry a `threshold`. `search(..., dynamic_threshold=True)` drops results that don't clear each record's own gate — useful for heuristic-driven filtering where different records demand different match tightness.
-- **ULID identifiers.** Entries are addressed by ULID, so chronological order is implicit in the id (`list` paginates via `after_id`).
+- **ULID identifiers.** Entries are addressed by ULID, so chronological order is implicit in the id. `list` paginates via `after_id`, and `Entry.created_at` exposes the ULID's timestamp without an extra column.
+- **Age-windowed reads.** Both `list` and `search` accept `created_after` / `created_before` (inclusive lower, exclusive upper) to restrict results to a time window. The window is enforced as an index range on the ULID id — no `created_at` column, no new index.
 - **Optional payloads.** Each entry carries an optional JSON-object payload alongside its content for caller-specific metadata. Passed in and returned as a `dict` — callers can pipe it straight into a Pydantic model or dataclass without re-parsing.
 - **Embedder Protocol.** Callers supply any object satisfying the `Embedder` Protocol (`model`, `dimension`, `embed`). A `FastembedEmbedder` is bundled behind the `fastembed` extra.
 - **Embedder lock.** The embedding model name and dimension are written into the file on first open. Reopening with a mismatched embedder raises `GrimoireMismatch` rather than silently producing nonsense vectors.
 - **File inspection without opening.** `Grimoire.peek(path)` returns model, dimension, schema version, total entry count, and per-kind counts without loading sqlite-vec or requiring an embedder.
-- **CLI.** `grimoire {init, info, add, ingest, search, list, get, delete}` operates on a grimoire mount directory (`--mount <dir>` / `GRIMOIRE_MOUNT`), which holds the SQLite file and the embedder model cache. JSONL output everywhere makes it pipeable to `jq`.
+- **CLI.** `grimoire {init, info, add, ingest, search, list, get, delete}` operates on a grimoire mount directory (`--mount <dir>` / `GRIMOIRE_MOUNT`), which holds the SQLite file and the embedder model cache. JSONL output everywhere makes it pipeable to `jq`. `grimoire --help` is the consolidated orientation: commands, the mount model, output conventions, and environment variables in one screen, intended to ground a new operator (human or LLM) without reaching for the README.
 
 ## What this does not do
 

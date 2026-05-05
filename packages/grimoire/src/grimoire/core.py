@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import struct
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Self
 
@@ -144,6 +145,8 @@ class Grimoire:
         kind: str | None = None,
         limit: int = 100,
         after_id: str | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> list[Entry]:
         sql = "SELECT id, kind, content, payload, threshold FROM entries"
         params: list[Any] = []
@@ -154,6 +157,12 @@ class Grimoire:
         if after_id is not None:
             clauses.append("id > ?")
             params.append(after_id)
+        if created_after is not None:
+            clauses.append("id >= ?")
+            params.append(_ulid_floor(created_after))
+        if created_before is not None:
+            clauses.append("id < ?")
+            params.append(_ulid_floor(created_before))
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY id LIMIT ?"
@@ -177,6 +186,8 @@ class Grimoire:
         kind: str | None = None,
         k: int = 10,
         dynamic_threshold: bool = False,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
     ) -> list[Entry]:
         vector = self._embedder.embed(query)
 
@@ -189,6 +200,12 @@ class Grimoire:
         if kind is not None:
             sql += " AND v.kind = ?"
             params.append(kind)
+        if created_after is not None:
+            sql += " AND e.id >= ?"
+            params.append(_ulid_floor(created_after))
+        if created_before is not None:
+            sql += " AND e.id < ?"
+            params.append(_ulid_floor(created_before))
         sql += " ORDER BY v.distance"
 
         rows = self._conn.execute(sql, params).fetchall()
@@ -230,6 +247,10 @@ def _open_conn(path: str) -> sqlite3.Connection:
 
 def _pack(vector: list[float]) -> bytes:
     return struct.pack(f"{len(vector)}f", *vector)
+
+
+def _ulid_floor(dt: datetime) -> str:
+    return str(ULID.from_datetime(dt))[:10] + "0" * 16
 
 
 def _row_to_entry(row: tuple) -> Entry:

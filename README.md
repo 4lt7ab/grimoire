@@ -211,6 +211,8 @@ The `model` and `dimension` are written into the file on first open and locked. 
 
 ## CLI reference
 
+If you've installed the CLI, `grimoire --help` prints this same orientation in the terminal — commands, the mount model, output conventions, and environment variables in one screen. The reference below mirrors it for repo browsers.
+
 Every command operates over a grimoire mount: a directory that holds the SQLite file (`<mount>/grimoire.db`) and the embedder model cache (`<mount>/models/`). `info` is the one command that doesn't load the embedder — it inspects the file via `Grimoire.peek` — but it still resolves the db path through the mount.
 
 Pass it explicitly with `--mount <dir>`, or set the environment variable once for the shell:

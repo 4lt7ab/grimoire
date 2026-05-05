@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -16,12 +17,28 @@ app = typer.Typer(
     name="grimoire",
     no_args_is_help=True,
     pretty_exceptions_enable=False,
+    epilog=(
+        "Environment variables:\n\n"
+        "  GRIMOIRE_MOUNT  Default mount directory. Overridden by --mount."
+    ),
 )
 
 
 @app.callback()
 def _callback() -> None:
-    """Manage a grimoire datastore."""
+    """Manage a grimoire datastore — a single-file SQLite + sqlite-vec semantic store.
+
+    Every command operates over a mount directory that holds the SQLite file
+    (<mount>/grimoire.db) and the embedder model cache (<mount>/models/).
+    Specify it with --mount <dir> or set the GRIMOIRE_MOUNT environment
+    variable once for the shell.
+
+    Read commands (search, list, get, info) print one JSON object per line —
+    pipe to `jq` for filtering.
+
+    Run `grimoire init` for one-time setup, then `grimoire <command> --help`
+    for the flags and arguments of any subcommand.
+    """
 
 
 @app.command()
@@ -135,11 +152,32 @@ def search(
             help="Filter results by each entry's stored similarity threshold.",
         ),
     ] = False,
+    created_after: Annotated[
+        str | None,
+        typer.Option(
+            "--created-after",
+            help="ISO 8601 lower bound on entry creation time (inclusive).",
+        ),
+    ] = None,
+    created_before: Annotated[
+        str | None,
+        typer.Option(
+            "--created-before",
+            help="ISO 8601 upper bound on entry creation time (exclusive).",
+        ),
+    ] = None,
 ) -> None:
     """Run a semantic search against a grimoire."""
+    after = _parse_iso("--created-after", created_after)
+    before = _parse_iso("--created-before", created_before)
     with _open_grimoire(mount) as g:
         for entry in g.search(
-            query, kind=kind, k=k, dynamic_threshold=dynamic_threshold
+            query,
+            kind=kind,
+            k=k,
+            dynamic_threshold=dynamic_threshold,
+            created_after=after,
+            created_before=before,
         ):
             _print_entry(entry)
 
@@ -216,10 +254,32 @@ def list_entries(
     after_id: Annotated[
         str | None, typer.Option(help="Cursor: return entries with id > this value.")
     ] = None,
+    created_after: Annotated[
+        str | None,
+        typer.Option(
+            "--created-after",
+            help="ISO 8601 lower bound on entry creation time (inclusive).",
+        ),
+    ] = None,
+    created_before: Annotated[
+        str | None,
+        typer.Option(
+            "--created-before",
+            help="ISO 8601 upper bound on entry creation time (exclusive).",
+        ),
+    ] = None,
 ) -> None:
     """Paginate entries in chronological order (by id)."""
+    after = _parse_iso("--created-after", created_after)
+    before = _parse_iso("--created-before", created_before)
     with _open_grimoire(mount) as g:
-        for entry in g.list(kind=kind, limit=limit, after_id=after_id):
+        for entry in g.list(
+            kind=kind,
+            limit=limit,
+            after_id=after_id,
+            created_after=after,
+            created_before=before,
+        ):
             _print_entry(entry)
 
 
@@ -346,6 +406,15 @@ def _print_entry(entry: Entry) -> None:
     if entry.distance is not None:
         record["distance"] = entry.distance
     typer.echo(json.dumps(record))
+
+
+def _parse_iso(flag: str, value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        _fail(f"{flag} must be ISO 8601 (e.g. 2026-05-04 or 2026-05-04T10:00:00)")
 
 
 def _fail(message: str) -> NoReturn:

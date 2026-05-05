@@ -148,6 +148,20 @@ def test_command_rejects_missing_mount(tmp_path, cmd_args):
     assert result.exit_code != 0
 
 
+def test_top_level_help_is_self_documenting():
+    """`grimoire --help` should orient a new operator without a doc lookup."""
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    out = result.output
+    assert "grimoire.db" in out
+    assert "models/" in out
+    assert "jq" in out
+    assert "GRIMOIRE_MOUNT" in out
+    assert "Environment variables" in out
+    for cmd in ("init", "info", "add", "ingest", "search", "list", "get", "delete"):
+        assert cmd in out
+
+
 @pytest.mark.parametrize(
     "cmd",
     ["init", "ingest", "search", "list", "get", "delete", "add", "info"],

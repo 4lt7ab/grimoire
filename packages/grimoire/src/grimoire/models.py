@@ -1,5 +1,8 @@
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
+
+from ulid import ULID
 
 
 @dataclass
@@ -10,6 +13,10 @@ class Entry:
     payload: dict[str, Any] | None = None
     threshold: float | None = None
     distance: float | None = None
+
+    @property
+    def created_at(self) -> datetime:
+        return ULID.from_str(self.id).datetime
 
 
 @dataclass
