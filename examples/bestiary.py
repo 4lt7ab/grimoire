@@ -79,7 +79,7 @@ def main() -> None:
         embedder = FastembedEmbedder(cache_folder=MODELS)
     except ImportError as exc:
         raise SystemExit(f"Error: {exc}") from exc
-    with Grimoire.open(DB, embedder=embedder) as g:
+    with Grimoire.init(DB, embedder=embedder) as g:
         args.func(g, args)
 
 

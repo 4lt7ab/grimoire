@@ -8,7 +8,6 @@ Thresholds below are tuned for the default embedder (BAAI/bge-small-en-v1.5
 via fastembed, L2 distance). Lower threshold = stricter match.
 """
 
-import json
 from pathlib import Path
 
 from grimoire import Grimoire
@@ -78,7 +77,7 @@ def current_floor(g: Grimoire) -> int:
     progress = g.list(kind="progress", limit=1000)
     if not progress:
         return 1
-    return max(json.loads(e.payload)["floor"] for e in progress if e.payload)
+    return max(e.payload["floor"] for e in progress if e.payload)
 
 
 def advance(g: Grimoire, floor: int) -> None:
@@ -129,7 +128,7 @@ def main() -> None:
         embedder = FastembedEmbedder(cache_folder=MODELS)
     except ImportError as exc:
         raise SystemExit(f"Error: {exc}") from exc
-    with Grimoire.open(DB, embedder=embedder) as g:
+    with Grimoire.init(DB, embedder=embedder) as g:
         seed_if_empty(g)
         try:
             play(g)
