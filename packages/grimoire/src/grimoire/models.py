@@ -13,6 +13,7 @@ class Entry:
     payload: dict[str, Any] | None = None
     threshold: float | None = None
     distance: float | None = None
+    rank: float | None = None
 
     @property
     def created_at(self) -> datetime:

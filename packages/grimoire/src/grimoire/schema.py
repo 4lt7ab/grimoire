@@ -8,7 +8,7 @@ from grimoire.errors import (
     SchemaVersionError,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def create(conn: sqlite3.Connection, embedder: Embedder) -> None:
@@ -33,6 +33,10 @@ def create(conn: sqlite3.Connection, embedder: Embedder) -> None:
             entry_id  TEXT PRIMARY KEY,
             kind      TEXT partition key,
             embedding FLOAT[{embedder.dimension}]
+        );
+        CREATE VIRTUAL TABLE entries_fts USING fts5(
+            content,
+            entry_id UNINDEXED
         );
         """
     )

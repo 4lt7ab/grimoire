@@ -79,11 +79,18 @@ Inspect the file — model, dimension, entry count, kinds:
 grimoire info
 ```
 
-Search by meaning:
+Search by meaning (vector):
 
 ```sh
-grimoire search "celestial events"
-grimoire search "stories of valor" --kind tale
+grimoire vector-search "celestial events"
+grimoire vector-search "stories of valor" --kind tale
+```
+
+Search by literal text (keyword, FTS5):
+
+```sh
+grimoire keyword-search "moon"
+grimoire keyword-search "knights" --kind tale
 ```
 
 Bulk-load from JSONL. Each row carries a `payload` — the structured object the description is pointing at:
@@ -100,10 +107,16 @@ grimoire ingest .grimoire/data.jsonl
 Search the spells. Notice the `payload` in the result — that's the object you actually wanted to find:
 
 ```sh
-grimoire search "magic to slip past a guard unseen" --kind spell
+grimoire vector-search "magic to slip past a guard unseen" --kind spell
 ```
 
 `hush` should rank first, with its payload (`{"id": "hush", "school": "illusion", "tier": 1}`) right there in the JSON.
+
+Or find spells whose description literally mentions "door":
+
+```sh
+grimoire keyword-search "door" --kind spell
+```
 
 List entries chronologically (results are JSON, one per line):
 
@@ -159,10 +172,13 @@ with Grimoire.init(".grimoire/memory.db", embedder=embedder) as g:
         threshold=0.5,
     )
 
-    for entry in g.search("creatures that come back from the dead", k=5):
+    for entry in g.vector_search("creatures that come back from the dead", k=5):
         print(entry.id, entry.distance, entry.content, entry.payload)
 
-    volcano_dwellers = g.search(
+    for entry in g.keyword_search("phoenix", k=5):
+        print(entry.id, entry.rank, entry.content, entry.payload)
+
+    volcano_dwellers = g.vector_search(
         "fiery beasts of the magma", kind="creature", dynamic_threshold=True
     )
     everything = g.list(limit=100)
@@ -188,7 +204,8 @@ if stats:
 - `add(*, kind, content, payload=None, threshold=None)` — insert.
 - `get(entry_id)` — fetch by id, or `None`.
 - `list(*, kind=None, limit=100, after_id=None)` — chronological pagination.
-- `search(query, *, kind=None, k=10, dynamic_threshold=False)` — vector search; `dynamic_threshold` filters results by each record's stored similarity gate.
+- `vector_search(query, *, kind=None, k=10, dynamic_threshold=False, created_after=None, created_before=None)` — vector search ranked by embedder distance; `dynamic_threshold` filters results by each record's stored similarity gate.
+- `keyword_search(query, *, kind=None, k=10, created_after=None, created_before=None)` — keyword search via SQLite FTS5, ranked by BM25. The query string accepts FTS5 syntax (phrases, prefix, boolean operators).
 - `delete(entry_id)` — returns `True` if removed, `False` if absent.
 - `close()` — also handled by the context manager.
 
@@ -229,7 +246,8 @@ The flag overrides the env var: `--mount <dir>` over `GRIMOIRE_MOUNT`.
 grimoire init
 grimoire add "<content>" [--kind K] [--payload '{...}'] [--threshold N]
 grimoire ingest <jsonl-file>
-grimoire search "<query>" [--k N] [--kind K] [--dynamic-threshold]
+grimoire vector-search "<query>" [--k N] [--kind K] [--dynamic-threshold]
+grimoire keyword-search "<query>" [--k N] [--kind K]
 grimoire list [--kind K] [--limit N] [--after-id ID]
 grimoire get <entry_id>
 grimoire delete <entry_id>

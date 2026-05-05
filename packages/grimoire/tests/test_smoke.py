@@ -80,7 +80,7 @@ def test_search_finds_exact_match_first(tmp_path):
         g.add(kind="note", content="dragons fly at midnight")
         g.add(kind="note", content="potions bubble in the cauldron")
 
-        results = g.search("the moon is full", k=3)
+        results = g.vector_search("the moon is full", k=3)
         assert len(results) == 3
         assert results[0].content == "the moon is full"
         assert results[0].distance == 0.0
@@ -91,7 +91,7 @@ def test_search_filters_by_kind(tmp_path):
         g.add(kind="spell", content="lumos")
         g.add(kind="potion", content="lumos")
 
-        results = g.search("lumos", kind="spell", k=10)
+        results = g.vector_search("lumos", kind="spell", k=10)
         assert len(results) == 1
         assert results[0].kind == "spell"
 
@@ -101,10 +101,10 @@ def test_dynamic_threshold_drops_low_match(tmp_path):
         g.add(kind="note", content="the moon is full", threshold=0.0)
         g.add(kind="note", content="dragons fly at midnight", threshold=0.0)
 
-        all_results = g.search("the moon is full", k=10)
+        all_results = g.vector_search("the moon is full", k=10)
         assert len(all_results) == 2
 
-        gated = g.search("the moon is full", k=10, dynamic_threshold=True)
+        gated = g.vector_search("the moon is full", k=10, dynamic_threshold=True)
         assert len(gated) == 1
         assert gated[0].content == "the moon is full"
 
@@ -116,7 +116,7 @@ def test_two_files_are_independent(tmp_path):
         a.add(kind="note", content="alpha")
     with Grimoire.init(b_path, embedder=FakeEmbedder()) as b:
         b.add(kind="note", content="beta")
-        results = b.search("alpha", k=10)
+        results = b.vector_search("alpha", k=10)
         assert all(r.content != "alpha" for r in results)
 
 
@@ -126,7 +126,7 @@ def test_data_persists_across_reopens(tmp_path):
         g.add(kind="note", content="the moon is full")
 
     with Grimoire.open(db, embedder=FakeEmbedder()) as g:
-        results = g.search("the moon is full", k=1)
+        results = g.vector_search("the moon is full", k=1)
         assert len(results) == 1
         assert results[0].content == "the moon is full"
 
@@ -196,7 +196,7 @@ def test_delete_removes_entry_and_vector(tmp_path):
         assert g.get(added.id) is None
 
         # Search should no longer return it.
-        results = g.search("ephemeral", k=10)
+        results = g.vector_search("ephemeral", k=10)
         assert all(r.id != added.id for r in results)
 
 
@@ -354,7 +354,7 @@ def test_peek_returns_stats_for_initialized_grimoire(tmp_path):
     assert isinstance(stats, Stats)
     assert stats.model == "m1"
     assert stats.dimension == 8
-    assert stats.schema_version == 1
+    assert stats.schema_version == 2
     assert stats.entry_count == 3
     assert stats.kinds == {"note": 2, "spell": 1}
 
@@ -414,7 +414,7 @@ def test_search_honors_created_after(tmp_path):
         time.sleep(0.005)
         new = g.add(kind="note", content="lumos")
 
-        results = g.search("lumos", k=10, created_after=new.created_at)
+        results = g.vector_search("lumos", k=10, created_after=new.created_at)
         ids = [r.id for r in results]
         assert new.id in ids
         assert old.id not in ids
@@ -426,7 +426,7 @@ def test_search_honors_created_before(tmp_path):
         time.sleep(0.005)
         new = g.add(kind="note", content="lumos")
 
-        results = g.search("lumos", k=10, created_before=new.created_at)
+        results = g.vector_search("lumos", k=10, created_before=new.created_at)
         ids = [r.id for r in results]
         assert old.id in ids
         assert new.id not in ids
@@ -439,6 +439,79 @@ def test_list_window_excludes_everything_before_grimoire(tmp_path):
 
         far_future = datetime.now(tz=UTC) + timedelta(days=365)
         assert g.list(created_after=far_future) == []
+
+
+# ---------- keyword search ----------
+
+
+def test_keyword_search_finds_exact_token(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        g.add(kind="note", content="the moon is full")
+        g.add(kind="note", content="dragons fly at midnight")
+        g.add(kind="note", content="potions bubble in the cauldron")
+
+        results = g.keyword_search("moon")
+        assert len(results) == 1
+        assert results[0].content == "the moon is full"
+
+
+def test_keyword_search_populates_rank(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        g.add(kind="note", content="the moon is full")
+        results = g.keyword_search("moon")
+        assert results[0].rank is not None
+
+
+def test_keyword_search_filters_by_kind(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        g.add(kind="spell", content="lumos lights the way")
+        g.add(kind="potion", content="lumos is also a potion")
+
+        results = g.keyword_search("lumos", kind="spell")
+        assert len(results) == 1
+        assert results[0].kind == "spell"
+
+
+def test_keyword_search_returns_empty_on_no_match(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        g.add(kind="note", content="dragons fly at midnight")
+        assert g.keyword_search("phoenix") == []
+
+
+def test_keyword_search_respects_k(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        for i in range(5):
+            g.add(kind="note", content=f"dragon {i}")
+        assert len(g.keyword_search("dragon", k=2)) == 2
+
+
+def test_keyword_search_honors_created_after(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        old = g.add(kind="note", content="dragon old")
+        time.sleep(0.005)
+        new = g.add(kind="note", content="dragon new")
+        results = g.keyword_search("dragon", created_after=new.created_at)
+        ids = [r.id for r in results]
+        assert new.id in ids
+        assert old.id not in ids
+
+
+def test_keyword_search_honors_created_before(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        old = g.add(kind="note", content="dragon old")
+        time.sleep(0.005)
+        new = g.add(kind="note", content="dragon new")
+        results = g.keyword_search("dragon", created_before=new.created_at)
+        ids = [r.id for r in results]
+        assert old.id in ids
+        assert new.id not in ids
+
+
+def test_delete_removes_keyword_index_too(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        added = g.add(kind="note", content="ephemeral phoenix")
+        assert g.delete(added.id) is True
+        assert g.keyword_search("phoenix") == []
 
 
 def test_peek_does_not_require_embedder_or_extension(tmp_path):

@@ -64,7 +64,17 @@ def _last_json_line(output: str) -> dict:
 def test_help_lists_all_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for cmd in ("init", "ingest", "search", "list", "get", "delete", "add", "info"):
+    for cmd in (
+        "init",
+        "ingest",
+        "vector-search",
+        "keyword-search",
+        "list",
+        "get",
+        "delete",
+        "add",
+        "info",
+    ):
         assert cmd in result.output
 
 
@@ -136,7 +146,8 @@ def test_ingest_empty_file_succeeds(tmp_path):
 @pytest.mark.parametrize(
     "cmd_args",
     [
-        ["search", "query"],
+        ["vector-search", "query"],
+        ["keyword-search", "query"],
         ["list"],
         ["get", "01HXXXXXXXXXXXXXXXXXXXXXXX"],
         ["delete", "01HXXXXXXXXXXXXXXXXXXXXXXX"],
@@ -158,13 +169,33 @@ def test_top_level_help_is_self_documenting():
     assert "jq" in out
     assert "GRIMOIRE_MOUNT" in out
     assert "Environment variables" in out
-    for cmd in ("init", "info", "add", "ingest", "search", "list", "get", "delete"):
+    for cmd in (
+        "init",
+        "info",
+        "add",
+        "ingest",
+        "vector-search",
+        "keyword-search",
+        "list",
+        "get",
+        "delete",
+    ):
         assert cmd in out
 
 
 @pytest.mark.parametrize(
     "cmd",
-    ["init", "ingest", "search", "list", "get", "delete", "add", "info"],
+    [
+        "init",
+        "ingest",
+        "vector-search",
+        "keyword-search",
+        "list",
+        "get",
+        "delete",
+        "add",
+        "info",
+    ],
 )
 def test_command_help_describes_mount_option(cmd):
     result = runner.invoke(app, [cmd, "--help"])
@@ -179,7 +210,8 @@ def test_command_help_describes_mount_option(cmd):
         ["init"],
         ["info"],
         ["list"],
-        ["search", "query"],
+        ["vector-search", "query"],
+        ["keyword-search", "query"],
         ["get", "01HXXXXXXXXXXXXXXXXXXXXXXX"],
         ["delete", "01HXXXXXXXXXXXXXXXXXXXXXXX"],
     ],
@@ -209,7 +241,7 @@ def test_init_creates_db_and_prints_info(tmp_path, _shared_models_cache):
     assert parsed["path"] == str(mount / "grimoire.db")
     assert parsed["model"]
     assert parsed["dimension"] > 0
-    assert parsed["schema_version"] == 1
+    assert parsed["schema_version"] == 2
     assert parsed["entry_count"] == 0
     assert parsed["kinds"] == {}
     assert (mount / "grimoire.db").exists()
@@ -307,13 +339,43 @@ def test_list_outputs_jsonl(populated_mount):
 def test_search_returns_relevant_entry_first(populated_mount):
     result = runner.invoke(
         app,
-        ["search", "the moon is full", "--mount", str(populated_mount), "--k", "2"],
+        [
+            "vector-search",
+            "the moon is full",
+            "--mount",
+            str(populated_mount),
+            "--k",
+            "2",
+        ],
     )
     assert result.exit_code == 0
     lines = [line for line in result.output.splitlines() if line.strip()]
     parsed = [json.loads(line) for line in lines]
     assert parsed[0]["content"] == "the moon is full"
     assert "distance" in parsed[0]
+
+
+def test_keyword_search_finds_token(populated_mount):
+    result = runner.invoke(
+        app,
+        ["keyword-search", "moon", "--mount", str(populated_mount), "--k", "5"],
+    )
+    assert result.exit_code == 0
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    parsed = [json.loads(line) for line in lines]
+    assert len(parsed) == 1
+    assert parsed[0]["content"] == "the moon is full"
+    assert "rank" in parsed[0]
+    assert "distance" not in parsed[0]
+
+
+def test_keyword_search_returns_nothing_on_no_match(populated_mount):
+    result = runner.invoke(
+        app,
+        ["keyword-search", "phoenix", "--mount", str(populated_mount)],
+    )
+    assert result.exit_code == 0
+    assert [line for line in result.output.splitlines() if line.strip()] == []
 
 
 def test_get_fetches_by_id(populated_mount):
@@ -391,7 +453,7 @@ def test_info_reports_metadata_and_counts(populated_mount):
     assert parsed["path"] == str(populated_mount / "grimoire.db")
     assert parsed["model"]
     assert parsed["dimension"] > 0
-    assert parsed["schema_version"] == 1
+    assert parsed["schema_version"] == 2
     assert parsed["entry_count"] == 2
     assert parsed["kinds"] == {"note": 2}
 
@@ -485,7 +547,7 @@ def test_search_dynamic_threshold_filters_results(tmp_path, _shared_models_cache
     )
 
     ungated = runner.invoke(
-        app, ["search", "the moon is full", "--mount", str(mount), "--k", "5"]
+        app, ["vector-search", "the moon is full", "--mount", str(mount), "--k", "5"]
     )
     assert ungated.exit_code == 0
     assert len([line for line in ungated.output.splitlines() if line.strip()]) == 2
@@ -493,7 +555,7 @@ def test_search_dynamic_threshold_filters_results(tmp_path, _shared_models_cache
     gated = runner.invoke(
         app,
         [
-            "search",
+            "vector-search",
             "the moon is full",
             "--mount",
             str(mount),

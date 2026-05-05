@@ -123,6 +123,10 @@ class Grimoire:
                 "INSERT INTO vectors (entry_id, kind, embedding) VALUES (?, ?, ?)",
                 (entry_id, kind, _pack(vector)),
             )
+            self._conn.execute(
+                "INSERT INTO entries_fts (content, entry_id) VALUES (?, ?)",
+                (content, entry_id),
+            )
 
         return Entry(
             id=entry_id,
@@ -177,9 +181,12 @@ class Grimoire:
             if cursor.rowcount == 0:
                 return False
             self._conn.execute("DELETE FROM vectors WHERE entry_id = ?", (entry_id,))
+            self._conn.execute(
+                "DELETE FROM entries_fts WHERE entry_id = ?", (entry_id,)
+            )
         return True
 
-    def search(
+    def vector_search(
         self,
         query: str,
         *,
@@ -225,6 +232,46 @@ class Grimoire:
                 r for r in results if r.threshold is None or r.distance <= r.threshold
             ]
         return results
+
+    def keyword_search(
+        self,
+        query: str,
+        *,
+        kind: str | None = None,
+        k: int = 10,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+    ) -> list[Entry]:
+        sql = (
+            "SELECT e.id, e.kind, e.content, e.payload, e.threshold, entries_fts.rank "
+            "FROM entries_fts JOIN entries e ON e.id = entries_fts.entry_id "
+            "WHERE entries_fts MATCH ?"
+        )
+        params: list[Any] = [query]
+        if kind is not None:
+            sql += " AND e.kind = ?"
+            params.append(kind)
+        if created_after is not None:
+            sql += " AND e.id >= ?"
+            params.append(_ulid_floor(created_after))
+        if created_before is not None:
+            sql += " AND e.id < ?"
+            params.append(_ulid_floor(created_before))
+        sql += " ORDER BY entries_fts.rank LIMIT ?"
+        params.append(k)
+
+        rows = self._conn.execute(sql, params).fetchall()
+        return [
+            Entry(
+                id=r[0],
+                kind=r[1],
+                content=r[2],
+                payload=json.loads(r[3]) if r[3] is not None else None,
+                threshold=r[4],
+                rank=r[5],
+            )
+            for r in rows
+        ]
 
     def close(self) -> None:
         self._conn.close()

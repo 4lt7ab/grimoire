@@ -131,8 +131,8 @@ def ingest(
     typer.echo(f"Ingested {len(records)} records into {mount / DB_FILENAME}")
 
 
-@app.command()
-def search(
+@app.command(name="vector-search")
+def vector_search(
     query: Annotated[str, typer.Argument(help="Query text to embed and search for.")],
     mount: Annotated[
         Path,
@@ -167,15 +167,66 @@ def search(
         ),
     ] = None,
 ) -> None:
-    """Run a semantic search against a grimoire."""
+    """Run a vector (semantic) search against a grimoire."""
     after = _parse_iso("--created-after", created_after)
     before = _parse_iso("--created-before", created_before)
     with _open_grimoire(mount) as g:
-        for entry in g.search(
+        for entry in g.vector_search(
             query,
             kind=kind,
             k=k,
             dynamic_threshold=dynamic_threshold,
+            created_after=after,
+            created_before=before,
+        ):
+            _print_entry(entry)
+
+
+@app.command(name="keyword-search")
+def keyword_search(
+    query: Annotated[
+        str,
+        typer.Argument(
+            help=(
+                "FTS5 query string. Plain words match tokens; supports phrases, "
+                "prefix matches, and boolean operators."
+            ),
+        ),
+    ],
+    mount: Annotated[
+        Path,
+        typer.Option(
+            help="Path to the grimoire mount directory.",
+            envvar="GRIMOIRE_MOUNT",
+        ),
+    ],
+    kind: Annotated[
+        str | None, typer.Option(help="Restrict results to entries of this kind.")
+    ] = None,
+    k: Annotated[int, typer.Option(help="Number of results to return.")] = 10,
+    created_after: Annotated[
+        str | None,
+        typer.Option(
+            "--created-after",
+            help="ISO 8601 lower bound on entry creation time (inclusive).",
+        ),
+    ] = None,
+    created_before: Annotated[
+        str | None,
+        typer.Option(
+            "--created-before",
+            help="ISO 8601 upper bound on entry creation time (exclusive).",
+        ),
+    ] = None,
+) -> None:
+    """Run a keyword (FTS5) search against a grimoire."""
+    after = _parse_iso("--created-after", created_after)
+    before = _parse_iso("--created-before", created_before)
+    with _open_grimoire(mount) as g:
+        for entry in g.keyword_search(
+            query,
+            kind=kind,
+            k=k,
             created_after=after,
             created_before=before,
         ):
@@ -405,6 +456,8 @@ def _print_entry(entry: Entry) -> None:
         record["threshold"] = entry.threshold
     if entry.distance is not None:
         record["distance"] = entry.distance
+    if entry.rank is not None:
+        record["rank"] = entry.rank
     typer.echo(json.dumps(record))
 
 

@@ -1,6 +1,6 @@
 # Architecture
 
-**TL;DR:** A core Python library wraps SQLite + sqlite-vec to provide a polymorphic, semantically-indexed datastore. A CLI sits on top as the first consumer.
+**TL;DR:** A core Python library wraps SQLite, sqlite-vec, and FTS5 to provide a polymorphic datastore with both vector and keyword search. A CLI sits on top as the first consumer.
 
 **When to read this:** Before making any change that crosses a component boundary.
 
@@ -19,6 +19,7 @@ The CLI imports the library directly. There is no IPC, RPC, or daemon — both r
 
 - **SQLite** — the underlying datastore.
 - **sqlite-vec** — vector index extension for semantic search.
+- **SQLite FTS5** — full-text index for keyword search. Bundled with SQLite, not a separate package.
 - **Embedding model/provider** — produces the vectors that sqlite-vec indexes.
 
 ## Data flow
