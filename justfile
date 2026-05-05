@@ -16,7 +16,13 @@ fmt:
 check:
     uv run ruff check
     uv run ruff format --check
-    uv run pytest
+    HF_HUB_OFFLINE=1 uv run pytest
+
+# Prime the shared fastembed model cache. Run once; `just check` is offline after.
+warm:
+    @echo "Priming model cache at .local/grimoire-test-models/ ..."
+    @HF_HUB_DISABLE_XET=1 uv run python -c "from grimoire.embedders import FastembedEmbedder; FastembedEmbedder(cache_folder='.local/grimoire-test-models')"
+    @echo "Cache warm. 'just check' now runs offline."
 
 bump level="patch":
     uv run python scripts/bump_version.py {{level}}

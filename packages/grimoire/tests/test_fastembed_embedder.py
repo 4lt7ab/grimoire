@@ -4,8 +4,6 @@ Skipped unless the `fastembed` extra is installed:
     uv sync --package grimoire --extra fastembed
 """
 
-import os
-
 import pytest
 
 pytest.importorskip("fastembed")
@@ -15,11 +13,12 @@ from grimoire.embedders import FastembedEmbedder  # noqa: E402
 
 
 @pytest.fixture
-def cache_dir(tmp_path, monkeypatch):
-    """Pin the model cache to a sandbox-safe location for tests."""
-    cache = tmp_path / "fastembed_cache"
-    monkeypatch.setenv("HF_HOME", str(cache))
-    return cache
+def cache_dir(_shared_models_cache):
+    """Use the repo-local shared cache so model files persist across runs.
+
+    Provided by the root conftest. Prime once with `just warm`.
+    """
+    return _shared_models_cache
 
 
 def test_default_model_dimension(cache_dir):
@@ -47,19 +46,9 @@ def test_round_trip_through_grimoire(tmp_path, cache_dir):
         assert results[0].distance < results[1].distance
 
 
-def test_cache_folder_pass_through(tmp_path):
-    cache = tmp_path / "models"
-    e = FastembedEmbedder(cache_folder=cache)
+def test_cache_folder_pass_through(_shared_models_cache):
+    # Verifies the cache_folder argument flows through to fastembed without
+    # triggering a download — uses the warmed shared cache.
+    e = FastembedEmbedder(cache_folder=_shared_models_cache)
     assert e.dimension == 384
-    # fastembed creates the cache directory lazily; just confirm the embedder
-    # initialized without error and the path is at least a directory or its
-    # parent exists.
-    assert cache.exists() or cache.parent.exists()
-
-
-# Skip-marker safety: ensure HF_HOME doesn't leak into other tests.
-def test_env_isolation():
-    if os.environ.get("HF_HOME"):
-        # monkeypatch.setenv from earlier fixtures restores on teardown,
-        # so this should never be set when this test runs without the fixture.
-        pass
+    assert _shared_models_cache.exists()

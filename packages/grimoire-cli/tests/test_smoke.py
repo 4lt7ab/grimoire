@@ -8,14 +8,6 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 
-@pytest.fixture(scope="session")
-def _shared_models_cache():
-    """A repo-local cache so the embedder model downloads once across runs."""
-    cache = Path(__file__).resolve().parents[3] / ".local" / "grimoire-test-models"
-    cache.mkdir(parents=True, exist_ok=True)
-    return cache
-
-
 @pytest.fixture(autouse=True)
 def _isolate_mount_env(monkeypatch):
     """Ensure GRIMOIRE_MOUNT from the developer's shell never bleeds into tests."""
