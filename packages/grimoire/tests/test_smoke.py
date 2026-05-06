@@ -1,5 +1,6 @@
 import hashlib
 import sqlite3
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -706,6 +707,80 @@ def test_add_many_results_are_searchable(tmp_path):
         assert v_results[0].content == "the moon is full"
         k_results = g.keyword_search("dragons")
         assert len(k_results) == 1
+
+
+# ---------- thread sharing ----------
+
+
+def test_init_default_is_thread_bound(tmp_path):
+    """Pin: by default a Grimoire is bound to its constructing thread.
+
+    Single-threaded scripts and the CLI rely on this safety rail. If the
+    default ever flips, this test goes loud — making the change deliberate.
+    """
+    db = tmp_path / "store.db"
+    with Grimoire.init(db, embedder=FakeEmbedder()) as g:
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            try:
+                g.add(kind="note", content="x")
+            except sqlite3.ProgrammingError as exc:
+                errors.append(exc)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        assert len(errors) == 1
+        assert "thread" in str(errors[0]).lower()
+
+
+def test_init_check_same_thread_false_allows_worker_thread_use(tmp_path):
+    """A Grimoire opened with check_same_thread=False survives a thread hop.
+
+    Canonical case: FastAPI sync handlers run in asyncio's default executor.
+    Without this kwarg, the first call from a worker thread raises
+    ProgrammingError before any work happens.
+    """
+    db = tmp_path / "store.db"
+    with Grimoire.init(db, embedder=FakeEmbedder(), check_same_thread=False) as g:
+        added: list[str] = []
+
+        def worker() -> None:
+            entry = g.add(kind="note", content="hello from worker")
+            added.append(entry.id)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        assert len(added) == 1
+
+        # The write is visible to the main thread, both via id lookup and search.
+        fetched = g.get(added[0])
+        assert fetched is not None
+        assert fetched.content == "hello from worker"
+        results = g.vector_search("hello from worker", k=1)
+        assert results[0].id == added[0]
+        kw = g.keyword_search("worker")
+        assert len(kw) == 1
+
+
+def test_open_check_same_thread_false_threads_through(tmp_path):
+    """The kwarg must work on `open` too, not just `init`."""
+    db = tmp_path / "store.db"
+    Grimoire.init(db, embedder=FakeEmbedder()).close()
+
+    with Grimoire.open(db, embedder=FakeEmbedder(), check_same_thread=False) as g:
+        added: list[str] = []
+
+        def worker() -> None:
+            added.append(g.add(kind="note", content="reopened cross-thread").id)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        assert len(added) == 1
+        assert g.get(added[0]) is not None
 
 
 # ---------- update_many / delete_many ----------

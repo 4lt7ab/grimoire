@@ -1,6 +1,6 @@
 [project]
 name = "4lt7ab-grimoire-cli"
-version = "0.0.6"
+version = "0.0.7"
 description = "CLI for managing a grimoire datastore"
 requires-python = ">=3.12"
 dependencies = ["4lt7ab-grimoire", "typer>=0.12"]

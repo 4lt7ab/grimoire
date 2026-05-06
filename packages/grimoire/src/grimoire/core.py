@@ -54,18 +54,30 @@ class Grimoire:
         self._embedder = embedder
 
     @classmethod
-    def init(cls, path: str | Path, *, embedder: Embedder) -> Self:
+    def init(
+        cls,
+        path: str | Path,
+        *,
+        embedder: Embedder,
+        check_same_thread: bool = True,
+    ) -> Self:
         """Create the grimoire if missing, validate if present, and warm the embedder.
 
         Idempotent. After this returns, the file exists with a lock row matching
         the supplied embedder, and the embedder has been exercised once via
         `embed(_WARMUP_PROBE)` so any deferred setup work has happened.
+
+        Pass `check_same_thread=False` to share the instance across worker
+        threads — needed for sync HTTP handlers running under FastAPI's,
+        Starlette's, or gunicorn's thread pool. SQLite's connection-level
+        locking still serializes access; this lifts Python's stdlib
+        thread-affinity guard, it doesn't add concurrency.
         """
         path = Path(path)
         is_new = not path.exists()
         if is_new:
             path.parent.mkdir(parents=True, exist_ok=True)
-        conn = _open_conn(str(path))
+        conn = _open_conn(str(path), check_same_thread=check_same_thread)
         try:
             if is_new:
                 create(conn, embedder)
@@ -78,12 +90,22 @@ class Grimoire:
             raise
 
     @classmethod
-    def open(cls, path: str | Path, *, embedder: Embedder) -> Self:
-        """Open an existing grimoire; raises `GrimoireNotFound` if missing."""
+    def open(
+        cls,
+        path: str | Path,
+        *,
+        embedder: Embedder,
+        check_same_thread: bool = True,
+    ) -> Self:
+        """Open an existing grimoire; raises `GrimoireNotFound` if missing.
+
+        Pass `check_same_thread=False` to share the instance across worker
+        threads. See `init` for the full note.
+        """
         path = Path(path)
         if not path.exists():
             raise GrimoireNotFound(f"No grimoire at {path}")
-        conn = _open_conn(str(path))
+        conn = _open_conn(str(path), check_same_thread=check_same_thread)
         try:
             validate(conn, embedder)
             return cls(conn=conn, embedder=embedder)
@@ -678,8 +700,8 @@ class Grimoire:
         self.close()
 
 
-def _open_conn(path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
+def _open_conn(path: str, *, check_same_thread: bool = True) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, check_same_thread=check_same_thread)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
