@@ -24,6 +24,28 @@ KEYWORD_BM25_WEIGHTS = (1.0, 5.0)
 _BM25_RANK = f"bm25(entries_fts, {KEYWORD_BM25_WEIGHTS[0]}, {KEYWORD_BM25_WEIGHTS[1]})"
 
 
+class _Unset:
+    """Sentinel for "field not supplied" in `update()`.
+
+    `None` is a meaningful value for nullable fields (clears the column), so
+    we can't reuse it to mean "leave alone". A dedicated sentinel keeps the
+    two cases unambiguous.
+    """
+
+    _instance: _Unset | None = None
+
+    def __new__(cls) -> _Unset:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+_UNSET: _Unset = _Unset()
+
+
 class Grimoire:
     """A semantically-indexed datastore backed by one SQLite file."""
 
@@ -256,6 +278,244 @@ class Grimoire:
         rows = self._conn.execute(sql, params).fetchall()
         return [_row_to_entry(r) for r in rows]
 
+    def update(
+        self,
+        entry_id: str,
+        *,
+        kind: str | None = None,
+        content: str | None = None,
+        payload: dict[str, Any] | None | _Unset = _UNSET,
+        threshold: float | None | _Unset = _UNSET,
+        keywords: list[str] | None | _Unset = _UNSET,
+    ) -> Entry | None:
+        """Patch fields on an entry, leaving omitted fields untouched.
+
+        `kind` and `content` are non-nullable — pass a value to change them,
+        or omit (default `None`) to leave them alone. `payload`, `threshold`,
+        and `keywords` are nullable — omit to leave alone, pass `None` to
+        clear, or pass a new value to replace.
+
+        Returns the updated entry, or `None` if the id is unknown. Re-embeds
+        only when `content` changed, re-indexes FTS only when `content` or
+        `keywords` changed, and rewrites the vector row only when `content`
+        or `kind` changed.
+        """
+        current = self.get(entry_id)
+        if current is None:
+            return None
+
+        new_kind = current.kind if kind is None else kind
+        new_content = current.content if content is None else content
+        new_payload = current.payload if isinstance(payload, _Unset) else payload
+        new_threshold = (
+            current.threshold if isinstance(threshold, _Unset) else threshold
+        )
+        new_keywords = current.keywords if isinstance(keywords, _Unset) else keywords
+
+        content_changed = new_content != current.content
+        keywords_changed = new_keywords != current.keywords
+        kind_changed = new_kind != current.kind
+
+        payload_json = json.dumps(new_payload) if new_payload is not None else None
+        keywords_json = json.dumps(new_keywords) if new_keywords is not None else None
+        keywords_text = " ".join(new_keywords) if new_keywords else ""
+
+        with self._conn:
+            self._conn.execute(
+                """
+                UPDATE entries
+                SET kind = ?, content = ?, keywords = ?, payload = ?, threshold = ?
+                WHERE id = ?
+                """,
+                (
+                    new_kind,
+                    new_content,
+                    keywords_json,
+                    payload_json,
+                    new_threshold,
+                    entry_id,
+                ),
+            )
+
+            if content_changed or kind_changed:
+                # vec0 partitions on `kind`, so a kind change requires moving
+                # the row to a different partition — done as delete + reinsert.
+                # When only kind changed, reuse the stored embedding blob to
+                # avoid an unnecessary embedder call.
+                if content_changed:
+                    new_blob = _pack(self._embedder.embed(new_content))
+                else:
+                    row = self._conn.execute(
+                        "SELECT embedding FROM vectors WHERE entry_id = ?",
+                        (entry_id,),
+                    ).fetchone()
+                    new_blob = row[0]
+                self._conn.execute(
+                    "DELETE FROM vectors WHERE entry_id = ?", (entry_id,)
+                )
+                self._conn.execute(
+                    "INSERT INTO vectors (entry_id, kind, embedding) VALUES (?, ?, ?)",
+                    (entry_id, new_kind, new_blob),
+                )
+
+            if content_changed or keywords_changed:
+                self._conn.execute(
+                    "DELETE FROM entries_fts WHERE entry_id = ?", (entry_id,)
+                )
+                self._conn.execute(
+                    "INSERT INTO entries_fts (content, keywords, entry_id) "
+                    "VALUES (?, ?, ?)",
+                    (new_content, keywords_text, entry_id),
+                )
+
+        return Entry(
+            id=entry_id,
+            kind=new_kind,
+            content=new_content,
+            payload=new_payload,
+            threshold=new_threshold,
+            keywords=new_keywords,
+        )
+
+    def update_many(self, records: Iterable[Mapping[str, Any]]) -> list[Entry | None]:
+        """Patch many entries in one transaction with one batched embed call.
+
+        Each record must include `id`; remaining keys mirror `update`'s
+        kwargs (`kind`, `content`, `payload`, `threshold`, `keywords`).
+        Absent keys leave the field unchanged; passing `None` clears nullable
+        fields (`payload`, `threshold`, `keywords`).
+
+        Returns one `Entry | None` per input record in input order — `None`
+        when the id is unknown. Atomic: if embedding or any update fails,
+        nothing is committed — unlike a loop over `update`, which would leave
+        partial state behind.
+
+        Duplicate ids in input raise `ValueError`: which record wins is
+        ambiguous, and the returned entries would lie about the post-batch
+        state. Callers should dedupe upstream.
+        """
+        records = list(records)
+        if not records:
+            return []
+
+        ids = [r["id"] for r in records]
+        if len(ids) != len(set(ids)):
+            raise ValueError("update_many: duplicate ids in input")
+
+        placeholders = ",".join(["?"] * len(ids))
+        rows = self._conn.execute(
+            f"SELECT id, kind, content, keywords, payload, threshold "
+            f"FROM entries WHERE id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        current_by_id = {row[0]: _row_to_entry(row) for row in rows}
+
+        # First pass: compute target state per record, gather contents to embed.
+        targets: list[dict[str, Any] | None] = []
+        contents_to_embed: list[str] = []
+        embed_indices: list[int] = []
+        for i, r in enumerate(records):
+            current = current_by_id.get(r["id"])
+            if current is None:
+                targets.append(None)
+                continue
+            new_kind = r.get("kind", current.kind)
+            new_content = r.get("content", current.content)
+            new_payload = r.get("payload", current.payload)
+            new_threshold = r.get("threshold", current.threshold)
+            new_keywords = r.get("keywords", current.keywords)
+            target = {
+                "id": r["id"],
+                "kind": new_kind,
+                "content": new_content,
+                "payload": new_payload,
+                "threshold": new_threshold,
+                "keywords": new_keywords,
+                "content_changed": new_content != current.content,
+                "kind_changed": new_kind != current.kind,
+                "keywords_changed": new_keywords != current.keywords,
+            }
+            targets.append(target)
+            if target["content_changed"]:
+                embed_indices.append(i)
+                contents_to_embed.append(new_content)
+
+        # One batched embed call covering only records whose content changed.
+        blobs: dict[int, bytes] = {}
+        if contents_to_embed:
+            new_vectors = self._embedder.embed_many(contents_to_embed)
+            for idx, vec in zip(embed_indices, new_vectors, strict=True):
+                blobs[idx] = _pack(vec)
+
+        results: list[Entry | None] = []
+        with self._conn:
+            for i, t in enumerate(targets):
+                if t is None:
+                    results.append(None)
+                    continue
+
+                payload_json = (
+                    json.dumps(t["payload"]) if t["payload"] is not None else None
+                )
+                keywords_json = (
+                    json.dumps(t["keywords"]) if t["keywords"] is not None else None
+                )
+                keywords_text = " ".join(t["keywords"]) if t["keywords"] else ""
+
+                self._conn.execute(
+                    "UPDATE entries SET kind = ?, content = ?, keywords = ?, "
+                    "payload = ?, threshold = ? WHERE id = ?",
+                    (
+                        t["kind"],
+                        t["content"],
+                        keywords_json,
+                        payload_json,
+                        t["threshold"],
+                        t["id"],
+                    ),
+                )
+
+                if t["content_changed"] or t["kind_changed"]:
+                    if i in blobs:
+                        new_blob = blobs[i]
+                    else:
+                        # Kind changed but content did not — reuse stored embedding.
+                        row = self._conn.execute(
+                            "SELECT embedding FROM vectors WHERE entry_id = ?",
+                            (t["id"],),
+                        ).fetchone()
+                        new_blob = row[0]
+                    self._conn.execute(
+                        "DELETE FROM vectors WHERE entry_id = ?", (t["id"],)
+                    )
+                    self._conn.execute(
+                        "INSERT INTO vectors (entry_id, kind, embedding) "
+                        "VALUES (?, ?, ?)",
+                        (t["id"], t["kind"], new_blob),
+                    )
+
+                if t["content_changed"] or t["keywords_changed"]:
+                    self._conn.execute(
+                        "DELETE FROM entries_fts WHERE entry_id = ?", (t["id"],)
+                    )
+                    self._conn.execute(
+                        "INSERT INTO entries_fts (content, keywords, entry_id) "
+                        "VALUES (?, ?, ?)",
+                        (t["content"], keywords_text, t["id"]),
+                    )
+
+                results.append(
+                    Entry(
+                        id=t["id"],
+                        kind=t["kind"],
+                        content=t["content"],
+                        payload=t["payload"],
+                        threshold=t["threshold"],
+                        keywords=t["keywords"],
+                    )
+                )
+        return results
+
     def delete(self, entry_id: str) -> bool:
         with self._conn:
             cursor = self._conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
@@ -266,6 +526,44 @@ class Grimoire:
                 "DELETE FROM entries_fts WHERE entry_id = ?", (entry_id,)
             )
         return True
+
+    def delete_many(self, ids: Iterable[str]) -> list[bool]:
+        """Delete many entries in one transaction.
+
+        Returns one `bool` per input id in input order — `True` if the entry
+        existed and was deleted, `False` otherwise. Duplicate ids each
+        receive the same answer (their pre-call existence). Atomic: all
+        successful deletes apply or none do.
+        """
+        ids = list(ids)
+        if not ids:
+            return []
+
+        unique = list(dict.fromkeys(ids))  # preserves first-seen order, deduped
+        placeholders = ",".join(["?"] * len(unique))
+        existing = {
+            row[0]
+            for row in self._conn.execute(
+                f"SELECT id FROM entries WHERE id IN ({placeholders})", unique
+            ).fetchall()
+        }
+
+        if existing:
+            existing_list = list(existing)
+            ph = ",".join(["?"] * len(existing_list))
+            with self._conn:
+                self._conn.execute(
+                    f"DELETE FROM entries WHERE id IN ({ph})", existing_list
+                )
+                self._conn.execute(
+                    f"DELETE FROM vectors WHERE entry_id IN ({ph})", existing_list
+                )
+                self._conn.execute(
+                    f"DELETE FROM entries_fts WHERE entry_id IN ({ph})",
+                    existing_list,
+                )
+
+        return [eid in existing for eid in ids]
 
     def vector_search(
         self,

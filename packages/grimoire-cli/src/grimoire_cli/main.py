@@ -8,6 +8,8 @@ from grimoire import Entry, Grimoire, GrimoireError, GrimoireNotFound
 
 RECOGNIZED_FIELDS = {"kind", "content", "payload", "threshold", "keywords"}
 REQUIRED_FIELDS = {"kind", "content"}
+UPDATE_RECOGNIZED_FIELDS = {"id", *RECOGNIZED_FIELDS}
+UPDATE_REQUIRED_FIELDS = {"id"}
 # Each batch is one atomic transaction; on failure, only the in-flight batch
 # rolls back. Smaller = better recovery granularity, slightly more overhead.
 # 200 captures ~95% of fastembed's batching speedup vs single calls.
@@ -16,6 +18,7 @@ PROGRESS_EVERY = 1000
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 DB_FILENAME = "grimoire.db"
 MODELS_DIRNAME = "models"
+
 
 # Reusable annotations — every command needs --mount, and the read commands
 # share --kind, --k, --created-after, and --created-before. Defining them
@@ -317,6 +320,136 @@ def get(
 
 
 @app.command()
+def update(
+    entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
+    mount: Mount,
+    kind: Annotated[
+        str | None,
+        typer.Option(help="Replace the entry's kind label."),
+    ] = None,
+    content: Annotated[
+        str | None,
+        typer.Option(help="Replace the entry's content (re-embeds and re-indexes)."),
+    ] = None,
+    payload: Annotated[
+        str | None,
+        typer.Option(help="Replace the payload with this JSON object."),
+    ] = None,
+    clear_payload: Annotated[
+        bool,
+        typer.Option("--clear-payload", help="Clear the payload (set to NULL)."),
+    ] = False,
+    threshold: Annotated[
+        float | None,
+        typer.Option(help="Replace the per-entry similarity threshold."),
+    ] = None,
+    clear_threshold: Annotated[
+        bool,
+        typer.Option("--clear-threshold", help="Clear the threshold (set to NULL)."),
+    ] = False,
+    keyword: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--keyword",
+            help=(
+                "Replace the keyword list. Repeatable: --keyword foo --keyword bar. "
+                "Use --clear-keywords to remove all keywords."
+            ),
+        ),
+    ] = None,
+    clear_keywords: Annotated[
+        bool,
+        typer.Option("--clear-keywords", help="Clear the keyword list (set to NULL)."),
+    ] = False,
+) -> None:
+    """Patch fields on an existing entry. Omitted fields are left unchanged."""
+    if payload is not None and clear_payload:
+        _fail("--payload and --clear-payload are mutually exclusive")
+    if threshold is not None and clear_threshold:
+        _fail("--threshold and --clear-threshold are mutually exclusive")
+    if keyword is not None and clear_keywords:
+        _fail("--keyword and --clear-keywords are mutually exclusive")
+
+    # Build kwargs that distinguish "unset" (omit) from "set to None" (clear)
+    # by simply not passing the key when the user didn't supply anything.
+    kwargs: dict[str, object] = {}
+    if kind is not None:
+        kwargs["kind"] = kind
+    if content is not None:
+        kwargs["content"] = content
+    if clear_payload:
+        kwargs["payload"] = None
+    elif payload is not None:
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            _fail(f"--payload is not valid JSON: {exc.msg}")
+        if not isinstance(parsed, dict):
+            _fail("--payload must be a JSON object")
+        kwargs["payload"] = parsed
+    if clear_threshold:
+        kwargs["threshold"] = None
+    elif threshold is not None:
+        kwargs["threshold"] = threshold
+    if clear_keywords:
+        kwargs["keywords"] = None
+    elif keyword is not None:
+        kwargs["keywords"] = keyword
+
+    with _open_grimoire(mount) as g:
+        entry = g.update(entry_id, **kwargs)
+        if entry is None:
+            _fail(f"No entry with id {entry_id!r}")
+        _print_entry(entry)
+
+
+@app.command(name="update-many")
+def update_many(
+    file: Annotated[
+        Path,
+        typer.Argument(
+            help=(
+                "Path to a JSONL file. One JSON object per line; each must include "
+                "`id` and may include `kind`, `content`, `payload`, `threshold`, "
+                "`keywords`. Absent keys leave the field unchanged; an explicit "
+                "`null` clears nullable fields."
+            ),
+            exists=True,
+            file_okay=True,
+            dir_okay=False,
+            readable=True,
+        ),
+    ],
+    mount: Mount,
+) -> None:
+    """Bulk-patch entries in a grimoire from a JSONL file."""
+    records = _load_update_records(file)
+    if not records:
+        typer.echo(f"No records to update from {file}")
+        return
+
+    total = 0
+    missing = 0
+    last_milestone = 0
+    with _open_grimoire(mount) as g:
+        for chunk_start in range(0, len(records), INGEST_BATCH_SIZE):
+            chunk = records[chunk_start : chunk_start + INGEST_BATCH_SIZE]
+            for entry in g.update_many(chunk):
+                total += 1
+                if entry is None:
+                    missing += 1
+            milestone = total // PROGRESS_EVERY
+            if milestone > last_milestone and total < len(records):
+                typer.echo(f"  updated {total}...", err=True)
+                last_milestone = milestone
+
+    msg = f"Updated {len(records) - missing} of {len(records)} records"
+    if missing:
+        msg += f" ({missing} unknown id{'s' if missing != 1 else ''})"
+    typer.echo(msg)
+
+
+@app.command()
 def delete(
     entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
     mount: Mount,
@@ -326,6 +459,37 @@ def delete(
         if not g.delete(entry_id):
             _fail(f"No entry with id {entry_id!r}")
     typer.echo(f"Deleted {entry_id}")
+
+
+@app.command(name="delete-many")
+def delete_many(
+    file: Annotated[
+        Path,
+        typer.Argument(
+            help=(
+                "Path to a file with one entry id per line. Pass '-' to read "
+                "ids from stdin. Blank lines and lines starting with '#' are "
+                "ignored."
+            ),
+        ),
+    ],
+    mount: Mount,
+) -> None:
+    """Bulk-delete entries by id."""
+    ids = _load_ids(file)
+    if not ids:
+        typer.echo(f"No ids to delete from {file}")
+        return
+
+    with _open_grimoire(mount) as g:
+        results = g.delete_many(ids)
+
+    deleted = sum(1 for ok in results if ok)
+    missing = len(results) - deleted
+    msg = f"Deleted {deleted} of {len(results)} ids"
+    if missing:
+        msg += f" ({missing} unknown id{'s' if missing != 1 else ''})"
+    typer.echo(msg)
 
 
 def _open_grimoire(mount: Path) -> Grimoire:
@@ -399,6 +563,61 @@ def _validate_record(record: object, path: Path, line_no: int) -> None:
             f"{path}:{line_no}: unknown fields {sorted(unknown)}. "
             f"Put extra metadata in `payload`."
         )
+
+
+def _load_update_records(path: Path) -> list[dict]:
+    records: list[dict] = []
+    with path.open(encoding="utf-8") as f:
+        for line_no, raw in enumerate(f, 1):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                _fail(f"{path}:{line_no}: invalid JSON: {exc.msg}")
+            _validate_update_record(record, path, line_no)
+            records.append(record)
+    return records
+
+
+def _validate_update_record(record: object, path: Path, line_no: int) -> None:
+    if not isinstance(record, dict):
+        _fail(f"{path}:{line_no}: record must be a JSON object")
+    missing = UPDATE_REQUIRED_FIELDS - record.keys()
+    if missing:
+        _fail(f"{path}:{line_no}: missing required fields: {sorted(missing)}")
+    unknown = record.keys() - UPDATE_RECOGNIZED_FIELDS
+    if unknown:
+        _fail(
+            f"{path}:{line_no}: unknown fields {sorted(unknown)}. "
+            f"Put extra metadata in `payload`."
+        )
+
+
+def _load_ids(path: Path) -> list[str]:
+    """Read entry ids one per line from `path`. '-' means stdin.
+
+    Blank lines and `#`-prefixed comments are skipped, matching common
+    pipeline conventions (e.g. `grimoire list | jq -r .id`).
+    """
+    if str(path) == "-":
+        source = typer.get_text_stream("stdin")
+    else:
+        if not path.exists():
+            _fail(f"file not found: {path}")
+        source = path.open(encoding="utf-8")
+    ids: list[str] = []
+    try:
+        for raw in source:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            ids.append(line)
+    finally:
+        if str(path) != "-":
+            source.close()
+    return ids
 
 
 def _print_entry(entry: Entry) -> None:

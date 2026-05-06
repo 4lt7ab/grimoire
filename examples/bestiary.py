@@ -40,6 +40,24 @@ def cmd_list(g: Grimoire, args: argparse.Namespace) -> None:
         print(f"{e.id}  {e.kind:>10}  {e.content}")
 
 
+def cmd_edit(g: Grimoire, args: argparse.Namespace) -> None:
+    # Build only the kwargs the user actually supplied — omitted fields stay
+    # as they are, which is the whole point of update's PATCH semantics.
+    fields: dict[str, object] = {}
+    if args.kind is not None:
+        fields["kind"] = args.kind
+    if args.description is not None:
+        fields["content"] = args.description
+    if not fields:
+        print("(nothing to change — pass --kind or --description)")
+        return
+    entry = g.update(args.id, **fields)
+    if entry is None:
+        print(f"No creature with id {args.id!r}")
+        return
+    print(f"Updated {entry.id}  {entry.kind:>10}  {entry.content}")
+
+
 def cmd_remove(g: Grimoire, args: argparse.Namespace) -> None:
     if g.delete(args.id):
         print(f"Removed {args.id}")
@@ -68,6 +86,12 @@ def main() -> None:
     lst.add_argument("--kind", help="Restrict to one creature class.")
     lst.add_argument("--limit", type=int, default=20)
     lst.set_defaults(func=cmd_list)
+
+    edit = sub.add_parser("edit", help="Patch a creature in place.")
+    edit.add_argument("id")
+    edit.add_argument("--kind", help="Recategorize the creature.")
+    edit.add_argument("--description", help="Replace the creature's description.")
+    edit.set_defaults(func=cmd_edit)
 
     rm = sub.add_parser("remove", help="Delete a creature by id.")
     rm.add_argument("id")

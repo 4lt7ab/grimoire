@@ -26,16 +26,17 @@ Showcases `dynamic_threshold` (per-record similarity gates), `kind` partitioning
 
 ### `bestiary.py` — a creature catalog with a CLI
 
-A tiny domain-shaped CLI in ~70 lines. `add` to record a creature, `find` to query in natural language, `list` to browse, `remove` to delete. Sits directly on the library — everything else is delegated.
+A tiny domain-shaped CLI in ~90 lines. `add` to record a creature, `find` to query in natural language, `list` to browse, `edit` to revise an entry in place, `remove` to delete. Sits directly on the library — everything else is delegated.
 
 ```sh
 uv run python examples/bestiary.py add --kind dragon "Old Wyrm of the Ash Peaks. Hoards obsidian, breathes fire."
 uv run python examples/bestiary.py add --kind phoenix "Solar phoenix. Reborn at dawn from its own ashes."
 uv run python examples/bestiary.py find "creatures that come back from the dead"
 uv run python examples/bestiary.py list --kind dragon
+uv run python examples/bestiary.py edit <id> --description "Old Wyrm of the Ash Peaks. Hoards obsidian and starlight."
 ```
 
-Showcases the full surface (`add`, `search`, `list`, `delete`) used in a way that scales to any catalog problem — swap "creatures" for whatever your domain stores.
+Showcases the full single-record surface (`add`, `search`, `list`, `update`, `delete`) used in a way that scales to any catalog problem — swap "creatures" for whatever your domain stores.
 
 ## Local files
 

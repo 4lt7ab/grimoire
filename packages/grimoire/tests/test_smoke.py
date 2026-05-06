@@ -708,6 +708,373 @@ def test_add_many_results_are_searchable(tmp_path):
         assert len(k_results) == 1
 
 
+# ---------- update_many / delete_many ----------
+
+
+def test_update_many_returns_empty_list_on_empty_input(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        assert g.update_many([]) == []
+
+
+def test_update_many_returns_entries_aligned_to_input_order(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        a = g.add(kind="note", content="first")
+        b = g.add(kind="note", content="second")
+        c = g.add(kind="note", content="third")
+        results = g.update_many(
+            [
+                {"id": c.id, "content": "c2"},
+                {"id": a.id, "content": "a2"},
+                {"id": b.id, "content": "b2"},
+            ]
+        )
+        assert [r.id for r in results] == [c.id, a.id, b.id]
+        assert [r.content for r in results] == ["c2", "a2", "b2"]
+
+
+def test_update_many_returns_none_for_unknown_id(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        a = g.add(kind="note", content="real")
+        results = g.update_many(
+            [
+                {"id": a.id, "content": "still real"},
+                {"id": "01HXXXXXXXXXXXXXXXXXXXXXXX", "content": "ghost"},
+            ]
+        )
+        assert results[0] is not None
+        assert results[0].content == "still real"
+        assert results[1] is None
+
+
+def test_update_many_calls_embed_many_once_for_changed_contents(tmp_path):
+    db = tmp_path / "store.db"
+    Grimoire.init(db, embedder=CountingEmbedder()).close()
+    e = CountingEmbedder()
+    with Grimoire.open(db, embedder=e) as g:
+        a = g.add(kind="note", content="A")
+        b = g.add(kind="note", content="B")
+        c = g.add(kind="note", content="C")
+        e.embed_calls = 0
+        e.embed_many_calls = 0
+        g.update_many(
+            [
+                {"id": a.id, "content": "AA"},
+                {"id": b.id, "kind": "spell"},  # no content change → no embed
+                {"id": c.id, "content": "CC"},
+            ]
+        )
+        assert e.embed_many_calls == 1
+        assert e.embed_calls == 0
+
+
+def test_update_many_skips_embedder_entirely_when_no_content_changes(tmp_path):
+    """Pin: a payload-only batch must not call the embedder at all."""
+    db = tmp_path / "store.db"
+    Grimoire.init(db, embedder=CountingEmbedder()).close()
+    e = CountingEmbedder()
+    with Grimoire.open(db, embedder=e) as g:
+        a = g.add(kind="note", content="A")
+        b = g.add(kind="note", content="B")
+        e.embed_calls = 0
+        e.embed_many_calls = 0
+        g.update_many(
+            [
+                {"id": a.id, "payload": {"x": 1}},
+                {"id": b.id, "kind": "spell"},
+            ]
+        )
+        assert e.embed_calls == 0
+        assert e.embed_many_calls == 0
+
+
+def test_update_many_atomic_on_embed_failure(tmp_path):
+    """If embedding fails mid-batch, no records leak through partially."""
+
+    class FailEmbedMany(FakeEmbedder):
+        def embed_many(self, texts):
+            raise RuntimeError("embed batch failed")
+
+    db = tmp_path / "store.db"
+    with Grimoire.init(db, embedder=FakeEmbedder()) as g:
+        a = g.add(kind="note", content="original")
+
+    with Grimoire.open(db, embedder=FailEmbedMany()) as g:
+        with pytest.raises(RuntimeError, match="embed batch failed"):
+            g.update_many([{"id": a.id, "content": "new"}])
+        # Original survived intact.
+        fetched = g.get(a.id)
+        assert fetched is not None
+        assert fetched.content == "original"
+
+
+def test_update_many_raises_on_duplicate_ids(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        a = g.add(kind="note", content="hello")
+        with pytest.raises(ValueError, match="duplicate"):
+            g.update_many(
+                [
+                    {"id": a.id, "content": "v1"},
+                    {"id": a.id, "content": "v2"},
+                ]
+            )
+
+
+def test_update_many_preserves_omitted_fields(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        added = g.add(
+            kind="note",
+            content="hi",
+            payload={"k": "v"},
+            threshold=0.5,
+            keywords=["a"],
+        )
+        [updated] = g.update_many([{"id": added.id, "content": "bye"}])
+        assert updated is not None
+        assert updated.payload == {"k": "v"}
+        assert updated.threshold == 0.5
+        assert updated.keywords == ["a"]
+
+
+def test_update_many_clears_nullable_fields_when_explicit_none(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        added = g.add(
+            kind="note",
+            content="hi",
+            payload={"k": "v"},
+            threshold=0.5,
+            keywords=["a"],
+        )
+        [updated] = g.update_many(
+            [{"id": added.id, "payload": None, "threshold": None, "keywords": None}]
+        )
+        assert updated is not None
+        assert updated.payload is None
+        assert updated.threshold is None
+        assert updated.keywords is None
+
+
+def test_update_many_kind_change_moves_partition_without_reembed(tmp_path):
+    db = tmp_path / "store.db"
+    Grimoire.init(db, embedder=CountingEmbedder()).close()
+    e = CountingEmbedder()
+    with Grimoire.open(db, embedder=e) as g:
+        added = g.add(kind="note", content="lumos")
+        e.embed_calls = 0
+        e.embed_many_calls = 0
+        g.update_many([{"id": added.id, "kind": "spell"}])
+        assert e.embed_calls == 0
+        assert e.embed_many_calls == 0
+        assert g.vector_search("lumos", kind="note", k=10) == []
+        assert len(g.vector_search("lumos", kind="spell", k=10)) == 1
+
+
+def test_delete_many_returns_empty_list_on_empty_input(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        assert g.delete_many([]) == []
+
+
+def test_delete_many_returns_bools_aligned_to_input(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        a = g.add(kind="note", content="a")
+        b = g.add(kind="note", content="b")
+        results = g.delete_many([a.id, "01HXXXXXXXXXXXXXXXXXXXXXXX", b.id])
+        assert results == [True, False, True]
+        assert g.get(a.id) is None
+        assert g.get(b.id) is None
+
+
+def test_delete_many_cascades_to_vectors_and_fts(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        a = g.add(kind="note", content="ephemeral phoenix")
+        b = g.add(kind="note", content="another phoenix")
+        g.delete_many([a.id, b.id])
+        assert g.vector_search("phoenix", k=10) == []
+        assert g.keyword_search("phoenix") == []
+
+
+def test_delete_many_duplicate_ids_get_same_answer(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        a = g.add(kind="note", content="hello")
+        # Both occurrences should report True (existed at call time).
+        results = g.delete_many([a.id, a.id])
+        assert results == [True, True]
+        assert g.get(a.id) is None
+
+
+def test_delete_many_does_not_touch_unlisted_entries(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        keep = g.add(kind="note", content="survivor")
+        gone = g.add(kind="note", content="doomed")
+        g.delete_many([gone.id])
+        assert g.get(keep.id) is not None
+        assert g.get(gone.id) is None
+
+
+# ---------- update ----------
+
+
+def test_update_returns_none_for_missing_id(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        assert g.update("01HXXXXXXXXXXXXXXXXXXXXXXX", content="x") is None
+
+
+def test_update_no_args_returns_unchanged_entry(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        added = g.add(kind="note", content="hello", keywords=["a"])
+        result = g.update(added.id)
+        assert result is not None
+        assert result.id == added.id
+        assert result.content == "hello"
+        assert result.kind == "note"
+        assert result.keywords == ["a"]
+
+
+def test_update_changes_content_and_reindexes_search(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        added = g.add(kind="note", content="the moon is full")
+        updated = g.update(added.id, content="dragons fly at midnight")
+        assert updated is not None
+        assert updated.content == "dragons fly at midnight"
+
+        # Vector search picks up new content; old query no longer hits.
+        new_results = g.vector_search("dragons fly at midnight", k=1)
+        assert new_results[0].id == added.id
+        assert new_results[0].distance == 0.0
+
+        # FTS reflects new tokens.
+        assert g.keyword_search("moon") == []
+        kw = g.keyword_search("dragons")
+        assert len(kw) == 1
+        assert kw[0].id == added.id
+
+
+def test_update_changes_kind_moves_vector_partition(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        added = g.add(kind="note", content="lumos")
+        g.update(added.id, kind="spell")
+
+        assert g.vector_search("lumos", kind="note", k=10) == []
+        spells = g.vector_search("lumos", kind="spell", k=10)
+        assert len(spells) == 1
+        assert spells[0].id == added.id
+        assert spells[0].kind == "spell"
+
+
+def test_update_kind_only_does_not_reembed(tmp_path):
+    """Pin: a kind-only patch should not call the embedder."""
+    db = tmp_path / "store.db"
+    Grimoire.init(db, embedder=CountingEmbedder()).close()
+    e = CountingEmbedder()
+    with Grimoire.open(db, embedder=e) as g:
+        added = g.add(kind="note", content="hello")
+        e.embed_calls = 0
+        e.embed_many_calls = 0
+        g.update(added.id, kind="spell")
+        assert e.embed_calls == 0
+        assert e.embed_many_calls == 0
+
+
+def test_update_content_only_calls_embed_once(tmp_path):
+    db = tmp_path / "store.db"
+    Grimoire.init(db, embedder=CountingEmbedder()).close()
+    e = CountingEmbedder()
+    with Grimoire.open(db, embedder=e) as g:
+        added = g.add(kind="note", content="hello")
+        e.embed_calls = 0
+        g.update(added.id, content="world")
+        assert e.embed_calls == 1
+
+
+def test_update_payload_only_does_not_reembed_or_reindex_fts(tmp_path):
+    db = tmp_path / "store.db"
+    Grimoire.init(db, embedder=CountingEmbedder()).close()
+    e = CountingEmbedder()
+    with Grimoire.open(db, embedder=e) as g:
+        added = g.add(kind="note", content="hello")
+        e.embed_calls = 0
+        result = g.update(added.id, payload={"foo": "bar"})
+        assert e.embed_calls == 0
+        assert result is not None
+        assert result.payload == {"foo": "bar"}
+        # FTS unaffected — content still findable.
+        assert g.keyword_search("hello")[0].id == added.id
+
+
+def test_update_clears_nullable_fields_when_passed_none(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        added = g.add(
+            kind="note",
+            content="hello",
+            payload={"k": "v"},
+            threshold=0.5,
+            keywords=["a"],
+        )
+        updated = g.update(added.id, payload=None, threshold=None, keywords=None)
+        assert updated is not None
+        assert updated.payload is None
+        assert updated.threshold is None
+        assert updated.keywords is None
+        # Persists across re-fetch.
+        fetched = g.get(added.id)
+        assert fetched is not None
+        assert fetched.payload is None
+        assert fetched.threshold is None
+        assert fetched.keywords is None
+
+
+def test_update_omitted_nullable_fields_are_preserved(tmp_path):
+    """Pin: omitting a nullable field must NOT clear it (the sentinel job)."""
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        added = g.add(
+            kind="note",
+            content="hello",
+            payload={"k": "v"},
+            threshold=0.5,
+            keywords=["a"],
+        )
+        # Patch only content — every other field must survive.
+        updated = g.update(added.id, content="world")
+        assert updated is not None
+        assert updated.payload == {"k": "v"}
+        assert updated.threshold == 0.5
+        assert updated.keywords == ["a"]
+
+
+def test_update_keywords_reindexes_fts(tmp_path):
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        added = g.add(kind="note", content="A bird sings", keywords=["phoenix"])
+        assert len(g.keyword_search("phoenix")) == 1
+        g.update(added.id, keywords=["dragon"])
+        assert g.keyword_search("phoenix") == []
+        results = g.keyword_search("dragon")
+        assert len(results) == 1
+        assert results[0].id == added.id
+
+
+def test_update_persists_across_reopens(tmp_path):
+    db = tmp_path / "store.db"
+    with Grimoire.init(db, embedder=FakeEmbedder()) as g:
+        added = g.add(kind="note", content="hello")
+        g.update(added.id, content="world", payload={"v": 1})
+
+    with Grimoire.open(db, embedder=FakeEmbedder()) as g:
+        fetched = g.get(added.id)
+        assert fetched is not None
+        assert fetched.content == "world"
+        assert fetched.payload == {"v": 1}
+
+
+def test_update_preserves_id_and_created_at(tmp_path):
+    """Updates must not reseat the entry's identity or its derived timestamp."""
+    with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+        added = g.add(kind="note", content="hello")
+        before = added.created_at
+        updated = g.update(added.id, content="world")
+        assert updated is not None
+        assert updated.id == added.id
+        assert updated.created_at == before
+
+
 def test_add_many_assigns_distinct_ids_in_input_order(tmp_path):
     with Grimoire.init(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         added = g.add_many([{"kind": "note", "content": f"e{i}"} for i in range(10)])

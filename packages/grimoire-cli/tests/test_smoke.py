@@ -64,7 +64,10 @@ def test_help_lists_all_commands():
         "list",
         "get",
         "delete",
+        "delete-many",
         "add",
+        "update",
+        "update-many",
         "info",
     ):
         assert cmd in result.output
@@ -165,6 +168,7 @@ def test_top_level_help_is_self_documenting():
         "init",
         "info",
         "add",
+        "update",
         "ingest",
         "vector-search",
         "keyword-search",
@@ -185,7 +189,10 @@ def test_top_level_help_is_self_documenting():
         "list",
         "get",
         "delete",
+        "delete-many",
         "add",
+        "update",
+        "update-many",
         "info",
     ],
 )
@@ -407,6 +414,280 @@ def test_delete_removes_entry(populated_mount):
     after = runner.invoke(app, ["list", "--mount", str(populated_mount)])
     remaining = [json.loads(line) for line in after.output.splitlines() if line.strip()]
     assert all(r["id"] != first["id"] for r in remaining)
+
+
+def test_update_changes_content(populated_mount):
+    list_result = runner.invoke(
+        app, ["list", "--mount", str(populated_mount), "--limit", "1"]
+    )
+    first = json.loads(list_result.output.strip())
+
+    upd = runner.invoke(
+        app,
+        [
+            "update",
+            first["id"],
+            "--mount",
+            str(populated_mount),
+            "--content",
+            "a brand new line",
+        ],
+    )
+    assert upd.exit_code == 0, upd.output
+    parsed = _last_json_line(upd.output)
+    assert parsed["id"] == first["id"]
+    assert parsed["content"] == "a brand new line"
+
+
+def test_update_clear_keywords_drops_them(tmp_path, _shared_models_cache):
+    pytest.importorskip("fastembed")
+    mount = _new_mount(tmp_path, _shared_models_cache)
+    _init(mount)
+    add_res = runner.invoke(
+        app,
+        [
+            "add",
+            "hello world",
+            "--mount",
+            str(mount),
+            "--keyword",
+            "alpha",
+            "--keyword",
+            "beta",
+        ],
+    )
+    assert add_res.exit_code == 0
+    added_id = _last_json_line(add_res.output)["id"]
+
+    upd = runner.invoke(
+        app,
+        ["update", added_id, "--mount", str(mount), "--clear-keywords"],
+    )
+    assert upd.exit_code == 0, upd.output
+    parsed = _last_json_line(upd.output)
+    assert "keywords" not in parsed
+
+
+def test_update_replaces_keywords(tmp_path, _shared_models_cache):
+    pytest.importorskip("fastembed")
+    mount = _new_mount(tmp_path, _shared_models_cache)
+    _init(mount)
+    add_res = runner.invoke(
+        app,
+        ["add", "hello world", "--mount", str(mount), "--keyword", "old"],
+    )
+    added_id = _last_json_line(add_res.output)["id"]
+
+    upd = runner.invoke(
+        app,
+        [
+            "update",
+            added_id,
+            "--mount",
+            str(mount),
+            "--keyword",
+            "new",
+            "--keyword",
+            "fresh",
+        ],
+    )
+    assert upd.exit_code == 0, upd.output
+    parsed = _last_json_line(upd.output)
+    assert parsed["keywords"] == ["new", "fresh"]
+
+
+def test_update_missing_id_fails(populated_mount):
+    result = runner.invoke(
+        app,
+        [
+            "update",
+            "01HXXXXXXXXXXXXXXXXXXXXXXX",
+            "--mount",
+            str(populated_mount),
+            "--content",
+            "x",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "No entry" in result.output
+
+
+def test_update_rejects_keyword_and_clear_keywords_together(populated_mount):
+    list_result = runner.invoke(
+        app, ["list", "--mount", str(populated_mount), "--limit", "1"]
+    )
+    first = json.loads(list_result.output.strip())
+    result = runner.invoke(
+        app,
+        [
+            "update",
+            first["id"],
+            "--mount",
+            str(populated_mount),
+            "--keyword",
+            "x",
+            "--clear-keywords",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "mutually exclusive" in result.output
+
+
+def test_update_rejects_invalid_payload_json(populated_mount):
+    list_result = runner.invoke(
+        app, ["list", "--mount", str(populated_mount), "--limit", "1"]
+    )
+    first = json.loads(list_result.output.strip())
+    result = runner.invoke(
+        app,
+        [
+            "update",
+            first["id"],
+            "--mount",
+            str(populated_mount),
+            "--payload",
+            "{not json",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "valid JSON" in result.output
+
+
+def test_update_many_patches_records_from_jsonl(populated_mount, tmp_path):
+    list_result = runner.invoke(app, ["list", "--mount", str(populated_mount)])
+    rows = [
+        json.loads(line) for line in list_result.output.splitlines() if line.strip()
+    ]
+    data = tmp_path / "patches.jsonl"
+    data.write_text(
+        json.dumps({"id": rows[0]["id"], "content": "patched zero"})
+        + "\n"
+        + json.dumps({"id": rows[1]["id"], "kind": "spell"})
+        + "\n"
+    )
+    result = runner.invoke(
+        app, ["update-many", str(data), "--mount", str(populated_mount)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Updated 2 of 2" in result.output
+
+    after = runner.invoke(app, ["list", "--mount", str(populated_mount)])
+    parsed = [json.loads(line) for line in after.output.splitlines() if line.strip()]
+    by_id = {p["id"]: p for p in parsed}
+    assert by_id[rows[0]["id"]]["content"] == "patched zero"
+    assert by_id[rows[1]["id"]]["kind"] == "spell"
+
+
+def test_update_many_reports_unknown_ids(populated_mount, tmp_path):
+    data = tmp_path / "patches.jsonl"
+    data.write_text(
+        json.dumps({"id": "01HXXXXXXXXXXXXXXXXXXXXXXX", "content": "ghost"}) + "\n"
+    )
+    result = runner.invoke(
+        app, ["update-many", str(data), "--mount", str(populated_mount)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Updated 0 of 1" in result.output
+    assert "1 unknown id" in result.output
+
+
+def test_update_many_rejects_missing_id(populated_mount, tmp_path):
+    data = tmp_path / "patches.jsonl"
+    data.write_text(json.dumps({"content": "no id here"}) + "\n")
+    result = runner.invoke(
+        app, ["update-many", str(data), "--mount", str(populated_mount)]
+    )
+    assert result.exit_code == 1
+    assert "missing required fields" in result.output
+    assert "'id'" in result.output
+
+
+def test_update_many_rejects_unknown_field(populated_mount, tmp_path):
+    data = tmp_path / "patches.jsonl"
+    data.write_text(
+        json.dumps({"id": "01HXXXXXXXXXXXXXXXXXXXXXXX", "extra": "stuff"}) + "\n"
+    )
+    result = runner.invoke(
+        app, ["update-many", str(data), "--mount", str(populated_mount)]
+    )
+    assert result.exit_code == 1
+    assert "unknown fields" in result.output
+
+
+def test_update_many_empty_file_succeeds(populated_mount, tmp_path):
+    data = tmp_path / "empty.jsonl"
+    data.write_text("")
+    result = runner.invoke(
+        app, ["update-many", str(data), "--mount", str(populated_mount)]
+    )
+    assert result.exit_code == 0
+    assert "No records" in result.output
+
+
+def test_delete_many_removes_listed_ids(populated_mount, tmp_path):
+    list_result = runner.invoke(app, ["list", "--mount", str(populated_mount)])
+    rows = [
+        json.loads(line) for line in list_result.output.splitlines() if line.strip()
+    ]
+    data = tmp_path / "ids.txt"
+    data.write_text("\n".join(r["id"] for r in rows) + "\n")
+    result = runner.invoke(
+        app, ["delete-many", str(data), "--mount", str(populated_mount)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Deleted 2 of 2" in result.output
+
+    after = runner.invoke(app, ["list", "--mount", str(populated_mount)])
+    assert [line for line in after.output.splitlines() if line.strip()] == []
+
+
+def test_delete_many_reports_unknown_ids(populated_mount, tmp_path):
+    data = tmp_path / "ids.txt"
+    data.write_text("01HXXXXXXXXXXXXXXXXXXXXXXX\n")
+    result = runner.invoke(
+        app, ["delete-many", str(data), "--mount", str(populated_mount)]
+    )
+    assert result.exit_code == 0
+    assert "Deleted 0 of 1" in result.output
+    assert "1 unknown id" in result.output
+
+
+def test_delete_many_skips_blank_and_comment_lines(populated_mount, tmp_path):
+    list_result = runner.invoke(
+        app, ["list", "--mount", str(populated_mount), "--limit", "1"]
+    )
+    first = json.loads(list_result.output.strip())
+    data = tmp_path / "ids.txt"
+    data.write_text(f"# delete just one\n\n{first['id']}\n\n")
+    result = runner.invoke(
+        app, ["delete-many", str(data), "--mount", str(populated_mount)]
+    )
+    assert result.exit_code == 0
+    assert "Deleted 1 of 1" in result.output
+
+
+def test_delete_many_empty_file_succeeds(populated_mount, tmp_path):
+    data = tmp_path / "empty.txt"
+    data.write_text("")
+    result = runner.invoke(
+        app, ["delete-many", str(data), "--mount", str(populated_mount)]
+    )
+    assert result.exit_code == 0
+    assert "No ids" in result.output
+
+
+def test_delete_many_reads_ids_from_stdin(populated_mount):
+    list_result = runner.invoke(
+        app, ["list", "--mount", str(populated_mount), "--limit", "1"]
+    )
+    first = json.loads(list_result.output.strip())
+    result = runner.invoke(
+        app,
+        ["delete-many", "-", "--mount", str(populated_mount)],
+        input=f"{first['id']}\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "Deleted 1 of 1" in result.output
 
 
 def test_delete_missing_id_fails(populated_mount):

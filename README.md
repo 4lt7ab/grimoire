@@ -136,6 +136,13 @@ Or by an explicit keyword that doesn't appear in the prose — `lockpick` is in 
 grimoire keyword-search "lockpick" --kind spell
 ```
 
+Patch an existing entry. Pass only the fields you want to change — everything else is left alone:
+
+```sh
+ID=$(grimoire list --kind tale --limit 1 | jq -r .id)
+grimoire update "$ID" --content "knights joust at dawn beneath silver banners"
+```
+
 List entries chronologically (results are JSON, one per line):
 
 ```sh
@@ -173,6 +180,8 @@ A record has two parts. `content` is the text grimoire embeds and searches again
 
 Records can also carry `keywords` — explicit search terms (aliases, IDs, alternate names) that boost recall in `keyword_search` beyond what the prose alone would match.
 
+Records are mutable: `update` patches a single entry in place (omitted fields are left alone; explicit `None` clears nullable fields), and the bulk variants `add_many`, `update_many`, and `delete_many` apply a list of records in one atomic transaction with a single batched embed call.
+
 ```python
 from grimoire import Grimoire
 from grimoire.embedders import FastembedEmbedder
@@ -204,7 +213,15 @@ with Grimoire.init(".grimoire/memory.db", embedder=embedder) as g:
     )
     everything = g.list(limit=100)
     one = g.get(volcano_dwellers[0].id) if volcano_dwellers else None
-    g.delete(everything[0].id)
+
+    # Patch a single record. Omitted fields stay as they are.
+    g.update(everything[0].id, content="A solar phoenix, reborn anew at every dawn")
+
+    # Bulk patch + bulk delete in one atomic transaction each.
+    g.update_many([
+        {"id": everything[1].id, "payload": {"id": "wyrm-014", "habitat": "caldera"}},
+    ])
+    g.delete_many([e.id for e in everything[2:]])
 ```
 
 Inspect a file without instantiating an embedder:
@@ -223,11 +240,15 @@ if stats:
 - `Grimoire.open(path, *, embedder)` — open an existing grimoire. Raises `GrimoireNotFound` if the file is missing or not a grimoire.
 - `Grimoire.peek(path)` — return `Stats` (or `None` if missing/non-grimoire) without loading the embedder.
 - `add(*, kind, content, payload=None, threshold=None, keywords=None)` — insert. `keywords` is an optional list of explicit search terms; they're indexed in FTS5 alongside `content` and weighted 5× higher in `keyword_search` ranking.
+- `add_many(records)` — insert many in one transaction with one batched embed call. Each record is a mapping with `kind` and `content` required, plus optional `payload`, `threshold`, `keywords`. Atomic on failure.
 - `get(entry_id)` — fetch by id, or `None`.
 - `list(*, kind=None, limit=100, after_id=None)` — chronological pagination.
 - `vector_search(query, *, kind=None, k=10, dynamic_threshold=False, created_after=None, created_before=None)` — vector search ranked by embedder distance; `dynamic_threshold` filters results by each record's stored similarity gate.
 - `keyword_search(query, *, kind=None, k=10, created_after=None, created_before=None)` — keyword search via SQLite FTS5, ranked by BM25 against `content` and `keywords` (keywords weighted 5× higher). The query string accepts FTS5 syntax (phrases, prefix, boolean operators, column scoping like `keywords:phoenix`).
+- `update(entry_id, *, kind=None, content=None, payload=..., threshold=..., keywords=...)` — partial patch. Omitted fields are left alone; passing `None` to a nullable field (`payload`, `threshold`, `keywords`) clears it. Re-embeds only when `content` changed; rewrites the vector row only when `content` or `kind` changed; re-indexes FTS only when `content` or `keywords` changed. Returns the updated entry, or `None` if the id is unknown.
+- `update_many(records)` — patch many in one transaction with one batched embed call covering only records whose `content` actually changed. Each record must include `id`. Atomic on failure. Duplicate ids in input raise `ValueError`. Returns one `Entry | None` per input record in input order.
 - `delete(entry_id)` — returns `True` if removed, `False` if absent.
+- `delete_many(ids)` — delete many in one transaction. Duplicate ids each receive the same answer (their pre-call existence). Returns one `bool` per input id in input order.
 - `close()` — also handled by the context manager.
 
 Errors derive from `GrimoireError`: `GrimoireMismatch` (embedder doesn't match what the file was created with), `GrimoireNotFound` (raised by `open` when the path doesn't point to an existing grimoire), `SchemaVersionError`, `InvalidEmbedder`.
@@ -267,11 +288,14 @@ The flag overrides the env var: `--mount <dir>` over `GRIMOIRE_MOUNT`.
 grimoire init
 grimoire add "<content>" [--kind K] [--payload '{...}'] [--threshold N] [--keyword K ...]
 grimoire ingest <jsonl-file>
+grimoire update <entry_id> [--kind K] [--content "..."] [--payload '{...}'] [--threshold N] [--keyword K ...] [--clear-payload | --clear-threshold | --clear-keywords]
+grimoire update-many <jsonl-file>
 grimoire vector-search "<query>" [--k N] [--kind K] [--dynamic-threshold]
 grimoire keyword-search "<query>" [--k N] [--kind K]
 grimoire list [--kind K] [--limit N] [--after-id ID]
 grimoire get <entry_id>
 grimoire delete <entry_id>
+grimoire delete-many <ids-file | ->
 grimoire info
 ```
 
@@ -284,6 +308,26 @@ One object per line. `kind` and `content` are required; `payload`, `threshold`, 
 ```jsonl
 {"kind": "creature", "content": "A solar phoenix reborn from its own ashes", "payload": {"id": "phoenix-001", "habitat": "volcano"}, "keywords": ["phoenix", "fire-bird"]}
 {"kind": "creature", "content": "An ancient wyrm hoarding obsidian in the Ash Peaks", "payload": {"id": "wyrm-014", "habitat": "mountain"}, "threshold": 0.5, "keywords": ["wyrm", "dragon"]}
+```
+
+### JSONL format for `update-many`
+
+Same shape, plus a required `id` and PATCH semantics: any field you include is changed, any field you omit is left alone, and an explicit `null` clears nullable fields (`payload`, `threshold`, `keywords`).
+
+```jsonl
+{"id": "01J9...A1", "content": "An ancient wyrm hoarding obsidian and starlight in the Ash Peaks"}
+{"id": "01J9...B2", "kind": "legend", "keywords": ["phoenix", "fire-bird", "rebirth"]}
+{"id": "01J9...C3", "payload": null}
+```
+
+Unknown ids are reported in the summary line; they don't fail the run.
+
+### Id-list format for `delete-many`
+
+One ULID per line. Blank lines and `#`-prefixed comments are skipped. Pass `-` to read ids from stdin so the command composes with the read commands:
+
+```sh
+grimoire list --kind stale | jq -r .id | grimoire delete-many -
 ```
 
 ## How it works
