@@ -9,14 +9,14 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent
-SHARED_MODELS_CACHE = REPO_ROOT / ".local" / "grimoire-test-models"
+SHARED_MODELS_CACHE = REPO_ROOT / ".grimoire" / "models"
 
 
 @pytest.fixture(scope="session")
 def _shared_models_cache() -> Path:
     """Repo-local fastembed cache shared across all tests.
 
-    Prime once with `just warm`; thereafter `just check` runs fully offline
+    Prime once with `just init`; thereafter `just check` runs fully offline
     via `HF_HUB_OFFLINE=1`. A cold cache surfaces as a clear fastembed error
     rather than a silent re-download.
     """

@@ -16,7 +16,7 @@ from grimoire.embedders import FastembedEmbedder  # noqa: E402
 def cache_dir(_shared_models_cache):
     """Use the repo-local shared cache so model files persist across runs.
 
-    Provided by the root conftest. Prime once with `just warm`.
+    Provided by the root conftest. Prime once with `just init`.
     """
     return _shared_models_cache
 

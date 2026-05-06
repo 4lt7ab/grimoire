@@ -87,6 +87,18 @@ class Grimoire:
             return cls(conn=conn, embedder=embedder)
         except BaseException:
             conn.close()
+            # WAL mode writes header bytes during `_open_conn`, so a failed
+            # init on a brand-new file leaves a non-empty (and useless)
+            # SQLite file behind. Clean up the file and its WAL siblings
+            # to preserve the "failed init leaves no garbage" invariant.
+            if is_new:
+                for sibling in (
+                    path,
+                    path.parent / (path.name + "-wal"),
+                    path.parent / (path.name + "-shm"),
+                    path.parent / (path.name + "-journal"),
+                ):
+                    sibling.unlink(missing_ok=True)
             raise
 
     @classmethod
@@ -706,6 +718,13 @@ def _open_conn(path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
     conn.execute("PRAGMA foreign_keys = ON")
+    # WAL lets readers coexist with one writer instead of blocking each other;
+    # busy_timeout makes occasional multi-writer attempts queue at the SQLite
+    # level rather than crash with `database is locked`. Default-on because
+    # almost any caller wants this — the rollback-journal default is from a
+    # different era. Sustained high-concurrency writes still serialize.
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 

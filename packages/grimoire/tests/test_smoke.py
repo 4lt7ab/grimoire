@@ -63,6 +63,19 @@ def test_init_creates_file_idempotently(tmp_path):
     assert db.exists()
 
 
+def test_init_enables_wal_journal_mode(tmp_path):
+    db = tmp_path / "store.db"
+    Grimoire.init(db, embedder=FakeEmbedder()).close()
+    # Verify via a raw connection — the journal mode persists in the db
+    # header, so any subsequent open inherits it.
+    raw = sqlite3.connect(db)
+    try:
+        mode = raw.execute("PRAGMA journal_mode").fetchone()[0]
+    finally:
+        raw.close()
+    assert mode.lower() == "wal"
+
+
 def test_embedder_model_mismatch_raises(tmp_path):
     db = tmp_path / "store.db"
     Grimoire.init(db, embedder=FakeEmbedder(model="alpha")).close()
