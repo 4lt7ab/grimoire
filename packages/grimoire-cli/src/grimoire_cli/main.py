@@ -20,11 +20,19 @@ MODELS_DIRNAME = "models"
 # Reusable annotations — every command needs --mount, and the read commands
 # share --kind, --k, --created-after, and --created-before. Defining them
 # once keeps help text in lockstep across the CLI.
+def _normalize_mount(value: Path) -> Path:
+    # Pathlib doesn't expand ~ on its own, and a literal ~ in cache_dir
+    # propagates into ONNX Runtime as a missing-file error. Expand once,
+    # at the boundary, so every downstream caller sees an absolute path.
+    return Path(value).expanduser()
+
+
 Mount = Annotated[
     Path,
     typer.Option(
         help="Path to the grimoire mount directory.",
         envvar="GRIMOIRE_MOUNT",
+        callback=_normalize_mount,
     ),
 ]
 Kind = Annotated[
