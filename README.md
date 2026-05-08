@@ -1,6 +1,6 @@
 # grimoire
 
-A single-file semantic datastore. Drop in records, query them by meaning. Backed by SQLite and [`sqlite-vec`](https://github.com/asg017/sqlite-vec).
+A single-file semantic datastore. Drop in records, query them by meaning or keyword. Backed by SQLite and [`sqlite-vec`](https://github.com/asg017/sqlite-vec).
 
 Aimed at developers who want search-indexed memory without spinning up a vector database.
 
@@ -11,340 +11,63 @@ Aimed at developers who want search-indexed memory without spinning up a vector 
 - Knowledgebase search.
 - Quickstart datastore for apps that need search on day one.
 
-## Install
+## Two packages
 
-### CLI
+| Package | Use when |
+|---|---|
+| [**`4lt7ab-grimoire`**](packages/grimoire/README.md) — the Python library | You're embedding grimoire into an application. |
+| [**`4lt7ab-grimoire-cli`**](packages/grimoire-cli/README.md) — the CLI | You want a command-line datastore for shells, scripts, ad-hoc work, or `jq` pipelines. |
 
-```sh
-uv tool install '4lt7ab-grimoire-cli[fastembed]'
-# or: pipx install '4lt7ab-grimoire-cli[fastembed]'
-```
+Both share the same single-file, single-embedder model. A grimoire created by one is fully usable from the other — the CLI is a thin wrapper around the library, plus a mount convention for keeping the SQLite file and the embedder model cache colocated.
 
-Both install into an isolated venv — clean uninstall, no impact on your system Python.
+## A taste
 
-### As a dependency
-
-```sh
-uv add '4lt7ab-grimoire[fastembed]'
-```
-
-The `fastembed` extra pulls the bundled `FastembedEmbedder` (ONNX-based, no service required). To bring your own embedder instead, drop the extra and implement the `Embedder` Protocol — see [Custom embedders](#custom-embedders).
-
-### From source
-
-Requires [`asdf`](https://asdf-vm.com/). Python, `uv`, and `just` are pinned via `.tool-versions`.
-
-```sh
-asdf install
-uv sync --extra fastembed
-```
-
-## Quickstart
-
-Once installed, the `grimoire` command is on your `PATH`.
-
-Stage a local working directory. Everything below lives under `.grimoire/`, which is already git-ignored.
-
-```sh
-mkdir -p .grimoire
-export GRIMOIRE_MOUNT=$PWD/.grimoire
-```
-
-Confirm there's no grimoire there yet — bare `grimoire` (no subcommand) prints the file's metadata, and exits non-zero if there isn't one:
-
-```sh
-grimoire
-```
-
-You should see `Error: No grimoire at <full path>` (exit 1).
-
-Initialize the datastore. This creates `<mount>/grimoire.db`, writes the embedder lock, and downloads the default embedding model (`BAAI/bge-small-en-v1.5`, ~30MB ONNX) into `<mount>/models/` — one deliberate setup step.
-
-```sh
-grimoire init
-```
-
-Add a few entries. No download this time — `init` already warmed the model.
-
-```sh
-grimoire add "the moon is full tonight"
-grimoire add "dragons fly at midnight"
-grimoire add "potions bubble in the cauldron"
-grimoire add "knights joust at dawn" --group-key tale
-```
-
-Group entries with `--group-key` for cheap filtered search, and dedupe-by-external-id with `--group-ref`. Attach explicit keywords with repeatable `--keyword` — useful for terms a query might use that don't appear in the prose:
-
-```sh
-grimoire add "the silver crown rests on velvet" \
-    --group-key tale --group-ref crown-001 \
-    --keyword regalia --keyword treasure
-```
-
-Inspect the file — model, dimension, entry count, per-group counts:
-
-```sh
-grimoire
-```
-
-Search by meaning (default mode is vector):
-
-```sh
-grimoire search "celestial events"
-grimoire search "stories of valor" --group-key tale
-```
-
-Search by literal text (keyword, FTS5):
-
-```sh
-grimoire search "moon" --mode keyword
-grimoire search "knights" --mode keyword --group-key tale
-```
-
-Or by a keyword attached above — `treasure` isn't in any prose, but the silver crown was tagged with it:
-
-```sh
-grimoire search "treasure" --mode keyword --group-key tale
-```
-
-Bulk-load from JSONL. Each row carries a `payload` — the structured object the description is pointing at:
-
-```sh
-cat > .grimoire/data.jsonl <<'EOF'
-{"group_key": "spell", "group_ref": "lumara", "content": "Summons a sphere of silver light that wards undead and warms cold hands", "payload": {"school": "abjuration", "tier": 2}, "keywords": ["lumara", "light"]}
-{"group_key": "spell", "group_ref": "skeleton-key", "content": "Coaxes a locked door, chest, or cage to forget its keeper", "payload": {"school": "transmutation", "tier": 1}, "keywords": ["skeleton-key", "lockpick"]}
-{"group_key": "spell", "group_ref": "hush", "content": "Wraps the caster in a curtain of silence so footfalls and whispers vanish", "payload": {"school": "illusion", "tier": 1}, "keywords": ["hush", "stealth"]}
-EOF
-grimoire import .grimoire/data.jsonl
-```
-
-`import` is additive — collisions on `(group_key, group_ref)` abort the run with a clear error rather than silently overwriting.
-
-Search the spells. Notice the `payload` in the result — that's the object you actually wanted to find:
-
-```sh
-grimoire search "magic to slip past a guard unseen" --group-key spell
-```
-
-`hush` should rank first, with its payload (`{"school": "illusion", "tier": 1}`) right there in the JSON.
-
-Or find spells whose description literally mentions "door":
-
-```sh
-grimoire search "door" --mode keyword --group-key spell
-```
-
-Or by an explicit keyword that doesn't appear in the prose — `lockpick` is in the spell's `keywords` list, not its description:
-
-```sh
-grimoire search "lockpick" --mode keyword --group-key spell
-```
-
-Patch an existing entry. Pass only the fields you want to change — everything else is left alone:
-
-```sh
-ID=$(grimoire query --group-key tale --limit 1 | jq -r .id)
-grimoire update "$ID" --content "knights joust at dawn beneath silver banners"
-```
-
-List entries chronologically (results are JSON, one per line). `query` paginates via `--cursor` — pass the last id of the previous page to walk forward:
-
-```sh
-grimoire query --limit 50
-LAST=$(grimoire query --limit 50 | tail -1 | jq -r .id)
-grimoire query --limit 50 --cursor "$LAST"
-```
-
-Pipe any read command through `jq` for pretty output:
-
-```sh
-grimoire query | jq
-```
-
-Back up everything to a JSONL file (defaults to `<mount>/export.jsonl`, refuses to overwrite without `--force`):
-
-```sh
-grimoire export
-```
-
-Reset everything (deletes the mount directory; requires confirmation, or pass `--yes` to skip the prompt):
-
-```sh
-grimoire destroy --yes
-```
-
-Uninstall:
-
-```sh
-uv tool uninstall 4lt7ab-grimoire-cli
-# or: pipx uninstall 4lt7ab-grimoire-cli
-```
-
-## Library
-
-```sh
-uv add '4lt7ab-grimoire[fastembed]'
-```
-
-A grimoire is a single SQLite file. `Grimoire.init(path, embedder=...)` is the one-time setup ritual: it creates the file if missing, writes the embedder lock, validates against any existing lock, and exercises the embedder once so deferred work (model download, weight load) happens at a known moment. After that, `Grimoire.open(path, embedder=...)` opens the existing file cheaply; missing or non-grimoire paths raise `GrimoireNotFound`.
-
-A record has two parts. `content` is the text grimoire embeds and searches against — the description of the thing. `payload` is the optional structured object that description resolves to — the thing itself, the object you actually wanted to find with the query. You search by meaning and get back what the meaning was pointing at.
-
-Records can also carry `keywords` — explicit search terms (aliases, IDs, alternate names) that boost recall in `keyword_search` beyond what the prose alone would match.
-
-Records are mutable: `update` patches a single entry in place (omitted fields are left alone; explicit `None` clears nullable fields), and the bulk variants `add_many`, `update_many`, and `delete_many` apply a list of records in one atomic transaction with a single batched embed call.
+Library:
 
 ```python
 from grimoire import Grimoire
 from grimoire.embedders import FastembedEmbedder
 
-embedder = FastembedEmbedder(cache_folder=".grimoire/models")
-
-with Grimoire.init(".grimoire/memory.db", embedder=embedder) as g:
+with Grimoire.create(embedder=FastembedEmbedder(cache_folder=".grimoire/models"), mount=".grimoire") as g:
     g.add(
         group_key="creature",
-        group_ref="phoenix-001",
-        content="A solar phoenix reborn from its own ashes at dawn",
-        payload={"id": "phoenix-001", "habitat": "volcano"},
-        keywords=["phoenix", "fire-bird"],
+        vector_text="A solar phoenix reborn from its own ashes at dawn",
+        keyword_text="phoenix fire-bird",
+        payload={"habitat": "volcano"},
     )
-    g.add(
-        group_key="creature",
-        group_ref="wyrm-014",
-        content="An ancient wyrm hoarding obsidian in the Ash Peaks",
-        payload={"id": "wyrm-014", "habitat": "mountain"},
-        threshold=0.5,
-    )
-
-    for entry in g.vector_search("creatures that come back from the dead", k=5):
-        print(entry.id, entry.distance, entry.content, entry.payload)
-
-    for entry in g.keyword_search("phoenix", k=5):
-        print(entry.id, entry.rank, entry.content, entry.payload)
-
-    volcano_dwellers = g.vector_search(
-        "fiery beasts of the magma", group_key="creature", dynamic_threshold=True
-    )
-    everything = g.list(limit=100)
-    one = g.get(volcano_dwellers[0].id) if volcano_dwellers else None
-
-    # Patch a single record. Omitted fields stay as they are.
-    g.update(everything[0].id, content="A solar phoenix, reborn anew at every dawn")
-
-    # Bulk patch + bulk delete in one atomic transaction each.
-    g.update_many([
-        {"id": everything[1].id, "payload": {"id": "wyrm-014", "habitat": "caldera"}},
-    ])
-    g.delete_many([e.id for e in everything[2:]])
+    for hit in g.vector_search("creatures that come back from the dead", k=5):
+        print(hit.distance, hit.vector_text, hit.payload)
 ```
 
-Inspect a file without instantiating an embedder:
-
-```python
-from grimoire import Grimoire
-
-stats = Grimoire.peek(".grimoire/memory.db")
-if stats:
-    print(stats.model, stats.dimension, stats.entry_count, stats.groups)
-```
-
-### Full API
-
-- `Grimoire.init(path, *, embedder)` — create or open the file, validate the embedder lock, exercise the embedder once. The deliberate setup step.
-- `Grimoire.open(path, *, embedder)` — open an existing grimoire. Raises `GrimoireNotFound` if the file is missing or not a grimoire.
-- `Grimoire.peek(path)` — return `Stats` (or `None` if missing/non-grimoire) without loading the embedder.
-- `add(*, content, group_key=None, group_ref=None, payload=None, threshold=None, keywords=None)` — insert. `group_key` partitions records (and the vector index) for cheap filtered search. `group_ref` is a consumer-set identifier; `(group_key, group_ref)` is enforced unique when `group_ref` is set, and a NULL `group_key` shares a single global namespace for that uniqueness check. `keywords` is an optional list of explicit search terms; they're indexed in FTS5 alongside `content` and weighted 5× higher in `keyword_search` ranking.
-- `add_many(records)` — insert many in one transaction with one batched embed call. Each record is a mapping with `content` required, plus optional `group_key`, `group_ref`, `payload`, `threshold`, `keywords`. Atomic on failure.
-- `get(entry_id)` — fetch by id, or `None`.
-- `get_by_group_ref(*, group_key, group_ref)` — fetch by composite key. `group_key` may be `None` to look up an entry in the global (ungrouped) namespace. Returns `None` if no match.
-- `list(*, group_key=None, limit=100, after_id=None)` — chronological pagination.
-- `vector_search(query, *, group_key=None, k=10, dynamic_threshold=False, created_after=None, created_before=None)` — vector search ranked by embedder distance; `dynamic_threshold` filters results by each record's stored similarity gate.
-- `keyword_search(query, *, group_key=None, k=10, created_after=None, created_before=None)` — keyword search via SQLite FTS5, ranked by BM25 against `content` and `keywords` (keywords weighted 5× higher). The query string accepts FTS5 syntax (phrases, prefix, boolean operators, column scoping like `keywords:phoenix`).
-- `update(entry_id, *, content=None, group_key=..., group_ref=..., payload=..., threshold=..., keywords=...)` — partial patch. Omitted fields are left alone; passing `None` to a nullable field (`group_key`, `group_ref`, `payload`, `threshold`, `keywords`) clears it. Re-embeds only when `content` changed; rewrites the vector row only when `content` or `group_key` changed; re-indexes FTS only when `content` or `keywords` changed. Raises `sqlite3.IntegrityError` if the resulting `(group_key, group_ref)` pair would collide. Returns the updated entry, or `None` if the id is unknown.
-- `update_many(records)` — patch many in one transaction with one batched embed call covering only records whose `content` actually changed. Each record must include `id`. Atomic on failure. Duplicate ids in input raise `ValueError`. Returns one `Entry | None` per input record in input order.
-- `delete(entry_id)` — returns `True` if removed, `False` if absent.
-- `delete_many(ids)` — delete many in one transaction. Duplicate ids each receive the same answer (their pre-call existence). Returns one `bool` per input id in input order.
-- `close()` — also handled by the context manager.
-
-Errors derive from `GrimoireError`: `GrimoireMismatch` (embedder doesn't match what the file was created with), `GrimoireNotFound` (raised by `open` when the path doesn't point to an existing grimoire), `SchemaVersionError`, `InvalidEmbedder`.
-
-### Custom embedders
-
-`Embedder` is a `Protocol`. Implement three things:
-
-```python
-class MyEmbedder:
-    @property
-    def model(self) -> str: ...
-    @property
-    def dimension(self) -> int: ...
-    def embed(self, text: str) -> list[float]: ...
-```
-
-The `model` and `dimension` are written into the file on first open and locked. Reopening with a different model or dimension raises `GrimoireMismatch`.
-
-## CLI reference
-
-If you've installed the CLI, `grimoire --help` prints this same orientation in the terminal — commands, the mount model, output conventions, and environment variables in one screen. The reference below mirrors it for repo browsers.
-
-Every command operates over a grimoire mount: a directory that holds the SQLite file (`<mount>/grimoire.db`) and the embedder model cache (`<mount>/models/`). Bare `grimoire` (no subcommand) prints the file's metadata via `Grimoire.peek`, without loading the embedder.
-
-Pass the mount explicitly with `--mount <dir>`, or set the environment variable once for the shell:
+CLI:
 
 ```sh
 export GRIMOIRE_MOUNT=$PWD/.grimoire
+grimoire mount
+grimoire entry add "A solar phoenix reborn from its own ashes at dawn" \
+    --keyword-text "phoenix fire-bird" \
+    --group-key creature \
+    --payload '{"habitat": "volcano"}'
+grimoire search "creatures that come back from the dead"
 ```
 
-The flag overrides the env var: `--mount <dir>` over `GRIMOIRE_MOUNT`.
-
-### Commands
+## Install
 
 ```sh
-grimoire                                   # print info for the mounted grimoire
-grimoire init [--model M]
-grimoire add "<content>" [--group-key K] [--group-ref R] [--payload '{...}'] [--threshold N] [--keyword K ...]
-grimoire update <entry_id> [--content "..."] [--group-key K | --clear-group-key] [--group-ref R | --clear-group-ref] [--payload '{...}' | --clear-payload] [--threshold N | --clear-threshold] [--keyword K ... | --clear-keywords]
-grimoire get <entry_id>
-grimoire delete <entry_id>
-grimoire query [--group-key K] [--group-ref R] [--after ISO] [--before ISO] [--cursor ID] [--limit N]
-grimoire search "<query>" [--mode vector|keyword] [--group-key K] [--after ISO] [--before ISO] [--k N] [--dynamic-threshold]
-grimoire import <jsonl-file>
-grimoire export [-o PATH] [--force]
-grimoire destroy [--yes]
+# CLI
+uv tool install '4lt7ab-grimoire-cli[fastembed]'
+# or: pipx install '4lt7ab-grimoire-cli[fastembed]'
+
+# Library
+uv add '4lt7ab-grimoire[fastembed]'
 ```
 
-All read commands print one JSON object per line — pipe to `jq` for filtering.
-
-### Paging
-
-`query` paginates with `--cursor`: pass the id of the last entry from the previous page to walk forward. The id IS the cursor — ULIDs sort lexicographically by creation time, so `id > cursor` walks the next page in chronological order without a separate cursor type:
-
-```sh
-LAST=$(grimoire query --limit 100 | tail -1 | jq -r .id)
-grimoire query --limit 100 --cursor "$LAST"
-```
-
-`search` returns top-`k` by score (vector distance or BM25), so paging doesn't apply — adjust `--k` to widen the result set.
-
-### JSONL format for `import` and `export`
-
-One object per line. `content` is required; `group_key`, `group_ref`, `payload`, `threshold`, and `keywords` are optional. `content` is the text that gets embedded and searched; `payload` is the structured object returned alongside a match — the thing the content describes; `keywords` is a list of explicit search terms that augment recall in keyword search.
-
-```jsonl
-{"group_key": "creature", "group_ref": "phoenix-001", "content": "A solar phoenix reborn from its own ashes", "payload": {"habitat": "volcano"}, "keywords": ["phoenix", "fire-bird"]}
-{"group_key": "creature", "group_ref": "wyrm-014", "content": "An ancient wyrm hoarding obsidian in the Ash Peaks", "payload": {"habitat": "mountain"}, "threshold": 0.5, "keywords": ["wyrm", "dragon"]}
-```
-
-`import` is additive: collisions on `(group_key, group_ref)` abort the run, and the run reports the offending record so the file can be fixed and re-run. `export` writes the same shape (minus `id` — re-imported records get fresh ULIDs).
-
-## How it works
-
-- **One file, one model.** The embedder's `model` name and `dimension` are written into the grimoire when it's first created. Reopening with a different embedder raises `GrimoireMismatch` rather than silently producing nonsense vectors. Use `grimoire info` (or `Grimoire.peek` from Python) to see what a file is bound to.
-- **Mount is self-contained.** Each mount carries its own `grimoire.db` and its own `models/` cache. The library API is unchanged — it still takes a path to the SQLite file directly; the mount is a CLI convention.
-- **No default mount.** The CLI does not invent a `--mount` location for you. Setting `GRIMOIRE_MOUNT` to a `$PWD`-anchored path is the recommended way to keep it stable across `cd`.
+The `fastembed` extra pulls the bundled `FastembedEmbedder` (ONNX-based, no service required). Drop the extra and implement the `Embedder` protocol to bring your own — see the [library README](packages/grimoire/README.md#custom-embedders).
 
 ## Documentation
 
+- [Library reference](packages/grimoire/README.md) — full Python API, mount handle, embedder protocol, errors.
+- [CLI reference](packages/grimoire-cli/README.md) — every command, every flag, JSONL format, output conventions.
 - [Architecture](docs/architecture.md)
 - [Feature set](docs/feature-set.md)
 - [Coding conventions](docs/coding-conventions.md)

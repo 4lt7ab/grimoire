@@ -8,12 +8,12 @@ from ulid import ULID
 @dataclass
 class Entry:
     id: str
-    content: str
+    vector_text: str | None = None
+    keyword_text: str | None = None
     group_key: str | None = None
     group_ref: str | None = None
     payload: dict[str, Any] | None = None
     threshold: float | None = None
-    keywords: list[str] | None = None
     distance: float | None = None
     rank: float | None = None
 

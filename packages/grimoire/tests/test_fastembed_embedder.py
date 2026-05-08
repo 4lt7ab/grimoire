@@ -37,12 +37,12 @@ def test_embed_returns_correct_length_vector(cache_dir):
 def test_round_trip_through_grimoire(tmp_path, cache_dir):
     e = FastembedEmbedder(cache_folder=cache_dir)
     with _create_file(tmp_path / "store.db", embedder=e) as g:
-        g.add(group_key="note", content="the moon is full tonight")
-        g.add(group_key="note", content="dragons fly at midnight")
+        g.add(group_key="note", vector_text="the moon is full tonight")
+        g.add(group_key="note", vector_text="dragons fly at midnight")
 
         results = g.vector_search("the moon is full tonight", k=2)
         assert len(results) == 2
-        assert results[0].content == "the moon is full tonight"
+        assert results[0].vector_text == "the moon is full tonight"
         assert results[0].distance < results[1].distance
 
 

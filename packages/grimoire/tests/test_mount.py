@@ -114,7 +114,7 @@ def test_mount_default_is_home_grimoire(tmp_path, monkeypatch):
 
 def test_create_default_db(tmp_path):
     g = Grimoire.create(mount=tmp_path, embedder=FakeEmbedder())
-    g.add(content="hello")
+    g.add(vector_text="hello")
     g.close()
     assert (tmp_path / DB_FILENAME).exists()
 
@@ -209,7 +209,7 @@ def test_open_routes_through_autoloader(tmp_path, fake_autoload):
     """Pin: `Grimoire.open()` reconstructs an embedder via `_autoload_embedder`."""
     Grimoire.create(mount=tmp_path, embedder=FakeEmbedder()).close()
     with Grimoire.open(mount=tmp_path) as g:
-        g.add(content="reopened via autoload")
+        g.add(vector_text="reopened via autoload")
     # The data made it.
     handle = Grimoire.mount(tmp_path)
     assert handle.peek(None).entry_count == 1
@@ -218,7 +218,7 @@ def test_open_routes_through_autoloader(tmp_path, fake_autoload):
 def test_open_named_routes_through_autoloader(tmp_path, fake_autoload):
     Grimoire.create("alpha", mount=tmp_path, embedder=FakeEmbedder()).close()
     with Grimoire.open("alpha", mount=tmp_path) as g:
-        g.add(content="hi")
+        g.add(vector_text="hi")
 
 
 def test_reopen_default_via_file_level(tmp_path):
@@ -226,7 +226,7 @@ def test_reopen_default_via_file_level(tmp_path):
     Grimoire.create(mount=tmp_path, embedder=FakeEmbedder()).close()
     handle = Grimoire.mount(tmp_path)
     with _open_file(handle.path_for(None), embedder=FakeEmbedder()) as g:
-        g.add(content="reopened")
+        g.add(vector_text="reopened")
     assert handle.peek(None).entry_count == 1
 
 
@@ -234,7 +234,7 @@ def test_reopen_named_via_file_level(tmp_path):
     Grimoire.create("alpha", mount=tmp_path, embedder=FakeEmbedder()).close()
     handle = Grimoire.mount(tmp_path)
     with _open_file(handle.path_for("alpha"), embedder=FakeEmbedder()) as g:
-        g.add(content="reopened")
+        g.add(vector_text="reopened")
 
 
 def test_open_validates_embedder_against_lock_row(tmp_path):
@@ -398,16 +398,16 @@ def test_manifest_write_is_atomic(tmp_path):
 def test_default_and_named_dbs_are_independent(tmp_path):
     """Adds in one DB are invisible in another, even with identical group_keys."""
     with Grimoire.create(mount=tmp_path, embedder=FakeEmbedder()) as default:
-        default.add(group_key="note", content="default-only")
+        default.add(group_key="note", vector_text="default-only")
 
     with Grimoire.create("named", mount=tmp_path, embedder=FakeEmbedder()) as named:
-        named.add(group_key="note", content="named-only")
+        named.add(group_key="note", vector_text="named-only")
 
     handle = Grimoire.mount(tmp_path)
     with _open_file(handle.path_for(None), embedder=FakeEmbedder()) as default:
-        contents = {e.content for e in default.list()}
+        contents = {e.vector_text for e in default.list()}
         assert contents == {"default-only"}
 
     with _open_file(handle.path_for("named"), embedder=FakeEmbedder()) as named:
-        contents = {e.content for e in named.list()}
+        contents = {e.vector_text for e in named.list()}
         assert contents == {"named-only"}

@@ -47,13 +47,15 @@ def _entry_record(entry: Entry) -> dict[str, object]:
     came from a search result. Mirrors the on-disk shape minus columns
     that aren't set.
     """
-    record: dict[str, object] = {"id": entry.id, "content": entry.content}
+    record: dict[str, object] = {"id": entry.id}
+    if entry.vector_text is not None:
+        record["vector_text"] = entry.vector_text
+    if entry.keyword_text is not None:
+        record["keyword_text"] = entry.keyword_text
     if entry.group_key is not None:
         record["group_key"] = entry.group_key
     if entry.group_ref is not None:
         record["group_ref"] = entry.group_ref
-    if entry.keywords is not None:
-        record["keywords"] = entry.keywords
     if entry.payload is not None:
         record["payload"] = entry.payload
     if entry.threshold is not None:
@@ -79,6 +81,8 @@ def emit_entries(entries: Iterable[Entry], *, raw: bool = False) -> None:
 
     has_group_key = any(e.group_key is not None for e in entries)
     has_group_ref = any(e.group_ref is not None for e in entries)
+    has_vector_text = any(e.vector_text is not None for e in entries)
+    has_keyword_text = any(e.keyword_text is not None for e in entries)
     has_distance = any(e.distance is not None for e in entries)
     has_rank = any(e.rank is not None for e in entries)
 
@@ -88,9 +92,12 @@ def emit_entries(entries: Iterable[Entry], *, raw: bool = False) -> None:
         table.add_column("GROUP", style="cyan", no_wrap=True)
     if has_group_ref:
         table.add_column("REF", style="magenta", no_wrap=True)
-    # Single line per entry: snip the content with ellipsis instead of wrapping,
-    # so a query of 100 results fits in 100 visible rows on screen.
-    table.add_column("CONTENT", no_wrap=True, overflow="ellipsis")
+    # Single line per entry: snip the text columns with ellipsis instead of
+    # wrapping, so a query of 100 results fits in 100 visible rows on screen.
+    if has_vector_text:
+        table.add_column("VECTOR_TEXT", no_wrap=True, overflow="ellipsis")
+    if has_keyword_text:
+        table.add_column("KEYWORD_TEXT", no_wrap=True, overflow="ellipsis")
     if has_distance:
         table.add_column("DIST", justify="right", no_wrap=True)
     if has_rank:
@@ -102,7 +109,10 @@ def emit_entries(entries: Iterable[Entry], *, raw: bool = False) -> None:
             row.append(entry.group_key or "")
         if has_group_ref:
             row.append(entry.group_ref or "")
-        row.append(entry.content)
+        if has_vector_text:
+            row.append(entry.vector_text or "")
+        if has_keyword_text:
+            row.append(entry.keyword_text or "")
         if has_distance:
             row.append(f"{entry.distance:.4f}" if entry.distance is not None else "")
         if has_rank:
@@ -122,13 +132,14 @@ def emit_entry(entry: Entry, *, raw: bool = False) -> None:
     table.add_column("key", style="cyan", no_wrap=True)
     table.add_column("value")
     table.add_row("id", entry.id)
-    table.add_row("content", entry.content)
+    if entry.vector_text is not None:
+        table.add_row("vector_text", entry.vector_text)
+    if entry.keyword_text is not None:
+        table.add_row("keyword_text", entry.keyword_text)
     if entry.group_key is not None:
         table.add_row("group_key", entry.group_key)
     if entry.group_ref is not None:
         table.add_row("group_ref", entry.group_ref)
-    if entry.keywords is not None:
-        table.add_row("keywords", ", ".join(entry.keywords) if entry.keywords else "[]")
     if entry.payload is not None:
         table.add_row("payload", json.dumps(entry.payload))
     if entry.threshold is not None:

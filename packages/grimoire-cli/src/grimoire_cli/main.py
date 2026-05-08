@@ -36,12 +36,15 @@ PROGRESS_EVERY = 1000
 RECOGNIZED_FIELDS = {
     "group_key",
     "group_ref",
-    "content",
+    "vector_text",
+    "keyword_text",
     "payload",
     "threshold",
-    "keywords",
 }
-REQUIRED_FIELDS = {"content"}
+# Both `vector_text` and `keyword_text` are optional — an entry can opt into
+# vector search, keyword search, both, or neither. The schema enforces no
+# minimum, and neither does the import.
+REQUIRED_FIELDS: set[str] = set()
 
 
 # Reusable annotations — every command shares the mount lookup, and read commands
@@ -471,9 +474,9 @@ def export(
     """Export every entry in a database to a JSONL file.
 
     The output format mirrors `import`'s expected input — entries can be
-    round-tripped (content, group_key, group_ref, payload, threshold,
-    keywords are preserved). Ids are NOT preserved on round-trip; they're
-    grimoire-assigned and re-imported records get fresh ULIDs.
+    round-tripped (vector_text, keyword_text, group_key, group_ref, payload,
+    and threshold are preserved). Ids are NOT preserved on round-trip;
+    they're grimoire-assigned and re-imported records get fresh ULIDs.
     """
     mount: Path = ctx.obj["mount"]
     if output is None:
@@ -583,8 +586,29 @@ def mount_destroy(
 @entry_app.command()
 def add(
     ctx: typer.Context,
-    content: Annotated[str, typer.Argument(help="Content text for the new entry.")],
+    vector_text: Annotated[
+        str | None,
+        typer.Argument(
+            help=(
+                "Free-form text to embed and index for vector_search. Pass "
+                "an empty string or omit to skip the vector index entirely "
+                "(entry is invisible to vector search but still retrievable "
+                "by id / group_ref / list)."
+            ),
+        ),
+    ] = None,
     db: Db = None,
+    keyword_text: Annotated[
+        str | None,
+        typer.Option(
+            "--keyword-text",
+            help=(
+                "Free-form text to index for keyword_search via FTS5 BM25. "
+                "Omit to skip the keyword index. Whatever string you pass is "
+                "tokenized as-is — no list shape, no special syntax."
+            ),
+        ),
+    ] = None,
     group_key: Annotated[
         str | None,
         typer.Option("--group-key", help="Group label for partitioning."),
@@ -607,18 +631,12 @@ def add(
         float | None,
         typer.Option(help="Optional per-entry similarity threshold."),
     ] = None,
-    keyword: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--keyword",
-            help=(
-                "Add an explicit search keyword to boost recall in keyword "
-                "search. Repeatable: --keyword foo --keyword bar."
-            ),
-        ),
-    ] = None,
 ) -> None:
-    """Add a single record to a database in the mount."""
+    """Add a single record to a database in the mount.
+
+    Both `--vector-text` and `--keyword-text` are optional and independent.
+    Supply either, both, or neither.
+    """
     mount: Path = ctx.obj["mount"]
     payload_obj: dict | None = None
     if payload is not None:
@@ -632,12 +650,12 @@ def add(
     with _open_grimoire(mount, db) as g:
         try:
             entry = g.add(
-                content=content,
+                vector_text=vector_text,
+                keyword_text=keyword_text,
                 group_key=group_key,
                 group_ref=group_ref,
                 payload=payload_obj,
                 threshold=threshold,
-                keywords=keyword or None,
             )
         except sqlite3.IntegrityError as exc:
             _fail(f"collision on (group_key, group_ref): {exc}")
@@ -649,26 +667,6 @@ def update(
     ctx: typer.Context,
     entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
     db: Db = None,
-    content: Annotated[
-        str | None,
-        typer.Option(help="Replace the entry's content (re-embeds and re-indexes)."),
-    ] = None,
-    group_key: Annotated[
-        str | None,
-        typer.Option("--group-key", help="Replace the entry's group_key."),
-    ] = None,
-    clear_group_key: Annotated[
-        bool,
-        typer.Option("--clear-group-key", help="Clear the group_key (set to NULL)."),
-    ] = False,
-    group_ref: Annotated[
-        str | None,
-        typer.Option("--group-ref", help="Replace the entry's group_ref."),
-    ] = None,
-    clear_group_ref: Annotated[
-        bool,
-        typer.Option("--clear-group-ref", help="Clear the group_ref (set to NULL)."),
-    ] = False,
     payload: Annotated[
         str | None,
         typer.Option(help="Replace the payload with this JSON object."),
@@ -685,46 +683,22 @@ def update(
         bool,
         typer.Option("--clear-threshold", help="Clear the threshold (set to NULL)."),
     ] = False,
-    keyword: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--keyword",
-            help=(
-                "Replace the keyword list. Repeatable: --keyword foo "
-                "--keyword bar. Use --clear-keywords to remove all keywords."
-            ),
-        ),
-    ] = None,
-    clear_keywords: Annotated[
-        bool,
-        typer.Option("--clear-keywords", help="Clear the keyword list (set to NULL)."),
-    ] = False,
 ) -> None:
-    """Patch fields on an existing entry. Omitted fields are left unchanged."""
-    if group_key is not None and clear_group_key:
-        _fail("--group-key and --clear-group-key are mutually exclusive")
-    if group_ref is not None and clear_group_ref:
-        _fail("--group-ref and --clear-group-ref are mutually exclusive")
+    """Patch the mutable metadata fields on an existing entry.
+
+    Only `payload` and `threshold` can be updated. Indexed and identity
+    fields (`vector_text`, `keyword_text`, `group_key`, `group_ref`) are
+    immutable after creation — to change them, delete the entry and add
+    a fresh one.
+    """
     if payload is not None and clear_payload:
         _fail("--payload and --clear-payload are mutually exclusive")
     if threshold is not None and clear_threshold:
         _fail("--threshold and --clear-threshold are mutually exclusive")
-    if keyword is not None and clear_keywords:
-        _fail("--keyword and --clear-keywords are mutually exclusive")
 
     # Build kwargs that distinguish "unset" (omit) from "set to None" (clear)
     # by simply not passing the key when the user didn't supply anything.
     kwargs: dict[str, object] = {}
-    if content is not None:
-        kwargs["content"] = content
-    if clear_group_key:
-        kwargs["group_key"] = None
-    elif group_key is not None:
-        kwargs["group_key"] = group_key
-    if clear_group_ref:
-        kwargs["group_ref"] = None
-    elif group_ref is not None:
-        kwargs["group_ref"] = group_ref
     if clear_payload:
         kwargs["payload"] = None
     elif payload is not None:
@@ -739,17 +713,10 @@ def update(
         kwargs["threshold"] = None
     elif threshold is not None:
         kwargs["threshold"] = threshold
-    if clear_keywords:
-        kwargs["keywords"] = None
-    elif keyword is not None:
-        kwargs["keywords"] = keyword
 
     mount: Path = ctx.obj["mount"]
     with _open_grimoire(mount, db) as g:
-        try:
-            entry = g.update(entry_id, **kwargs)
-        except sqlite3.IntegrityError as exc:
-            _fail(f"collision on (group_key, group_ref): {exc}")
+        entry = g.update(entry_id, **kwargs)
         if entry is None:
             _fail(f"No entry with id {entry_id!r}")
         emit_entry(entry, raw=ctx.obj["raw"])
@@ -854,15 +821,19 @@ def _export_record(entry: Entry) -> dict[str, object]:
     """Build the JSON shape written by `export` (round-trippable through `import`).
 
     Drops `id` (grimoire-assigned, re-imported records get fresh ULIDs) and
-    drops result-only fields (`distance`, `rank`).
+    drops result-only fields (`distance`, `rank`). Both `vector_text` and
+    `keyword_text` are emitted only when set — a record with neither is a
+    valid payload-only entry and round-trips as such.
     """
-    record: dict[str, object] = {"content": entry.content}
+    record: dict[str, object] = {}
+    if entry.vector_text is not None:
+        record["vector_text"] = entry.vector_text
+    if entry.keyword_text is not None:
+        record["keyword_text"] = entry.keyword_text
     if entry.group_key is not None:
         record["group_key"] = entry.group_key
     if entry.group_ref is not None:
         record["group_ref"] = entry.group_ref
-    if entry.keywords is not None:
-        record["keywords"] = entry.keywords
     if entry.payload is not None:
         record["payload"] = entry.payload
     if entry.threshold is not None:

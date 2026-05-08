@@ -69,12 +69,25 @@ def populated_mount(tmp_path, _shared_models_cache):
     """A mount with a few entries already added — for read-side tests."""
     mount = _new_mount(tmp_path, _shared_models_cache)
     _mount(mount)
-    for content, group_key, group_ref in [
+    for vector_text, group_key, group_ref in [
         ("the moon is full", "note", None),
         ("dragons fly at midnight", "note", "dragon-001"),
         ("lumos lights the way", "spell", "lumos"),
     ]:
-        cmd = ["--mount", str(mount), "entry", "add", content, "--group-key", group_key]
+        # Mirror vector_text into keyword_text so both search modes hit. Tests
+        # that exercise only one mode (vector OR keyword) work uniformly off
+        # this fixture without needing per-test setup.
+        cmd = [
+            "--mount",
+            str(mount),
+            "entry",
+            "add",
+            vector_text,
+            "--keyword-text",
+            vector_text,
+            "--group-key",
+            group_key,
+        ]
         if group_ref:
             cmd += ["--group-ref", group_ref]
         result = runner.invoke(app, cmd)
@@ -122,11 +135,15 @@ def test_pretty_table_at_tty_for_ls(populated_mount, monkeypatch):
 
 
 def test_pretty_entries_at_tty_for_query(populated_mount, monkeypatch):
-    """Query renders a CONTENT/GROUP/REF table at the terminal."""
+    """Query renders a VECTOR_TEXT/GROUP/REF table at the terminal."""
     monkeypatch.setattr("grimoire_cli.output._is_tty", lambda: True)
+    # The fixture populates both vector_text and keyword_text, so the table
+    # gets a fifth column. Default 80-col Rich width truncates the GROUP
+    # header to "…"; widen so every header renders unabbreviated.
+    monkeypatch.setenv("COLUMNS", "200")
     result = runner.invoke(app, ["--mount", str(populated_mount), "query"])
     assert result.exit_code == 0
-    for header in ("ID", "GROUP", "REF", "CONTENT"):
+    for header in ("ID", "GROUP", "REF", "VECTOR_TEXT"):
         assert header in result.output
 
 
@@ -337,7 +354,7 @@ def test_add_minimal_record(populated_mount):
     )
     assert result.exit_code == 0, result.output
     parsed = _last_json_line(result.output)
-    assert parsed["content"] == "a brand new entry"
+    assert parsed["vector_text"] == "a brand new entry"
     assert "group_key" not in parsed
     assert "group_ref" not in parsed
 
@@ -428,9 +445,13 @@ def test_delete_unknown_id_fails(populated_mount):
 
 
 # ---------- update ----------
+#
+# CLI `entry update` only patches `payload` and `threshold`. Indexed and
+# identity fields (`vector_text`, `keyword_text`, `group_key`, `group_ref`)
+# are immutable — to change them, delete and re-add.
 
 
-def test_update_patches_content(populated_mount):
+def test_update_patches_payload(populated_mount):
     listing = runner.invoke(app, ["--mount", str(populated_mount), "query"])
     target = _json_lines(listing.output)[0]
     result = runner.invoke(
@@ -441,16 +462,47 @@ def test_update_patches_content(populated_mount):
             "entry",
             "update",
             target["id"],
-            "--content",
-            "rewritten",
+            "--payload",
+            '{"k": "v"}',
         ],
     )
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.output
     parsed = _last_json_line(result.output)
-    assert parsed["content"] == "rewritten"
+    assert parsed["payload"] == {"k": "v"}
 
 
-def test_update_clears_group_key(populated_mount):
+def test_update_clears_payload(populated_mount):
+    listing = runner.invoke(app, ["--mount", str(populated_mount), "query"])
+    target = _json_lines(listing.output)[0]
+    runner.invoke(
+        app,
+        [
+            "--mount",
+            str(populated_mount),
+            "entry",
+            "update",
+            target["id"],
+            "--payload",
+            '{"k": "v"}',
+        ],
+    )
+    cleared = runner.invoke(
+        app,
+        [
+            "--mount",
+            str(populated_mount),
+            "entry",
+            "update",
+            target["id"],
+            "--clear-payload",
+        ],
+    )
+    assert cleared.exit_code == 0, cleared.output
+    parsed = _last_json_line(cleared.output)
+    assert "payload" not in parsed
+
+
+def test_update_sets_threshold(populated_mount):
     listing = runner.invoke(app, ["--mount", str(populated_mount), "query"])
     target = _json_lines(listing.output)[0]
     result = runner.invoke(
@@ -461,45 +513,12 @@ def test_update_clears_group_key(populated_mount):
             "entry",
             "update",
             target["id"],
-            "--clear-group-key",
+            "--threshold",
+            "0.42",
         ],
     )
-    assert result.exit_code == 0
-    parsed = _last_json_line(result.output)
-    assert "group_key" not in parsed
-
-
-def test_update_set_and_clear_group_ref(populated_mount):
-    listing = runner.invoke(app, ["--mount", str(populated_mount), "query"])
-    target = _json_lines(listing.output)[0]
-    set_result = runner.invoke(
-        app,
-        [
-            "--mount",
-            str(populated_mount),
-            "entry",
-            "update",
-            target["id"],
-            "--group-ref",
-            "freshly-set",
-        ],
-    )
-    assert set_result.exit_code == 0
-    assert _last_json_line(set_result.output)["group_ref"] == "freshly-set"
-
-    clear_result = runner.invoke(
-        app,
-        [
-            "--mount",
-            str(populated_mount),
-            "entry",
-            "update",
-            target["id"],
-            "--clear-group-ref",
-        ],
-    )
-    assert clear_result.exit_code == 0
-    assert "group_ref" not in _last_json_line(clear_result.output)
+    assert result.exit_code == 0, result.output
+    assert _last_json_line(result.output)["threshold"] == 0.42
 
 
 def test_update_mutual_exclusion_errors(populated_mount):
@@ -513,36 +532,13 @@ def test_update_mutual_exclusion_errors(populated_mount):
             "entry",
             "update",
             target["id"],
-            "--group-key",
-            "x",
-            "--clear-group-key",
+            "--payload",
+            '{"k": "v"}',
+            "--clear-payload",
         ],
     )
     assert result.exit_code != 0
     assert "mutually exclusive" in result.output
-
-
-def test_update_collision_fails(populated_mount):
-    """Updating an entry into an existing (group_key, group_ref) should fail."""
-    listing = runner.invoke(app, ["--mount", str(populated_mount), "query"])
-    entries = _json_lines(listing.output)
-    moon = next(e for e in entries if e["content"] == "the moon is full")
-    result = runner.invoke(
-        app,
-        [
-            "--mount",
-            str(populated_mount),
-            "entry",
-            "update",
-            moon["id"],
-            "--group-key",
-            "note",
-            "--group-ref",
-            "dragon-001",
-        ],
-    )
-    assert result.exit_code != 0
-    assert "collision" in result.output.lower()
 
 
 def test_update_unknown_id_fails(populated_mount):
@@ -554,8 +550,8 @@ def test_update_unknown_id_fails(populated_mount):
             "entry",
             "update",
             "01HXXXXXXXXXXXXXXXXXXXXXXX",
-            "--content",
-            "x",
+            "--threshold",
+            "0.5",
         ],
     )
     assert result.exit_code != 0
@@ -670,7 +666,7 @@ def test_search_keyword_mode(populated_mount):
     )
     assert result.exit_code == 0, result.output
     entries = _json_lines(result.output)
-    assert any(e["content"] == "lumos lights the way" for e in entries)
+    assert any(e["vector_text"] == "lumos lights the way" for e in entries)
     assert "rank" in entries[0]
 
 
@@ -735,10 +731,10 @@ def test_import_records_into_grimoire(tmp_path, _shared_models_cache):
     data.write_text(
         "\n".join(
             [
-                json.dumps({"content": "first", "group_key": "note"}),
+                json.dumps({"vector_text": "first", "group_key": "note"}),
                 json.dumps(
                     {
-                        "content": "second",
+                        "vector_text": "second",
                         "group_key": "note",
                         "group_ref": "ref-x",
                     }
@@ -773,28 +769,37 @@ def test_import_collision_aborts(tmp_path, _shared_models_cache):
     )
     data = tmp_path / "data.jsonl"
     data.write_text(
-        json.dumps({"content": "x", "group_key": "doc", "group_ref": "shared"}) + "\n"
+        json.dumps({"vector_text": "x", "group_key": "doc", "group_ref": "shared"}) + "\n"
     )
     result = runner.invoke(app, ["--mount", str(mount), "entry", "import", str(data)])
     assert result.exit_code != 0
     assert "collision" in result.output.lower()
 
 
-def test_import_rejects_record_missing_content(tmp_path, _shared_models_cache):
+def test_import_accepts_record_without_vector_or_keyword_text(
+    tmp_path, _shared_models_cache
+):
+    """Both index fields are optional — a payload-only record is valid."""
     mount = _new_mount(tmp_path, _shared_models_cache)
     _mount(mount)
     data = tmp_path / "data.jsonl"
-    data.write_text(json.dumps({"group_key": "note"}) + "\n")
+    data.write_text(
+        json.dumps({"group_key": "note", "payload": {"k": "v"}}) + "\n"
+    )
     result = runner.invoke(app, ["--mount", str(mount), "entry", "import", str(data)])
-    assert result.exit_code != 0
-    assert "content" in result.output
+    assert result.exit_code == 0, result.output
+    listing = _json_lines(runner.invoke(app, ["--mount", str(mount), "query"]).output)
+    assert len(listing) == 1
+    assert "vector_text" not in listing[0]
+    assert "keyword_text" not in listing[0]
+    assert listing[0]["payload"] == {"k": "v"}
 
 
 def test_import_rejects_unknown_field(tmp_path, _shared_models_cache):
     mount = _new_mount(tmp_path, _shared_models_cache)
     _mount(mount)
     data = tmp_path / "data.jsonl"
-    data.write_text(json.dumps({"content": "x", "extra": "boom"}) + "\n")
+    data.write_text(json.dumps({"vector_text": "x", "extra": "boom"}) + "\n")
     result = runner.invoke(app, ["--mount", str(mount), "entry", "import", str(data)])
     assert result.exit_code != 0
 
@@ -850,10 +855,10 @@ def test_export_custom_path(populated_mount, tmp_path):
     assert out.exists()
 
 
-def test_export_then_import_round_trips_content(
+def test_export_then_import_round_trips(
     tmp_path, _shared_models_cache, populated_mount
 ):
-    """Export from one grimoire, import into a fresh one — content survives."""
+    """Export from one grimoire, import into a fresh one — entries survive."""
     out = tmp_path / "round.jsonl"
     runner.invoke(
         app, ["--mount", str(populated_mount), "entry", "export", "-o", str(out)]
@@ -864,8 +869,8 @@ def test_export_then_import_round_trips_content(
     assert result.exit_code == 0, result.output
     listing = _json_lines(runner.invoke(app, ["--mount", str(fresh), "query"]).output)
     assert len(listing) == 3
-    contents = {e["content"] for e in listing}
-    assert contents == {
+    texts = {e["vector_text"] for e in listing}
+    assert texts == {
         "the moon is full",
         "dragons fly at midnight",
         "lumos lights the way",
@@ -1033,7 +1038,7 @@ def test_named_db_init_create_search_round_trip(populated_mount, _shared_models_
     )
     rows = _json_lines(named_q.output)
     assert len(rows) == 1
-    assert rows[0]["content"] == "alohomora opens locks"
+    assert rows[0]["vector_text"] == "alohomora opens locks"
 
 
 def test_open_unknown_named_db_errors_clearly(populated_mount):

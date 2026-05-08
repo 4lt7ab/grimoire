@@ -93,28 +93,28 @@ def test_embedder_dimension_mismatch_raises(tmp_path):
 
 def test_add_returns_entry(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        entry = g.add(group_key="note", content="the moon is full")
+        entry = g.add(group_key="note", vector_text="the moon is full")
         assert isinstance(entry, Entry)
         assert entry.group_key == "note"
-        assert entry.content == "the moon is full"
+        assert entry.vector_text == "the moon is full"
 
 
 def test_search_finds_exact_match_first(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_key="note", content="the moon is full")
-        g.add(group_key="note", content="dragons fly at midnight")
-        g.add(group_key="note", content="potions bubble in the cauldron")
+        g.add(group_key="note", vector_text="the moon is full")
+        g.add(group_key="note", vector_text="dragons fly at midnight")
+        g.add(group_key="note", vector_text="potions bubble in the cauldron")
 
         results = g.vector_search("the moon is full", k=3)
         assert len(results) == 3
-        assert results[0].content == "the moon is full"
+        assert results[0].vector_text == "the moon is full"
         assert results[0].distance == 0.0
 
 
 def test_search_filters_by_group_key(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_key="spell", content="lumos")
-        g.add(group_key="potion", content="lumos")
+        g.add(group_key="spell", vector_text="lumos")
+        g.add(group_key="potion", vector_text="lumos")
 
         results = g.vector_search("lumos", group_key="spell", k=10)
         assert len(results) == 1
@@ -123,46 +123,46 @@ def test_search_filters_by_group_key(tmp_path):
 
 def test_dynamic_threshold_drops_low_match(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_key="note", content="the moon is full", threshold=0.0)
-        g.add(group_key="note", content="dragons fly at midnight", threshold=0.0)
+        g.add(group_key="note", vector_text="the moon is full", threshold=0.0)
+        g.add(group_key="note", vector_text="dragons fly at midnight", threshold=0.0)
 
         all_results = g.vector_search("the moon is full", k=10)
         assert len(all_results) == 2
 
         gated = g.vector_search("the moon is full", k=10, dynamic_threshold=True)
         assert len(gated) == 1
-        assert gated[0].content == "the moon is full"
+        assert gated[0].vector_text == "the moon is full"
 
 
 def test_two_files_are_independent(tmp_path):
     a_path = tmp_path / "a.db"
     b_path = tmp_path / "b.db"
     with _create_file(a_path, embedder=FakeEmbedder()) as a:
-        a.add(group_key="note", content="alpha")
+        a.add(group_key="note", vector_text="alpha")
     with _create_file(b_path, embedder=FakeEmbedder()) as b:
-        b.add(group_key="note", content="beta")
+        b.add(group_key="note", vector_text="beta")
         results = b.vector_search("alpha", k=10)
-        assert all(r.content != "alpha" for r in results)
+        assert all(r.vector_text != "alpha" for r in results)
 
 
 def test_data_persists_across_reopens(tmp_path):
     db = tmp_path / "store.db"
     with _create_file(db, embedder=FakeEmbedder()) as g:
-        g.add(group_key="note", content="the moon is full")
+        g.add(group_key="note", vector_text="the moon is full")
 
     with _open_file(db, embedder=FakeEmbedder()) as g:
         results = g.vector_search("the moon is full", k=1)
         assert len(results) == 1
-        assert results[0].content == "the moon is full"
+        assert results[0].vector_text == "the moon is full"
 
 
 def test_get_returns_entry(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="note", content="lumos")
+        added = g.add(group_key="note", vector_text="lumos")
         fetched = g.get(added.id)
         assert fetched is not None
         assert fetched.id == added.id
-        assert fetched.content == "lumos"
+        assert fetched.vector_text == "lumos"
 
 
 def test_get_returns_none_for_missing_id(tmp_path):
@@ -172,18 +172,18 @@ def test_get_returns_none_for_missing_id(tmp_path):
 
 def test_list_returns_all_entries_in_chronological_order(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        a = g.add(group_key="note", content="first")
-        b = g.add(group_key="note", content="second")
-        c = g.add(group_key="note", content="third")
+        a = g.add(group_key="note", vector_text="first")
+        b = g.add(group_key="note", vector_text="second")
+        c = g.add(group_key="note", vector_text="third")
         results = g.list()
         assert [r.id for r in results] == [a.id, b.id, c.id]
 
 
 def test_list_filters_by_group_key(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_key="spell", content="lumos")
-        g.add(group_key="potion", content="felix felicis")
-        g.add(group_key="spell", content="alohomora")
+        g.add(group_key="spell", vector_text="lumos")
+        g.add(group_key="potion", vector_text="felix felicis")
+        g.add(group_key="spell", vector_text="alohomora")
 
         spells = g.list(group_key="spell")
         assert len(spells) == 2
@@ -192,7 +192,7 @@ def test_list_filters_by_group_key(tmp_path):
 
 def test_list_paginates_via_after_id(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = [g.add(group_key="note", content=f"e{i}") for i in range(5)]
+        added = [g.add(group_key="note", vector_text=f"e{i}") for i in range(5)]
 
         page1 = g.list(limit=2)
         assert [r.id for r in page1] == [added[0].id, added[1].id]
@@ -210,13 +210,13 @@ def test_list_paginates_via_after_id(tmp_path):
 def test_list_respects_limit(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         for i in range(5):
-            g.add(group_key="note", content=f"e{i}")
+            g.add(group_key="note", vector_text=f"e{i}")
         assert len(g.list(limit=3)) == 3
 
 
 def test_delete_removes_entry_and_vector(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="note", content="ephemeral")
+        added = g.add(group_key="note", vector_text="ephemeral")
         assert g.delete(added.id) is True
         assert g.get(added.id) is None
 
@@ -371,9 +371,9 @@ def test_peek_returns_none_for_non_grimoire_file(tmp_path):
 def test_peek_returns_stats_for_initialized_grimoire(tmp_path):
     db = tmp_path / "store.db"
     with _create_file(db, embedder=FakeEmbedder(model="m1", dimension=8)) as g:
-        g.add(group_key="note", content="alpha")
-        g.add(group_key="note", content="beta")
-        g.add(group_key="spell", content="lumos")
+        g.add(group_key="note", vector_text="alpha")
+        g.add(group_key="note", vector_text="beta")
+        g.add(group_key="spell", vector_text="lumos")
 
     stats = Grimoire.peek(db)
     assert isinstance(stats, Stats)
@@ -390,17 +390,17 @@ def test_peek_returns_stats_for_initialized_grimoire(tmp_path):
 def test_entry_created_at_round_trips_to_ulid_timestamp():
     moment = datetime(2026, 5, 4, 10, 30, 0, tzinfo=UTC)
     entry_id = str(ULID.from_datetime(moment))
-    entry = Entry(id=entry_id, group_key="note", content="x")
+    entry = Entry(id=entry_id, group_key="note", vector_text="x")
     assert entry.created_at == moment
 
 
 def test_list_created_after_is_inclusive_lower_bound(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        a = g.add(group_key="note", content="a")
+        a = g.add(group_key="note", vector_text="a")
         time.sleep(0.005)
-        b = g.add(group_key="note", content="b")
+        b = g.add(group_key="note", vector_text="b")
         time.sleep(0.005)
-        c = g.add(group_key="note", content="c")
+        c = g.add(group_key="note", vector_text="c")
 
         results = g.list(created_after=b.created_at)
         assert [r.id for r in results] == [b.id, c.id]
@@ -409,11 +409,11 @@ def test_list_created_after_is_inclusive_lower_bound(tmp_path):
 
 def test_list_created_before_is_exclusive_upper_bound(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        a = g.add(group_key="note", content="a")
+        a = g.add(group_key="note", vector_text="a")
         time.sleep(0.005)
-        b = g.add(group_key="note", content="b")
+        b = g.add(group_key="note", vector_text="b")
         time.sleep(0.005)
-        c = g.add(group_key="note", content="c")
+        c = g.add(group_key="note", vector_text="c")
 
         results = g.list(created_before=c.created_at)
         assert [r.id for r in results] == [a.id, b.id]
@@ -421,13 +421,13 @@ def test_list_created_before_is_exclusive_upper_bound(tmp_path):
 
 def test_list_combines_both_bounds(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_key="note", content="a")
+        g.add(group_key="note", vector_text="a")
         time.sleep(0.005)
-        b = g.add(group_key="note", content="b")
+        b = g.add(group_key="note", vector_text="b")
         time.sleep(0.005)
-        c = g.add(group_key="note", content="c")
+        c = g.add(group_key="note", vector_text="c")
         time.sleep(0.005)
-        g.add(group_key="note", content="d")
+        g.add(group_key="note", vector_text="d")
 
         results = g.list(created_after=b.created_at, created_before=c.created_at)
         assert [r.id for r in results] == [b.id]
@@ -435,9 +435,9 @@ def test_list_combines_both_bounds(tmp_path):
 
 def test_search_honors_created_after(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        old = g.add(group_key="note", content="lumos")
+        old = g.add(group_key="note", vector_text="lumos")
         time.sleep(0.005)
-        new = g.add(group_key="note", content="lumos")
+        new = g.add(group_key="note", vector_text="lumos")
 
         results = g.vector_search("lumos", k=10, created_after=new.created_at)
         ids = [r.id for r in results]
@@ -447,9 +447,9 @@ def test_search_honors_created_after(tmp_path):
 
 def test_search_honors_created_before(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        old = g.add(group_key="note", content="lumos")
+        old = g.add(group_key="note", vector_text="lumos")
         time.sleep(0.005)
-        new = g.add(group_key="note", content="lumos")
+        new = g.add(group_key="note", vector_text="lumos")
 
         results = g.vector_search("lumos", k=10, created_before=new.created_at)
         ids = [r.id for r in results]
@@ -459,8 +459,8 @@ def test_search_honors_created_before(tmp_path):
 
 def test_list_window_excludes_everything_before_grimoire(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_key="note", content="a")
-        g.add(group_key="note", content="b")
+        g.add(group_key="note", vector_text="a")
+        g.add(group_key="note", vector_text="b")
 
         far_future = datetime.now(tz=UTC) + timedelta(days=365)
         assert g.list(created_after=far_future) == []
@@ -471,26 +471,26 @@ def test_list_window_excludes_everything_before_grimoire(tmp_path):
 
 def test_keyword_search_finds_exact_token(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_key="note", content="the moon is full")
-        g.add(group_key="note", content="dragons fly at midnight")
-        g.add(group_key="note", content="potions bubble in the cauldron")
+        g.add(group_key="note", keyword_text="the moon is full")
+        g.add(group_key="note", keyword_text="dragons fly at midnight")
+        g.add(group_key="note", keyword_text="potions bubble in the cauldron")
 
         results = g.keyword_search("moon")
         assert len(results) == 1
-        assert results[0].content == "the moon is full"
+        assert results[0].keyword_text == "the moon is full"
 
 
 def test_keyword_search_populates_rank(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_key="note", content="the moon is full")
+        g.add(group_key="note", keyword_text="the moon is full")
         results = g.keyword_search("moon")
         assert results[0].rank is not None
 
 
 def test_keyword_search_filters_by_group_key(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_key="spell", content="lumos lights the way")
-        g.add(group_key="potion", content="lumos is also a potion")
+        g.add(group_key="spell", keyword_text="lumos lights the way")
+        g.add(group_key="potion", keyword_text="lumos is also a potion")
 
         results = g.keyword_search("lumos", group_key="spell")
         assert len(results) == 1
@@ -499,22 +499,22 @@ def test_keyword_search_filters_by_group_key(tmp_path):
 
 def test_keyword_search_returns_empty_on_no_match(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_key="note", content="dragons fly at midnight")
+        g.add(group_key="note", keyword_text="dragons fly at midnight")
         assert g.keyword_search("phoenix") == []
 
 
 def test_keyword_search_respects_k(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         for i in range(5):
-            g.add(group_key="note", content=f"dragon {i}")
+            g.add(group_key="note", keyword_text=f"dragon {i}")
         assert len(g.keyword_search("dragon", k=2)) == 2
 
 
 def test_keyword_search_honors_created_after(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        old = g.add(group_key="note", content="dragon old")
+        old = g.add(group_key="note", keyword_text="dragon old")
         time.sleep(0.005)
-        new = g.add(group_key="note", content="dragon new")
+        new = g.add(group_key="note", keyword_text="dragon new")
         results = g.keyword_search("dragon", created_after=new.created_at)
         ids = [r.id for r in results]
         assert new.id in ids
@@ -523,9 +523,9 @@ def test_keyword_search_honors_created_after(tmp_path):
 
 def test_keyword_search_honors_created_before(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        old = g.add(group_key="note", content="dragon old")
+        old = g.add(group_key="note", keyword_text="dragon old")
         time.sleep(0.005)
-        new = g.add(group_key="note", content="dragon new")
+        new = g.add(group_key="note", keyword_text="dragon new")
         results = g.keyword_search("dragon", created_before=new.created_at)
         ids = [r.id for r in results]
         assert old.id in ids
@@ -534,7 +534,7 @@ def test_keyword_search_honors_created_before(tmp_path):
 
 def test_delete_removes_keyword_index_too(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="note", content="ephemeral phoenix")
+        added = g.add(group_key="note", keyword_text="ephemeral phoenix")
         assert g.delete(added.id) is True
         assert g.keyword_search("phoenix") == []
 
@@ -550,96 +550,71 @@ def test_peek_does_not_require_embedder_or_extension(tmp_path):
     assert stats.groups == {}
 
 
-# ---------- keywords ----------
+# ---------- keyword_text ----------
 
 
 def test_add_round_trips_keywords(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="note", content="hello", keywords=["alpha", "beta"])
-        assert added.keywords == ["alpha", "beta"]
+        added = g.add(group_key="note", vector_text="hello", keyword_text="alpha beta")
+        assert added.keyword_text == "alpha beta"
         fetched = g.get(added.id)
         assert fetched is not None
-        assert fetched.keywords == ["alpha", "beta"]
+        assert fetched.keyword_text == "alpha beta"
 
 
 def test_add_keywords_default_to_none(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="note", content="hello")
-        assert added.keywords is None
+        added = g.add(group_key="note", vector_text="hello")
+        assert added.keyword_text is None
         fetched = g.get(added.id)
         assert fetched is not None
-        assert fetched.keywords is None
+        assert fetched.keyword_text is None
 
 
-def test_add_empty_keywords_list_stored_as_list(tmp_path):
-    # An explicit empty list is distinct from None — preserve caller intent.
+def test_add_empty_keyword_text_indexed_as_empty_string(tmp_path):
+    # Empty string is distinct from None — preserve caller intent. An entry
+    # with keyword_text="" lands in the FTS index but won't match any query.
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="note", content="hello", keywords=[])
+        added = g.add(group_key="note", vector_text="hello", keyword_text="")
         fetched = g.get(added.id)
         assert fetched is not None
-        assert fetched.keywords == []
+        assert fetched.keyword_text == ""
 
 
-def test_keyword_search_finds_entry_by_keyword_alone(tmp_path):
-    # The token "phoenix" appears only in keywords, not in content.
+def test_keyword_search_finds_entry_by_keyword_text(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_key="note", content="A bird sings at dawn", keywords=["phoenix"])
-        g.add(group_key="note", content="Dragons fly at midnight")
+        g.add(group_key="note", vector_text="A bird sings at dawn", keyword_text="phoenix")
+        g.add(group_key="note", vector_text="Dragons fly at midnight")
         results = g.keyword_search("phoenix")
         assert len(results) == 1
-        assert results[0].keywords == ["phoenix"]
+        assert results[0].keyword_text == "phoenix"
 
 
-def test_keyword_search_keyword_match_outranks_content_match(tmp_path):
-    # Two entries: one matches the query via keywords, the other via content.
-    # With 5x weighting on the keywords column, the keyword match wins.
+def test_keyword_search_ignores_vector_text(tmp_path):
+    """vector_text is NOT in the FTS index — only keyword_text is searchable."""
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        content_match = g.add(
-            group_key="note",
-            content="dawn rises on a quiet field",
-            keywords=["morning"],
-        )
-        keyword_match = g.add(
-            group_key="note",
-            content="A solar phoenix reborn from ashes",
-            keywords=["dawn"],
-        )
-        results = g.keyword_search("dawn")
-        assert {r.id for r in results} == {content_match.id, keyword_match.id}
-        # FTS5 bm25() returns negative values; smaller (more negative) is better.
-        assert results[0].id == keyword_match.id
-        assert results[0].rank < results[1].rank
-
-
-def test_keyword_search_column_scoped_query_targets_keywords(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        in_content = g.add(group_key="note", content="phoenix in the sky")
-        in_keywords = g.add(
-            group_key="note", content="A bird sings", keywords=["phoenix"]
-        )
-        results = g.keyword_search("keywords:phoenix")
-        assert {r.id for r in results} == {in_keywords.id}
-        assert in_content.id not in {r.id for r in results}
+        g.add(group_key="note", vector_text="phoenix soars at dawn")
+        assert g.keyword_search("phoenix") == []
 
 
 def test_delete_removes_keyword_index_entry_too(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="note", content="A bird sings", keywords=["phoenix"])
+        added = g.add(group_key="note", vector_text="A bird sings", keyword_text="phoenix")
         assert g.delete(added.id) is True
         assert g.keyword_search("phoenix") == []
 
 
 def test_keywords_returned_by_list_and_search(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_key="note", content="hello", keywords=["alpha"])
+        g.add(group_key="note", vector_text="hello", keyword_text="alpha")
         listed = g.list()
-        assert listed[0].keywords == ["alpha"]
+        assert listed[0].keyword_text == "alpha"
         # Also via vector_search
         v_results = g.vector_search("hello", k=1)
-        assert v_results[0].keywords == ["alpha"]
+        assert v_results[0].keyword_text == "alpha"
         # And via keyword_search
         k_results = g.keyword_search("alpha")
-        assert k_results[0].keywords == ["alpha"]
+        assert k_results[0].keyword_text == "alpha"
 
 
 # ---------- add_many ----------
@@ -648,27 +623,27 @@ def test_keywords_returned_by_list_and_search(tmp_path):
 def test_add_many_round_trips(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         records = [
-            {"group_key": "note", "content": "alpha"},
-            {"group_key": "spell", "content": "lumos"},
+            {"group_key": "note", "vector_text": "alpha"},
+            {"group_key": "spell", "vector_text": "lumos"},
             {
                 "group_key": "note",
-                "content": "beta",
-                "keywords": ["b"],
+                "vector_text": "beta",
+                "keyword_text": "b",
                 "payload": {"weight": 1},
                 "threshold": 0.5,
             },
         ]
         added = g.add_many(records)
-        assert [e.content for e in added] == ["alpha", "lumos", "beta"]
+        assert [e.vector_text for e in added] == ["alpha", "lumos", "beta"]
         assert [e.group_key for e in added] == ["note", "spell", "note"]
-        assert added[2].keywords == ["b"]
+        assert added[2].keyword_text == "b"
         assert added[2].payload == {"weight": 1}
         assert added[2].threshold == 0.5
         # Persisted: each entry is fetchable, searchable.
         for entry in added:
             fetched = g.get(entry.id)
             assert fetched is not None
-            assert fetched.content == entry.content
+            assert fetched.vector_text == entry.vector_text
 
 
 def test_add_many_returns_empty_list_on_empty_input(tmp_path):
@@ -685,7 +660,7 @@ def test_add_many_calls_embed_many_once(tmp_path):
     with _open_file(db, embedder=e) as g:
         e.embed_calls = 0
         e.embed_many_calls = 0
-        records = [{"group_key": "note", "content": f"e{i}"} for i in range(5)]
+        records = [{"group_key": "note", "vector_text": f"e{i}"} for i in range(5)]
         g.add_many(records)
         # One batch call, not five single-embed calls.
         assert e.embed_many_calls == 1
@@ -701,26 +676,30 @@ def test_add_many_atomic_on_embed_failure(tmp_path):
 
     db = tmp_path / "store.db"
     with _create_file(db, embedder=FakeEmbedder()) as g:
-        g.add(group_key="note", content="existing")
+        g.add(group_key="note", vector_text="existing")
 
     with _open_file(db, embedder=FailEmbedMany()) as g:
         with pytest.raises(RuntimeError, match="embed batch failed"):
-            g.add_many([{"group_key": "note", "content": "new"}])
+            g.add_many([{"group_key": "note", "vector_text": "new"}])
         remaining = g.list()
         assert len(remaining) == 1
-        assert remaining[0].content == "existing"
+        assert remaining[0].vector_text == "existing"
 
 
 def test_add_many_results_are_searchable(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         g.add_many(
             [
-                {"group_key": "note", "content": "the moon is full"},
-                {"group_key": "note", "content": "dragons fly at midnight"},
+                {"group_key": "note", "vector_text": "the moon is full"},
+                {
+                    "group_key": "note",
+                    "vector_text": "dragons fly at midnight",
+                    "keyword_text": "dragons midnight",
+                },
             ]
         )
         v_results = g.vector_search("the moon is full", k=2)
-        assert v_results[0].content == "the moon is full"
+        assert v_results[0].vector_text == "the moon is full"
         k_results = g.keyword_search("dragons")
         assert len(k_results) == 1
 
@@ -740,7 +719,7 @@ def test_init_default_is_thread_bound(tmp_path):
 
         def worker() -> None:
             try:
-                g.add(group_key="note", content="x")
+                g.add(group_key="note", vector_text="x")
             except sqlite3.ProgrammingError as exc:
                 errors.append(exc)
 
@@ -763,7 +742,11 @@ def test_init_check_same_thread_false_allows_worker_thread_use(tmp_path):
         added: list[str] = []
 
         def worker() -> None:
-            entry = g.add(group_key="note", content="hello from worker")
+            entry = g.add(
+                group_key="note",
+                vector_text="hello from worker",
+                keyword_text="worker hello",
+            )
             added.append(entry.id)
 
         t = threading.Thread(target=worker)
@@ -774,7 +757,7 @@ def test_init_check_same_thread_false_allows_worker_thread_use(tmp_path):
         # The write is visible to the main thread, both via id lookup and search.
         fetched = g.get(added[0])
         assert fetched is not None
-        assert fetched.content == "hello from worker"
+        assert fetched.vector_text == "hello from worker"
         results = g.vector_search("hello from worker", k=1)
         assert results[0].id == added[0]
         kw = g.keyword_search("worker")
@@ -790,7 +773,7 @@ def test_open_check_same_thread_false_threads_through(tmp_path):
         added: list[str] = []
 
         def worker() -> None:
-            added.append(g.add(group_key="note", content="reopened cross-thread").id)
+            added.append(g.add(group_key="note", vector_text="reopened cross-thread").id)
 
         t = threading.Thread(target=worker)
         t.start()
@@ -799,164 +782,7 @@ def test_open_check_same_thread_false_threads_through(tmp_path):
         assert g.get(added[0]) is not None
 
 
-# ---------- update_many / delete_many ----------
-
-
-def test_update_many_returns_empty_list_on_empty_input(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        assert g.update_many([]) == []
-
-
-def test_update_many_returns_entries_aligned_to_input_order(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        a = g.add(group_key="note", content="first")
-        b = g.add(group_key="note", content="second")
-        c = g.add(group_key="note", content="third")
-        results = g.update_many(
-            [
-                {"id": c.id, "content": "c2"},
-                {"id": a.id, "content": "a2"},
-                {"id": b.id, "content": "b2"},
-            ]
-        )
-        assert [r.id for r in results] == [c.id, a.id, b.id]
-        assert [r.content for r in results] == ["c2", "a2", "b2"]
-
-
-def test_update_many_returns_none_for_unknown_id(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        a = g.add(group_key="note", content="real")
-        results = g.update_many(
-            [
-                {"id": a.id, "content": "still real"},
-                {"id": "01HXXXXXXXXXXXXXXXXXXXXXXX", "content": "ghost"},
-            ]
-        )
-        assert results[0] is not None
-        assert results[0].content == "still real"
-        assert results[1] is None
-
-
-def test_update_many_calls_embed_many_once_for_changed_contents(tmp_path):
-    db = tmp_path / "store.db"
-    _create_file(db, embedder=CountingEmbedder()).close()
-    e = CountingEmbedder()
-    with _open_file(db, embedder=e) as g:
-        a = g.add(group_key="note", content="A")
-        b = g.add(group_key="note", content="B")
-        c = g.add(group_key="note", content="C")
-        e.embed_calls = 0
-        e.embed_many_calls = 0
-        g.update_many(
-            [
-                {"id": a.id, "content": "AA"},
-                {"id": b.id, "group_key": "spell"},  # no content change → no embed
-                {"id": c.id, "content": "CC"},
-            ]
-        )
-        assert e.embed_many_calls == 1
-        assert e.embed_calls == 0
-
-
-def test_update_many_skips_embedder_entirely_when_no_content_changes(tmp_path):
-    """Pin: a payload-only batch must not call the embedder at all."""
-    db = tmp_path / "store.db"
-    _create_file(db, embedder=CountingEmbedder()).close()
-    e = CountingEmbedder()
-    with _open_file(db, embedder=e) as g:
-        a = g.add(group_key="note", content="A")
-        b = g.add(group_key="note", content="B")
-        e.embed_calls = 0
-        e.embed_many_calls = 0
-        g.update_many(
-            [
-                {"id": a.id, "payload": {"x": 1}},
-                {"id": b.id, "group_key": "spell"},
-            ]
-        )
-        assert e.embed_calls == 0
-        assert e.embed_many_calls == 0
-
-
-def test_update_many_atomic_on_embed_failure(tmp_path):
-    """If embedding fails mid-batch, no records leak through partially."""
-
-    class FailEmbedMany(FakeEmbedder):
-        def embed_many(self, texts):
-            raise RuntimeError("embed batch failed")
-
-    db = tmp_path / "store.db"
-    with _create_file(db, embedder=FakeEmbedder()) as g:
-        a = g.add(group_key="note", content="original")
-
-    with _open_file(db, embedder=FailEmbedMany()) as g:
-        with pytest.raises(RuntimeError, match="embed batch failed"):
-            g.update_many([{"id": a.id, "content": "new"}])
-        # Original survived intact.
-        fetched = g.get(a.id)
-        assert fetched is not None
-        assert fetched.content == "original"
-
-
-def test_update_many_raises_on_duplicate_ids(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        a = g.add(group_key="note", content="hello")
-        with pytest.raises(ValueError, match="duplicate"):
-            g.update_many(
-                [
-                    {"id": a.id, "content": "v1"},
-                    {"id": a.id, "content": "v2"},
-                ]
-            )
-
-
-def test_update_many_preserves_omitted_fields(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(
-            group_key="note",
-            content="hi",
-            payload={"k": "v"},
-            threshold=0.5,
-            keywords=["a"],
-        )
-        [updated] = g.update_many([{"id": added.id, "content": "bye"}])
-        assert updated is not None
-        assert updated.payload == {"k": "v"}
-        assert updated.threshold == 0.5
-        assert updated.keywords == ["a"]
-
-
-def test_update_many_clears_nullable_fields_when_explicit_none(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(
-            group_key="note",
-            content="hi",
-            payload={"k": "v"},
-            threshold=0.5,
-            keywords=["a"],
-        )
-        [updated] = g.update_many(
-            [{"id": added.id, "payload": None, "threshold": None, "keywords": None}]
-        )
-        assert updated is not None
-        assert updated.payload is None
-        assert updated.threshold is None
-        assert updated.keywords is None
-
-
-def test_update_many_group_key_change_moves_partition_without_reembed(tmp_path):
-    db = tmp_path / "store.db"
-    _create_file(db, embedder=CountingEmbedder()).close()
-    e = CountingEmbedder()
-    with _open_file(db, embedder=e) as g:
-        added = g.add(group_key="note", content="lumos")
-        e.embed_calls = 0
-        e.embed_many_calls = 0
-        g.update_many([{"id": added.id, "group_key": "spell"}])
-        assert e.embed_calls == 0
-        assert e.embed_many_calls == 0
-        assert g.vector_search("lumos", group_key="note", k=10) == []
-        assert len(g.vector_search("lumos", group_key="spell", k=10)) == 1
+# ---------- delete_many ----------
 
 
 def test_delete_many_returns_empty_list_on_empty_input(tmp_path):
@@ -966,8 +792,8 @@ def test_delete_many_returns_empty_list_on_empty_input(tmp_path):
 
 def test_delete_many_returns_bools_aligned_to_input(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        a = g.add(group_key="note", content="a")
-        b = g.add(group_key="note", content="b")
+        a = g.add(group_key="note", vector_text="a")
+        b = g.add(group_key="note", vector_text="b")
         results = g.delete_many([a.id, "01HXXXXXXXXXXXXXXXXXXXXXXX", b.id])
         assert results == [True, False, True]
         assert g.get(a.id) is None
@@ -976,8 +802,8 @@ def test_delete_many_returns_bools_aligned_to_input(tmp_path):
 
 def test_delete_many_cascades_to_vectors_and_fts(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        a = g.add(group_key="note", content="ephemeral phoenix")
-        b = g.add(group_key="note", content="another phoenix")
+        a = g.add(group_key="note", vector_text="ephemeral phoenix")
+        b = g.add(group_key="note", vector_text="another phoenix")
         g.delete_many([a.id, b.id])
         assert g.vector_search("phoenix", k=10) == []
         assert g.keyword_search("phoenix") == []
@@ -985,7 +811,7 @@ def test_delete_many_cascades_to_vectors_and_fts(tmp_path):
 
 def test_delete_many_duplicate_ids_get_same_answer(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        a = g.add(group_key="note", content="hello")
+        a = g.add(group_key="note", vector_text="hello")
         # Both occurrences should report True (existed at call time).
         results = g.delete_many([a.id, a.id])
         assert results == [True, True]
@@ -994,173 +820,129 @@ def test_delete_many_duplicate_ids_get_same_answer(tmp_path):
 
 def test_delete_many_does_not_touch_unlisted_entries(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        keep = g.add(group_key="note", content="survivor")
-        gone = g.add(group_key="note", content="doomed")
+        keep = g.add(group_key="note", vector_text="survivor")
+        gone = g.add(group_key="note", vector_text="doomed")
         g.delete_many([gone.id])
         assert g.get(keep.id) is not None
         assert g.get(gone.id) is None
 
 
 # ---------- update ----------
+#
+# update() is intentionally narrow: only `payload` and `threshold` are
+# mutable. The indexed and identity fields (`vector_text`, `keyword_text`,
+# `group_key`, `group_ref`) are immutable after creation. To change them,
+# delete the entry and add a fresh one.
 
 
 def test_update_returns_none_for_missing_id(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        assert g.update("01HXXXXXXXXXXXXXXXXXXXXXXX", content="x") is None
+        assert g.update("01HXXXXXXXXXXXXXXXXXXXXXXX", payload={"x": 1}) is None
 
 
 def test_update_no_args_returns_unchanged_entry(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="note", content="hello", keywords=["a"])
+        added = g.add(
+            group_key="note",
+            vector_text="hello",
+            keyword_text="a",
+            payload={"k": "v"},
+        )
         result = g.update(added.id)
         assert result is not None
         assert result.id == added.id
-        assert result.content == "hello"
+        assert result.vector_text == "hello"
+        assert result.keyword_text == "a"
         assert result.group_key == "note"
-        assert result.keywords == ["a"]
+        assert result.payload == {"k": "v"}
 
 
-def test_update_changes_content_and_reindexes_search(tmp_path):
+def test_update_rejects_immutable_fields(tmp_path):
+    """Passing an indexed/identity field is a TypeError — they're immutable."""
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="note", content="the moon is full")
-        updated = g.update(added.id, content="dragons fly at midnight")
-        assert updated is not None
-        assert updated.content == "dragons fly at midnight"
-
-        # Vector search picks up new content; old query no longer hits.
-        new_results = g.vector_search("dragons fly at midnight", k=1)
-        assert new_results[0].id == added.id
-        assert new_results[0].distance == 0.0
-
-        # FTS reflects new tokens.
-        assert g.keyword_search("moon") == []
-        kw = g.keyword_search("dragons")
-        assert len(kw) == 1
-        assert kw[0].id == added.id
+        added = g.add(group_key="note", vector_text="hello")
+        for kwarg in ("vector_text", "keyword_text", "group_key", "group_ref"):
+            with pytest.raises(TypeError):
+                g.update(added.id, **{kwarg: "x"})
 
 
-def test_update_changes_group_key_moves_vector_partition(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="note", content="lumos")
-        g.update(added.id, group_key="spell")
-
-        assert g.vector_search("lumos", group_key="note", k=10) == []
-        spells = g.vector_search("lumos", group_key="spell", k=10)
-        assert len(spells) == 1
-        assert spells[0].id == added.id
-        assert spells[0].group_key == "spell"
-
-
-def test_update_group_key_only_does_not_reembed(tmp_path):
-    """Pin: a group_key-only patch should not call the embedder."""
+def test_update_does_not_reembed_or_touch_fts(tmp_path):
+    """Pin: payload/threshold updates never call the embedder or rewrite FTS."""
     db = tmp_path / "store.db"
     _create_file(db, embedder=CountingEmbedder()).close()
     e = CountingEmbedder()
     with _open_file(db, embedder=e) as g:
-        added = g.add(group_key="note", content="hello")
+        added = g.add(
+            group_key="note", vector_text="hello", keyword_text="phoenix"
+        )
         e.embed_calls = 0
         e.embed_many_calls = 0
-        g.update(added.id, group_key="spell")
+        result = g.update(added.id, payload={"foo": "bar"}, threshold=0.5)
         assert e.embed_calls == 0
         assert e.embed_many_calls == 0
-
-
-def test_update_content_only_calls_embed_once(tmp_path):
-    db = tmp_path / "store.db"
-    _create_file(db, embedder=CountingEmbedder()).close()
-    e = CountingEmbedder()
-    with _open_file(db, embedder=e) as g:
-        added = g.add(group_key="note", content="hello")
-        e.embed_calls = 0
-        g.update(added.id, content="world")
-        assert e.embed_calls == 1
-
-
-def test_update_payload_only_does_not_reembed_or_reindex_fts(tmp_path):
-    db = tmp_path / "store.db"
-    _create_file(db, embedder=CountingEmbedder()).close()
-    e = CountingEmbedder()
-    with _open_file(db, embedder=e) as g:
-        added = g.add(group_key="note", content="hello")
-        e.embed_calls = 0
-        result = g.update(added.id, payload={"foo": "bar"})
-        assert e.embed_calls == 0
         assert result is not None
         assert result.payload == {"foo": "bar"}
-        # FTS unaffected — content still findable.
-        assert g.keyword_search("hello")[0].id == added.id
+        assert result.threshold == 0.5
+        # FTS and vector indexes untouched.
+        assert g.keyword_search("phoenix")[0].id == added.id
+        assert g.vector_search("hello", k=1)[0].id == added.id
 
 
-def test_update_clears_nullable_fields_when_passed_none(tmp_path):
+def test_update_clears_payload_and_threshold_when_passed_none(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         added = g.add(
             group_key="note",
-            content="hello",
+            vector_text="hello",
             payload={"k": "v"},
             threshold=0.5,
-            keywords=["a"],
         )
-        updated = g.update(added.id, payload=None, threshold=None, keywords=None)
+        updated = g.update(added.id, payload=None, threshold=None)
         assert updated is not None
         assert updated.payload is None
         assert updated.threshold is None
-        assert updated.keywords is None
         # Persists across re-fetch.
         fetched = g.get(added.id)
         assert fetched is not None
         assert fetched.payload is None
         assert fetched.threshold is None
-        assert fetched.keywords is None
 
 
-def test_update_omitted_nullable_fields_are_preserved(tmp_path):
-    """Pin: omitting a nullable field must NOT clear it (the sentinel job)."""
+def test_update_omitted_field_is_preserved(tmp_path):
+    """Pin: omitting a field must NOT clear it (the _UNSET sentinel job)."""
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         added = g.add(
             group_key="note",
-            content="hello",
+            vector_text="hello",
             payload={"k": "v"},
             threshold=0.5,
-            keywords=["a"],
         )
-        # Patch only content — every other field must survive.
-        updated = g.update(added.id, content="world")
+        # Patch only payload — threshold (and everything else) must survive.
+        updated = g.update(added.id, payload={"k": "v2"})
         assert updated is not None
-        assert updated.payload == {"k": "v"}
+        assert updated.payload == {"k": "v2"}
         assert updated.threshold == 0.5
-        assert updated.keywords == ["a"]
-
-
-def test_update_keywords_reindexes_fts(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="note", content="A bird sings", keywords=["phoenix"])
-        assert len(g.keyword_search("phoenix")) == 1
-        g.update(added.id, keywords=["dragon"])
-        assert g.keyword_search("phoenix") == []
-        results = g.keyword_search("dragon")
-        assert len(results) == 1
-        assert results[0].id == added.id
 
 
 def test_update_persists_across_reopens(tmp_path):
     db = tmp_path / "store.db"
     with _create_file(db, embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="note", content="hello")
-        g.update(added.id, content="world", payload={"v": 1})
+        added = g.add(group_key="note", vector_text="hello")
+        g.update(added.id, payload={"v": 1}, threshold=0.25)
 
     with _open_file(db, embedder=FakeEmbedder()) as g:
         fetched = g.get(added.id)
         assert fetched is not None
-        assert fetched.content == "world"
+        assert fetched.vector_text == "hello"
         assert fetched.payload == {"v": 1}
+        assert fetched.threshold == 0.25
 
 
 def test_update_preserves_id_and_created_at(tmp_path):
     """Updates must not reseat the entry's identity or its derived timestamp."""
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="note", content="hello")
+        added = g.add(group_key="note", vector_text="hello")
         before = added.created_at
-        updated = g.update(added.id, content="world")
+        updated = g.update(added.id, payload={"v": 1})
         assert updated is not None
         assert updated.id == added.id
         assert updated.created_at == before
@@ -1169,7 +951,7 @@ def test_update_preserves_id_and_created_at(tmp_path):
 def test_add_many_assigns_distinct_ids_in_input_order(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
         added = g.add_many(
-            [{"group_key": "note", "content": f"e{i}"} for i in range(10)]
+            [{"group_key": "note", "vector_text": f"e{i}"} for i in range(10)]
         )
         ids = [e.id for e in added]
         assert len(set(ids)) == 10
@@ -1183,7 +965,7 @@ def test_add_many_assigns_distinct_ids_in_input_order(tmp_path):
 
 def test_add_persists_group_ref(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        entry = g.add(group_key="doc", group_ref="path/to/file.md", content="hello")
+        entry = g.add(group_key="doc", group_ref="path/to/file.md", vector_text="hello")
         assert entry.group_ref == "path/to/file.md"
         fetched = g.get(entry.id)
         assert fetched is not None and fetched.group_ref == "path/to/file.md"
@@ -1191,47 +973,47 @@ def test_add_persists_group_ref(tmp_path):
 
 def test_group_ref_unique_within_group_key(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_key="doc", group_ref="r1", content="a")
+        g.add(group_key="doc", group_ref="r1", vector_text="a")
         with pytest.raises(sqlite3.IntegrityError):
-            g.add(group_key="doc", group_ref="r1", content="b")
+            g.add(group_key="doc", group_ref="r1", vector_text="b")
 
 
 def test_group_ref_same_value_allowed_across_group_keys(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        a = g.add(group_key="doc", group_ref="r1", content="a")
-        b = g.add(group_key="page", group_ref="r1", content="b")
+        a = g.add(group_key="doc", group_ref="r1", vector_text="a")
+        b = g.add(group_key="page", group_ref="r1", vector_text="b")
         assert a.id != b.id
 
 
 def test_group_ref_unique_in_global_namespace(tmp_path):
     """group_key=None still enforces uniqueness on group_ref alone."""
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_ref="g1", content="a")
+        g.add(group_ref="g1", vector_text="a")
         with pytest.raises(sqlite3.IntegrityError):
-            g.add(group_ref="g1", content="b")
+            g.add(group_ref="g1", vector_text="b")
 
 
 def test_group_ref_nulls_allowed_repeatedly(tmp_path):
     """SQLite treats NULLs as distinct; multiple entries without group_ref OK."""
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        a = g.add(group_key="doc", content="a")
-        b = g.add(group_key="doc", content="b")
+        a = g.add(group_key="doc", vector_text="a")
+        b = g.add(group_key="doc", vector_text="b")
         assert a.id != b.id
         assert a.group_ref is None and b.group_ref is None
 
 
 def test_get_by_group_ref_within_group(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="doc", group_ref="r1", content="hello")
-        g.add(group_key="page", group_ref="r1", content="other")
+        added = g.add(group_key="doc", group_ref="r1", vector_text="hello")
+        g.add(group_key="page", group_ref="r1", vector_text="other")
         found = g.get_by_group_ref(group_key="doc", group_ref="r1")
         assert found is not None and found.id == added.id
 
 
 def test_get_by_group_ref_in_global_namespace(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_ref="g1", content="hello")
-        g.add(group_key="doc", group_ref="g1", content="other")
+        added = g.add(group_ref="g1", vector_text="hello")
+        g.add(group_key="doc", group_ref="g1", vector_text="other")
         found = g.get_by_group_ref(group_key=None, group_ref="g1")
         assert found is not None and found.id == added.id
 
@@ -1243,8 +1025,8 @@ def test_get_by_group_ref_returns_none_for_unknown(tmp_path):
 
 def test_nullable_group_key_in_add_and_search(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        ungrouped = g.add(content="lumos")
-        grouped = g.add(group_key="spell", content="lumos")
+        ungrouped = g.add(vector_text="lumos")
+        grouped = g.add(group_key="spell", vector_text="lumos")
         assert ungrouped.group_key is None
         # No-filter search returns both.
         all_results = g.vector_search("lumos", k=10)
@@ -1255,46 +1037,19 @@ def test_nullable_group_key_in_add_and_search(tmp_path):
         assert {r.id for r in spell_results} == {grouped.id}
 
 
-def test_update_clears_group_key_to_none(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="doc", content="hello")
-        updated = g.update(added.id, group_key=None)
-        assert updated is not None and updated.group_key is None
-        # The vector partition moved — verify the entry is still findable.
-        results = g.vector_search("hello", k=5)
-        assert any(r.id == added.id for r in results)
-
-
-def test_update_sets_and_clears_group_ref(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="doc", content="hello")
-        updated = g.update(added.id, group_ref="r1")
-        assert updated is not None and updated.group_ref == "r1"
-        cleared = g.update(added.id, group_ref=None)
-        assert cleared is not None and cleared.group_ref is None
-
-
-def test_update_to_colliding_group_ref_raises(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_key="doc", group_ref="r1", content="a")
-        b = g.add(group_key="doc", content="b")
-        with pytest.raises(sqlite3.IntegrityError):
-            g.update(b.id, group_ref="r1")
-
-
 def test_list_filters_by_group_ref(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        a = g.add(group_key="doc", group_ref="r1", content="a")
-        g.add(group_key="doc", group_ref="r2", content="b")
-        b = g.add(group_key="page", group_ref="r1", content="c")
+        a = g.add(group_key="doc", group_ref="r1", vector_text="a")
+        g.add(group_key="doc", group_ref="r2", vector_text="b")
+        b = g.add(group_key="page", group_ref="r1", vector_text="c")
         results = g.list(group_ref="r1")
         assert {r.id for r in results} == {a.id, b.id}
 
 
 def test_list_filters_by_group_key_and_group_ref(tmp_path):
     with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        a = g.add(group_key="doc", group_ref="r1", content="a")
-        g.add(group_key="doc", group_ref="r2", content="b")
-        g.add(group_key="page", group_ref="r1", content="c")
+        a = g.add(group_key="doc", group_ref="r1", vector_text="a")
+        g.add(group_key="doc", group_ref="r2", vector_text="b")
+        g.add(group_key="page", group_ref="r1", vector_text="c")
         results = g.list(group_key="doc", group_ref="r1")
         assert [r.id for r in results] == [a.id]

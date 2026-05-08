@@ -2,6 +2,7 @@
 name = "4lt7ab-grimoire-cli"
 version = "0.0.9"
 description = "CLI for managing a grimoire datastore"
+readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["4lt7ab-grimoire", "typer>=0.12"]
 

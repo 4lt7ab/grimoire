@@ -29,11 +29,6 @@ from grimoire.schema import create, validate
 
 _WARMUP_PROBE = " "
 
-# BM25 column weights for keyword_search: (content, keywords).
-# Keyword matches outrank content matches by this ratio. Tunable here.
-KEYWORD_BM25_WEIGHTS = (1.0, 5.0)
-_BM25_RANK = f"bm25(entries_fts, {KEYWORD_BM25_WEIGHTS[0]}, {KEYWORD_BM25_WEIGHTS[1]})"
-
 
 class _Unset:
     """Sentinel for "field not supplied" in `update()`.
@@ -239,63 +234,77 @@ class Grimoire:
     def add(
         self,
         *,
-        content: str,
+        vector_text: str | None = None,
+        keyword_text: str | None = None,
         group_key: str | None = None,
         group_ref: str | None = None,
         payload: dict[str, Any] | None = None,
         threshold: float | None = None,
-        keywords: list[str] | None = None,
     ) -> Entry:
+        """Insert a single entry.
+
+        Both `vector_text` and `keyword_text` are optional and independent.
+        Pass `vector_text` to make the entry findable by vector_search;
+        pass `keyword_text` to make it findable by keyword_search; pass
+        both, or neither (a payload-only record retrievable by id /
+        group_ref / list).
+        """
         entry_id = str(ULID())
-        vector = self._embedder.embed(content)
         payload_json = json.dumps(payload) if payload is not None else None
-        keywords_json = json.dumps(keywords) if keywords is not None else None
-        keywords_text = " ".join(keywords) if keywords else ""
 
         with self._conn:
             self._conn.execute(
                 """
                 INSERT INTO entries
-                    (id, group_key, group_ref, content, keywords, payload, threshold)
+                    (id, group_key, group_ref, vector_text, keyword_text,
+                     payload, threshold)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     entry_id,
                     group_key,
                     group_ref,
-                    content,
-                    keywords_json,
+                    vector_text,
+                    keyword_text,
                     payload_json,
                     threshold,
                 ),
             )
-            self._conn.execute(
-                "INSERT INTO vectors (entry_id, group_key, embedding) VALUES (?, ?, ?)",
-                (entry_id, group_key, _pack(vector)),
-            )
-            self._conn.execute(
-                "INSERT INTO entries_fts (content, keywords, entry_id) "
-                "VALUES (?, ?, ?)",
-                (content, keywords_text, entry_id),
-            )
+            if vector_text is not None:
+                vector = self._embedder.embed(vector_text)
+                self._conn.execute(
+                    "INSERT INTO vectors (entry_id, group_key, embedding) "
+                    "VALUES (?, ?, ?)",
+                    (entry_id, group_key, _pack(vector)),
+                )
+            if keyword_text is not None:
+                self._conn.execute(
+                    "INSERT INTO entries_fts (keyword_text, entry_id) "
+                    "VALUES (?, ?)",
+                    (keyword_text, entry_id),
+                )
 
         return Entry(
             id=entry_id,
             group_key=group_key,
             group_ref=group_ref,
-            content=content,
+            vector_text=vector_text,
+            keyword_text=keyword_text,
             payload=payload,
             threshold=threshold,
-            keywords=keywords,
         )
 
     def add_many(self, records: Iterable[Mapping[str, Any]]) -> list[Entry]:
         """Insert many records in one transaction with one batched embed call.
 
         Each record is a mapping accepting the same keys as `add`'s kwargs:
-        `content` is required; `group_key`, `group_ref`, `payload`,
-        `threshold`, and `keywords` are optional. Returns the inserted
-        entries in input order.
+        all are optional (`vector_text`, `keyword_text`, `group_key`,
+        `group_ref`, `payload`, `threshold`). Returns the inserted entries
+        in input order.
+
+        The embedder is called once with only the records that supplied a
+        `vector_text` — records without it skip vec0 entirely. Same for
+        `keyword_text` and the FTS index.
 
         Atomic: if embedding or any insert fails, nothing is committed —
         unlike a loop over `add`, which would leave partial state behind.
@@ -304,75 +313,89 @@ class Grimoire:
         if not records:
             return []
 
-        contents = [r["content"] for r in records]
-        vectors = self._embedder.embed_many(contents)
+        # Batch the embedder call across only those records that opted in.
+        embed_indices = [
+            i for i, r in enumerate(records) if r.get("vector_text") is not None
+        ]
+        embed_texts = [records[i]["vector_text"] for i in embed_indices]
+        embedded = (
+            self._embedder.embed_many(embed_texts) if embed_texts else []
+        )
+        blob_by_index = {
+            idx: _pack(vec) for idx, vec in zip(embed_indices, embedded, strict=True)
+        }
 
         entries: list[Entry] = []
         entries_rows: list[tuple] = []
         vectors_rows: list[tuple] = []
         fts_rows: list[tuple] = []
 
-        for record, vector in zip(records, vectors, strict=True):
+        for i, record in enumerate(records):
             entry_id = str(ULID())
             group_key = record.get("group_key")
             group_ref = record.get("group_ref")
-            content = record["content"]
+            vector_text = record.get("vector_text")
+            keyword_text = record.get("keyword_text")
             payload = record.get("payload")
             threshold = record.get("threshold")
-            keywords = record.get("keywords")
 
             payload_json = json.dumps(payload) if payload is not None else None
-            keywords_json = json.dumps(keywords) if keywords is not None else None
-            keywords_text = " ".join(keywords) if keywords else ""
 
             entries_rows.append(
                 (
                     entry_id,
                     group_key,
                     group_ref,
-                    content,
-                    keywords_json,
+                    vector_text,
+                    keyword_text,
                     payload_json,
                     threshold,
                 )
             )
-            vectors_rows.append((entry_id, group_key, _pack(vector)))
-            fts_rows.append((content, keywords_text, entry_id))
+            if vector_text is not None:
+                vectors_rows.append((entry_id, group_key, blob_by_index[i]))
+            if keyword_text is not None:
+                fts_rows.append((keyword_text, entry_id))
 
             entries.append(
                 Entry(
                     id=entry_id,
                     group_key=group_key,
                     group_ref=group_ref,
-                    content=content,
+                    vector_text=vector_text,
+                    keyword_text=keyword_text,
                     payload=payload,
                     threshold=threshold,
-                    keywords=keywords,
                 )
             )
 
         with self._conn:
             self._conn.executemany(
                 "INSERT INTO entries "
-                "(id, group_key, group_ref, content, keywords, payload, threshold) "
+                "(id, group_key, group_ref, vector_text, keyword_text, "
+                "payload, threshold) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 entries_rows,
             )
-            self._conn.executemany(
-                "INSERT INTO vectors (entry_id, group_key, embedding) VALUES (?, ?, ?)",
-                vectors_rows,
-            )
-            self._conn.executemany(
-                "INSERT INTO entries_fts (content, keywords, entry_id) "
-                "VALUES (?, ?, ?)",
-                fts_rows,
-            )
+            if vectors_rows:
+                self._conn.executemany(
+                    "INSERT INTO vectors (entry_id, group_key, embedding) "
+                    "VALUES (?, ?, ?)",
+                    vectors_rows,
+                )
+            if fts_rows:
+                self._conn.executemany(
+                    "INSERT INTO entries_fts (keyword_text, entry_id) "
+                    "VALUES (?, ?)",
+                    fts_rows,
+                )
 
         return entries
 
     def get(self, entry_id: str) -> Entry | None:
         row = self._conn.execute(
-            "SELECT id, group_key, group_ref, content, keywords, payload, threshold "
+            "SELECT id, group_key, group_ref, vector_text, keyword_text, "
+            "payload, threshold "
             "FROM entries WHERE id = ?",
             (entry_id,),
         ).fetchone()
@@ -390,14 +413,14 @@ class Grimoire:
         """
         if group_key is None:
             row = self._conn.execute(
-                "SELECT id, group_key, group_ref, content, keywords, "
+                "SELECT id, group_key, group_ref, vector_text, keyword_text, "
                 "payload, threshold "
                 "FROM entries WHERE group_key IS NULL AND group_ref = ?",
                 (group_ref,),
             ).fetchone()
         else:
             row = self._conn.execute(
-                "SELECT id, group_key, group_ref, content, keywords, "
+                "SELECT id, group_key, group_ref, vector_text, keyword_text, "
                 "payload, threshold "
                 "FROM entries WHERE group_key = ? AND group_ref = ?",
                 (group_key, group_ref),
@@ -415,7 +438,8 @@ class Grimoire:
         created_before: datetime | None = None,
     ) -> list[Entry]:
         sql = (
-            "SELECT id, group_key, group_ref, content, keywords, payload, threshold "
+            "SELECT id, group_key, group_ref, vector_text, keyword_text, "
+            "payload, threshold "
             "FROM entries"
         )
         params: list[Any] = []
@@ -447,259 +471,50 @@ class Grimoire:
         self,
         entry_id: str,
         *,
-        content: str | None = None,
-        group_key: str | None | _Unset = _UNSET,
-        group_ref: str | None | _Unset = _UNSET,
         payload: dict[str, Any] | None | _Unset = _UNSET,
         threshold: float | None | _Unset = _UNSET,
-        keywords: list[str] | None | _Unset = _UNSET,
     ) -> Entry | None:
-        """Patch fields on an entry, leaving omitted fields untouched.
+        """Patch the mutable metadata fields on an entry.
 
-        `content` is non-nullable — pass a value to change it, or omit
-        (default `None`) to leave it alone. `group_key`, `group_ref`,
-        `payload`, `threshold`, and `keywords` are all nullable — omit to
-        leave alone, pass `None` to clear, or pass a new value to replace.
+        Only `payload` and `threshold` can be updated. The indexed and
+        identity fields (`vector_text`, `keyword_text`, `group_key`,
+        `group_ref`) are immutable after creation — to change them, delete
+        the entry and add a fresh one. This keeps the embedder, the FTS
+        index, and the vec0 partitions immutable too: no re-embed dance,
+        no row shuffling, just a single SQL UPDATE.
 
-        Returns the updated entry, or `None` if the id is unknown. Raises
-        `sqlite3.IntegrityError` if the resulting `(group_key, group_ref)`
-        pair would collide with another entry. Re-embeds only when `content`
-        changed, re-indexes FTS only when `content` or `keywords` changed,
-        and rewrites the vector row only when `content` or `group_key`
-        changed.
+        Omit a field to leave it alone; pass `None` to clear it; pass a
+        value to replace it. Returns the updated entry, or `None` if the
+        id is unknown.
         """
+        if isinstance(payload, _Unset) and isinstance(threshold, _Unset):
+            return self.get(entry_id)
+
         current = self.get(entry_id)
         if current is None:
             return None
 
-        new_group_key = (
-            current.group_key if isinstance(group_key, _Unset) else group_key
-        )
-        new_group_ref = (
-            current.group_ref if isinstance(group_ref, _Unset) else group_ref
-        )
-        new_content = current.content if content is None else content
         new_payload = current.payload if isinstance(payload, _Unset) else payload
         new_threshold = (
             current.threshold if isinstance(threshold, _Unset) else threshold
         )
-        new_keywords = current.keywords if isinstance(keywords, _Unset) else keywords
-
-        content_changed = new_content != current.content
-        keywords_changed = new_keywords != current.keywords
-        group_key_changed = new_group_key != current.group_key
-
         payload_json = json.dumps(new_payload) if new_payload is not None else None
-        keywords_json = json.dumps(new_keywords) if new_keywords is not None else None
-        keywords_text = " ".join(new_keywords) if new_keywords else ""
 
         with self._conn:
             self._conn.execute(
-                """
-                UPDATE entries
-                SET group_key = ?, group_ref = ?, content = ?,
-                    keywords = ?, payload = ?, threshold = ?
-                WHERE id = ?
-                """,
-                (
-                    new_group_key,
-                    new_group_ref,
-                    new_content,
-                    keywords_json,
-                    payload_json,
-                    new_threshold,
-                    entry_id,
-                ),
+                "UPDATE entries SET payload = ?, threshold = ? WHERE id = ?",
+                (payload_json, new_threshold, entry_id),
             )
-
-            if content_changed or group_key_changed:
-                # vec0 partitions on `group_key`, so a group_key change requires
-                # moving the row to a different partition — done as delete +
-                # reinsert. When only group_key changed, reuse the stored
-                # embedding blob to avoid an unnecessary embedder call.
-                if content_changed:
-                    new_blob = _pack(self._embedder.embed(new_content))
-                else:
-                    row = self._conn.execute(
-                        "SELECT embedding FROM vectors WHERE entry_id = ?",
-                        (entry_id,),
-                    ).fetchone()
-                    new_blob = row[0]
-                self._conn.execute(
-                    "DELETE FROM vectors WHERE entry_id = ?", (entry_id,)
-                )
-                self._conn.execute(
-                    "INSERT INTO vectors (entry_id, group_key, embedding) "
-                    "VALUES (?, ?, ?)",
-                    (entry_id, new_group_key, new_blob),
-                )
-
-            if content_changed or keywords_changed:
-                self._conn.execute(
-                    "DELETE FROM entries_fts WHERE entry_id = ?", (entry_id,)
-                )
-                self._conn.execute(
-                    "INSERT INTO entries_fts (content, keywords, entry_id) "
-                    "VALUES (?, ?, ?)",
-                    (new_content, keywords_text, entry_id),
-                )
 
         return Entry(
             id=entry_id,
-            group_key=new_group_key,
-            group_ref=new_group_ref,
-            content=new_content,
+            group_key=current.group_key,
+            group_ref=current.group_ref,
+            vector_text=current.vector_text,
+            keyword_text=current.keyword_text,
             payload=new_payload,
             threshold=new_threshold,
-            keywords=new_keywords,
         )
-
-    def update_many(self, records: Iterable[Mapping[str, Any]]) -> list[Entry | None]:
-        """Patch many entries in one transaction with one batched embed call.
-
-        Each record must include `id`; remaining keys mirror `update`'s
-        kwargs (`group_key`, `group_ref`, `content`, `payload`, `threshold`,
-        `keywords`). Absent keys leave the field unchanged; passing `None`
-        clears nullable fields (`group_key`, `group_ref`, `payload`,
-        `threshold`, `keywords`).
-
-        Returns one `Entry | None` per input record in input order — `None`
-        when the id is unknown. Atomic: if embedding or any update fails,
-        nothing is committed — unlike a loop over `update`, which would
-        leave partial state behind. Raises `sqlite3.IntegrityError` if any
-        resulting `(group_key, group_ref)` pair would collide.
-
-        Duplicate ids in input raise `ValueError`: which record wins is
-        ambiguous, and the returned entries would lie about the post-batch
-        state. Callers should dedupe upstream.
-        """
-        records = list(records)
-        if not records:
-            return []
-
-        ids = [r["id"] for r in records]
-        if len(ids) != len(set(ids)):
-            raise ValueError("update_many: duplicate ids in input")
-
-        placeholders = ",".join(["?"] * len(ids))
-        rows = self._conn.execute(
-            f"SELECT id, group_key, group_ref, content, keywords, payload, threshold "
-            f"FROM entries WHERE id IN ({placeholders})",
-            ids,
-        ).fetchall()
-        current_by_id = {row[0]: _row_to_entry(row) for row in rows}
-
-        # First pass: compute target state per record, gather contents to embed.
-        targets: list[dict[str, Any] | None] = []
-        contents_to_embed: list[str] = []
-        embed_indices: list[int] = []
-        for i, r in enumerate(records):
-            current = current_by_id.get(r["id"])
-            if current is None:
-                targets.append(None)
-                continue
-            new_group_key = r.get("group_key", current.group_key)
-            new_group_ref = r.get("group_ref", current.group_ref)
-            new_content = r.get("content", current.content)
-            new_payload = r.get("payload", current.payload)
-            new_threshold = r.get("threshold", current.threshold)
-            new_keywords = r.get("keywords", current.keywords)
-            target = {
-                "id": r["id"],
-                "group_key": new_group_key,
-                "group_ref": new_group_ref,
-                "content": new_content,
-                "payload": new_payload,
-                "threshold": new_threshold,
-                "keywords": new_keywords,
-                "content_changed": new_content != current.content,
-                "group_key_changed": new_group_key != current.group_key,
-                "keywords_changed": new_keywords != current.keywords,
-            }
-            targets.append(target)
-            if target["content_changed"]:
-                embed_indices.append(i)
-                contents_to_embed.append(new_content)
-
-        # One batched embed call covering only records whose content changed.
-        blobs: dict[int, bytes] = {}
-        if contents_to_embed:
-            new_vectors = self._embedder.embed_many(contents_to_embed)
-            for idx, vec in zip(embed_indices, new_vectors, strict=True):
-                blobs[idx] = _pack(vec)
-
-        results: list[Entry | None] = []
-        with self._conn:
-            for i, t in enumerate(targets):
-                if t is None:
-                    results.append(None)
-                    continue
-
-                payload_json = (
-                    json.dumps(t["payload"]) if t["payload"] is not None else None
-                )
-                keywords_json = (
-                    json.dumps(t["keywords"]) if t["keywords"] is not None else None
-                )
-                keywords_text = " ".join(t["keywords"]) if t["keywords"] else ""
-
-                self._conn.execute(
-                    "UPDATE entries SET group_key = ?, group_ref = ?, "
-                    "content = ?, keywords = ?, payload = ?, threshold = ? "
-                    "WHERE id = ?",
-                    (
-                        t["group_key"],
-                        t["group_ref"],
-                        t["content"],
-                        keywords_json,
-                        payload_json,
-                        t["threshold"],
-                        t["id"],
-                    ),
-                )
-
-                if t["content_changed"] or t["group_key_changed"]:
-                    if i in blobs:
-                        new_blob = blobs[i]
-                    else:
-                        # group_key changed but content did not — reuse stored
-                        # embedding.
-                        row = self._conn.execute(
-                            "SELECT embedding FROM vectors WHERE entry_id = ?",
-                            (t["id"],),
-                        ).fetchone()
-                        new_blob = row[0]
-                    self._conn.execute(
-                        "DELETE FROM vectors WHERE entry_id = ?", (t["id"],)
-                    )
-                    self._conn.execute(
-                        "INSERT INTO vectors (entry_id, group_key, embedding) "
-                        "VALUES (?, ?, ?)",
-                        (t["id"], t["group_key"], new_blob),
-                    )
-
-                if t["content_changed"] or t["keywords_changed"]:
-                    self._conn.execute(
-                        "DELETE FROM entries_fts WHERE entry_id = ?", (t["id"],)
-                    )
-                    self._conn.execute(
-                        "INSERT INTO entries_fts (content, keywords, entry_id) "
-                        "VALUES (?, ?, ?)",
-                        (t["content"], keywords_text, t["id"]),
-                    )
-
-                results.append(
-                    Entry(
-                        id=t["id"],
-                        group_key=t["group_key"],
-                        group_ref=t["group_ref"],
-                        content=t["content"],
-                        payload=t["payload"],
-                        threshold=t["threshold"],
-                        keywords=t["keywords"],
-                    )
-                )
-        return results
 
     def delete(self, entry_id: str) -> bool:
         with self._conn:
@@ -775,8 +590,8 @@ class Grimoire:
         vector = self._embedder.embed(query)
 
         sql = (
-            "SELECT e.id, e.group_key, e.group_ref, e.content, e.keywords, "
-            "e.payload, e.threshold, v.distance "
+            "SELECT e.id, e.group_key, e.group_ref, e.vector_text, "
+            "e.keyword_text, e.payload, e.threshold, v.distance "
             "FROM vectors v JOIN entries e ON e.id = v.entry_id "
             "WHERE v.embedding MATCH ? AND k = ?"
         )
@@ -798,8 +613,8 @@ class Grimoire:
                 id=r[0],
                 group_key=r[1],
                 group_ref=r[2],
-                content=r[3],
-                keywords=json.loads(r[4]) if r[4] is not None else None,
+                vector_text=r[3],
+                keyword_text=r[4],
                 payload=json.loads(r[5]) if r[5] is not None else None,
                 threshold=r[6],
                 distance=r[7],
@@ -822,8 +637,9 @@ class Grimoire:
         created_before: datetime | None = None,
     ) -> list[Entry]:
         sql = (
-            f"SELECT e.id, e.group_key, e.group_ref, e.content, e.keywords, "
-            f"e.payload, e.threshold, {_BM25_RANK} AS rank "
+            "SELECT e.id, e.group_key, e.group_ref, e.vector_text, "
+            "e.keyword_text, e.payload, e.threshold, "
+            "bm25(entries_fts) AS rank "
             "FROM entries_fts JOIN entries e ON e.id = entries_fts.entry_id "
             "WHERE entries_fts MATCH ?"
         )
@@ -837,7 +653,7 @@ class Grimoire:
         if created_before is not None:
             sql += " AND e.id < ?"
             params.append(_ulid_floor(created_before))
-        sql += f" ORDER BY {_BM25_RANK} LIMIT ?"
+        sql += " ORDER BY bm25(entries_fts) LIMIT ?"
         params.append(k)
 
         rows = self._conn.execute(sql, params).fetchall()
@@ -846,8 +662,8 @@ class Grimoire:
                 id=r[0],
                 group_key=r[1],
                 group_ref=r[2],
-                content=r[3],
-                keywords=json.loads(r[4]) if r[4] is not None else None,
+                vector_text=r[3],
+                keyword_text=r[4],
                 payload=json.loads(r[5]) if r[5] is not None else None,
                 threshold=r[6],
                 rank=r[7],
@@ -974,8 +790,8 @@ def _row_to_entry(row: tuple) -> Entry:
         id=row[0],
         group_key=row[1],
         group_ref=row[2],
-        content=row[3],
-        keywords=json.loads(row[4]) if row[4] is not None else None,
+        vector_text=row[3],
+        keyword_text=row[4],
         payload=json.loads(row[5]) if row[5] is not None else None,
         threshold=row[6],
     )

@@ -22,13 +22,13 @@ def create(conn: sqlite3.Connection, embedder: Embedder) -> None:
             dimension INTEGER NOT NULL
         );
         CREATE TABLE entries (
-            id         TEXT PRIMARY KEY,
-            group_key  TEXT,
-            group_ref  TEXT,
-            content    TEXT NOT NULL,
-            keywords   TEXT,
-            payload    TEXT,
-            threshold  REAL
+            id           TEXT PRIMARY KEY,
+            group_key    TEXT,
+            group_ref    TEXT,
+            vector_text  TEXT,
+            keyword_text TEXT,
+            payload      TEXT,
+            threshold    REAL
         );
         CREATE INDEX entries_group_key ON entries(group_key);
         -- Uniqueness on (group_key, group_ref) where group_ref is set.
@@ -46,9 +46,13 @@ def create(conn: sqlite3.Connection, embedder: Embedder) -> None:
             group_key TEXT partition key,
             embedding FLOAT[{embedder.dimension}]
         );
+        -- Single-column FTS over the entry's free-form keyword string. Entries
+        -- with NULL `keyword_text` get no row here and are invisible to
+        -- keyword_search; entries with NULL `vector_text` get no row in the
+        -- vectors table and are invisible to vector_search. The two indexes
+        -- are independent — an entry can opt into either, both, or neither.
         CREATE VIRTUAL TABLE entries_fts USING fts5(
-            content,
-            keywords,
+            keyword_text,
             entry_id UNINDEXED
         );
         """
