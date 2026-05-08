@@ -8,8 +8,9 @@ from ulid import ULID
 @dataclass
 class Entry:
     id: str
-    kind: str
     content: str
+    group_key: str | None = None
+    group_ref: str | None = None
     payload: dict[str, Any] | None = None
     threshold: float | None = None
     keywords: list[str] | None = None
@@ -27,4 +28,4 @@ class Stats:
     dimension: int
     schema_version: int
     entry_count: int
-    kinds: dict[str, int] = field(default_factory=dict)
+    groups: dict[str, int] = field(default_factory=dict)

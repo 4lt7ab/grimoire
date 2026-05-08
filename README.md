@@ -50,10 +50,10 @@ mkdir -p .grimoire
 export GRIMOIRE_MOUNT=$PWD/.grimoire
 ```
 
-Confirm there's no grimoire there yet — also doubles as a check that your env vars resolved to the path you expected:
+Confirm there's no grimoire there yet — bare `grimoire` (no subcommand) prints the file's metadata, and exits non-zero if there isn't one:
 
 ```sh
-grimoire info
+grimoire
 ```
 
 You should see `Error: No grimoire at <full path>` (exit 1).
@@ -70,95 +70,107 @@ Add a few entries. No download this time — `init` already warmed the model.
 grimoire add "the moon is full tonight"
 grimoire add "dragons fly at midnight"
 grimoire add "potions bubble in the cauldron"
-grimoire add "knights joust at dawn" --kind tale
+grimoire add "knights joust at dawn" --group-key tale
 ```
 
-Attach explicit keywords with repeatable `--keyword` — useful for terms a query might use that don't appear in the prose:
+Group entries with `--group-key` for cheap filtered search, and dedupe-by-external-id with `--group-ref`. Attach explicit keywords with repeatable `--keyword` — useful for terms a query might use that don't appear in the prose:
 
 ```sh
-grimoire add "the silver crown rests on velvet" --kind tale --keyword regalia --keyword treasure
+grimoire add "the silver crown rests on velvet" \
+    --group-key tale --group-ref crown-001 \
+    --keyword regalia --keyword treasure
 ```
 
-Inspect the file — model, dimension, entry count, kinds:
+Inspect the file — model, dimension, entry count, per-group counts:
 
 ```sh
-grimoire info
+grimoire
 ```
 
-Search by meaning (vector):
+Search by meaning (default mode is vector):
 
 ```sh
-grimoire vector-search "celestial events"
-grimoire vector-search "stories of valor" --kind tale
+grimoire search "celestial events"
+grimoire search "stories of valor" --group-key tale
 ```
 
 Search by literal text (keyword, FTS5):
 
 ```sh
-grimoire keyword-search "moon"
-grimoire keyword-search "knights" --kind tale
+grimoire search "moon" --mode keyword
+grimoire search "knights" --mode keyword --group-key tale
 ```
 
 Or by a keyword attached above — `treasure` isn't in any prose, but the silver crown was tagged with it:
 
 ```sh
-grimoire keyword-search "treasure" --kind tale
+grimoire search "treasure" --mode keyword --group-key tale
 ```
 
 Bulk-load from JSONL. Each row carries a `payload` — the structured object the description is pointing at:
 
 ```sh
 cat > .grimoire/data.jsonl <<'EOF'
-{"kind": "spell", "content": "Summons a sphere of silver light that wards undead and warms cold hands", "payload": {"id": "lumara", "school": "abjuration", "tier": 2}, "keywords": ["lumara", "light"]}
-{"kind": "spell", "content": "Coaxes a locked door, chest, or cage to forget its keeper", "payload": {"id": "skeleton-key", "school": "transmutation", "tier": 1}, "keywords": ["skeleton-key", "lockpick"]}
-{"kind": "spell", "content": "Wraps the caster in a curtain of silence so footfalls and whispers vanish", "payload": {"id": "hush", "school": "illusion", "tier": 1}, "keywords": ["hush", "stealth"]}
+{"group_key": "spell", "group_ref": "lumara", "content": "Summons a sphere of silver light that wards undead and warms cold hands", "payload": {"school": "abjuration", "tier": 2}, "keywords": ["lumara", "light"]}
+{"group_key": "spell", "group_ref": "skeleton-key", "content": "Coaxes a locked door, chest, or cage to forget its keeper", "payload": {"school": "transmutation", "tier": 1}, "keywords": ["skeleton-key", "lockpick"]}
+{"group_key": "spell", "group_ref": "hush", "content": "Wraps the caster in a curtain of silence so footfalls and whispers vanish", "payload": {"school": "illusion", "tier": 1}, "keywords": ["hush", "stealth"]}
 EOF
-grimoire ingest .grimoire/data.jsonl
+grimoire import .grimoire/data.jsonl
 ```
+
+`import` is additive — collisions on `(group_key, group_ref)` abort the run with a clear error rather than silently overwriting.
 
 Search the spells. Notice the `payload` in the result — that's the object you actually wanted to find:
 
 ```sh
-grimoire vector-search "magic to slip past a guard unseen" --kind spell
+grimoire search "magic to slip past a guard unseen" --group-key spell
 ```
 
-`hush` should rank first, with its payload (`{"id": "hush", "school": "illusion", "tier": 1}`) right there in the JSON.
+`hush` should rank first, with its payload (`{"school": "illusion", "tier": 1}`) right there in the JSON.
 
 Or find spells whose description literally mentions "door":
 
 ```sh
-grimoire keyword-search "door" --kind spell
+grimoire search "door" --mode keyword --group-key spell
 ```
 
 Or by an explicit keyword that doesn't appear in the prose — `lockpick` is in the spell's `keywords` list, not its description:
 
 ```sh
-grimoire keyword-search "lockpick" --kind spell
+grimoire search "lockpick" --mode keyword --group-key spell
 ```
 
 Patch an existing entry. Pass only the fields you want to change — everything else is left alone:
 
 ```sh
-ID=$(grimoire list --kind tale --limit 1 | jq -r .id)
+ID=$(grimoire query --group-key tale --limit 1 | jq -r .id)
 grimoire update "$ID" --content "knights joust at dawn beneath silver banners"
 ```
 
-List entries chronologically (results are JSON, one per line):
+List entries chronologically (results are JSON, one per line). `query` paginates via `--cursor` — pass the last id of the previous page to walk forward:
 
 ```sh
-grimoire list
+grimoire query --limit 50
+LAST=$(grimoire query --limit 50 | tail -1 | jq -r .id)
+grimoire query --limit 50 --cursor "$LAST"
 ```
 
 Pipe any read command through `jq` for pretty output:
 
 ```sh
-grimoire list | jq
+grimoire query | jq
 ```
 
-Reset everything:
+Back up everything to a JSONL file (defaults to `<mount>/export.jsonl`, refuses to overwrite without `--force`):
 
 ```sh
-rm -rf .grimoire
+grimoire export
+```
+
+Reset everything (deletes the mount directory; requires confirmation, or pass `--yes` to skip the prompt):
+
+```sh
+grimoire destroy --yes
 ```
 
 Uninstall:
@@ -190,13 +202,15 @@ embedder = FastembedEmbedder(cache_folder=".grimoire/models")
 
 with Grimoire.init(".grimoire/memory.db", embedder=embedder) as g:
     g.add(
-        kind="creature",
+        group_key="creature",
+        group_ref="phoenix-001",
         content="A solar phoenix reborn from its own ashes at dawn",
         payload={"id": "phoenix-001", "habitat": "volcano"},
         keywords=["phoenix", "fire-bird"],
     )
     g.add(
-        kind="creature",
+        group_key="creature",
+        group_ref="wyrm-014",
         content="An ancient wyrm hoarding obsidian in the Ash Peaks",
         payload={"id": "wyrm-014", "habitat": "mountain"},
         threshold=0.5,
@@ -209,7 +223,7 @@ with Grimoire.init(".grimoire/memory.db", embedder=embedder) as g:
         print(entry.id, entry.rank, entry.content, entry.payload)
 
     volcano_dwellers = g.vector_search(
-        "fiery beasts of the magma", kind="creature", dynamic_threshold=True
+        "fiery beasts of the magma", group_key="creature", dynamic_threshold=True
     )
     everything = g.list(limit=100)
     one = g.get(volcano_dwellers[0].id) if volcano_dwellers else None
@@ -231,7 +245,7 @@ from grimoire import Grimoire
 
 stats = Grimoire.peek(".grimoire/memory.db")
 if stats:
-    print(stats.model, stats.dimension, stats.entry_count, stats.kinds)
+    print(stats.model, stats.dimension, stats.entry_count, stats.groups)
 ```
 
 ### Full API
@@ -239,13 +253,14 @@ if stats:
 - `Grimoire.init(path, *, embedder)` — create or open the file, validate the embedder lock, exercise the embedder once. The deliberate setup step.
 - `Grimoire.open(path, *, embedder)` — open an existing grimoire. Raises `GrimoireNotFound` if the file is missing or not a grimoire.
 - `Grimoire.peek(path)` — return `Stats` (or `None` if missing/non-grimoire) without loading the embedder.
-- `add(*, kind, content, payload=None, threshold=None, keywords=None)` — insert. `keywords` is an optional list of explicit search terms; they're indexed in FTS5 alongside `content` and weighted 5× higher in `keyword_search` ranking.
-- `add_many(records)` — insert many in one transaction with one batched embed call. Each record is a mapping with `kind` and `content` required, plus optional `payload`, `threshold`, `keywords`. Atomic on failure.
+- `add(*, content, group_key=None, group_ref=None, payload=None, threshold=None, keywords=None)` — insert. `group_key` partitions records (and the vector index) for cheap filtered search. `group_ref` is a consumer-set identifier; `(group_key, group_ref)` is enforced unique when `group_ref` is set, and a NULL `group_key` shares a single global namespace for that uniqueness check. `keywords` is an optional list of explicit search terms; they're indexed in FTS5 alongside `content` and weighted 5× higher in `keyword_search` ranking.
+- `add_many(records)` — insert many in one transaction with one batched embed call. Each record is a mapping with `content` required, plus optional `group_key`, `group_ref`, `payload`, `threshold`, `keywords`. Atomic on failure.
 - `get(entry_id)` — fetch by id, or `None`.
-- `list(*, kind=None, limit=100, after_id=None)` — chronological pagination.
-- `vector_search(query, *, kind=None, k=10, dynamic_threshold=False, created_after=None, created_before=None)` — vector search ranked by embedder distance; `dynamic_threshold` filters results by each record's stored similarity gate.
-- `keyword_search(query, *, kind=None, k=10, created_after=None, created_before=None)` — keyword search via SQLite FTS5, ranked by BM25 against `content` and `keywords` (keywords weighted 5× higher). The query string accepts FTS5 syntax (phrases, prefix, boolean operators, column scoping like `keywords:phoenix`).
-- `update(entry_id, *, kind=None, content=None, payload=..., threshold=..., keywords=...)` — partial patch. Omitted fields are left alone; passing `None` to a nullable field (`payload`, `threshold`, `keywords`) clears it. Re-embeds only when `content` changed; rewrites the vector row only when `content` or `kind` changed; re-indexes FTS only when `content` or `keywords` changed. Returns the updated entry, or `None` if the id is unknown.
+- `get_by_group_ref(*, group_key, group_ref)` — fetch by composite key. `group_key` may be `None` to look up an entry in the global (ungrouped) namespace. Returns `None` if no match.
+- `list(*, group_key=None, limit=100, after_id=None)` — chronological pagination.
+- `vector_search(query, *, group_key=None, k=10, dynamic_threshold=False, created_after=None, created_before=None)` — vector search ranked by embedder distance; `dynamic_threshold` filters results by each record's stored similarity gate.
+- `keyword_search(query, *, group_key=None, k=10, created_after=None, created_before=None)` — keyword search via SQLite FTS5, ranked by BM25 against `content` and `keywords` (keywords weighted 5× higher). The query string accepts FTS5 syntax (phrases, prefix, boolean operators, column scoping like `keywords:phoenix`).
+- `update(entry_id, *, content=None, group_key=..., group_ref=..., payload=..., threshold=..., keywords=...)` — partial patch. Omitted fields are left alone; passing `None` to a nullable field (`group_key`, `group_ref`, `payload`, `threshold`, `keywords`) clears it. Re-embeds only when `content` changed; rewrites the vector row only when `content` or `group_key` changed; re-indexes FTS only when `content` or `keywords` changed. Raises `sqlite3.IntegrityError` if the resulting `(group_key, group_ref)` pair would collide. Returns the updated entry, or `None` if the id is unknown.
 - `update_many(records)` — patch many in one transaction with one batched embed call covering only records whose `content` actually changed. Each record must include `id`. Atomic on failure. Duplicate ids in input raise `ValueError`. Returns one `Entry | None` per input record in input order.
 - `delete(entry_id)` — returns `True` if removed, `False` if absent.
 - `delete_many(ids)` — delete many in one transaction. Duplicate ids each receive the same answer (their pre-call existence). Returns one `bool` per input id in input order.
@@ -272,9 +287,9 @@ The `model` and `dimension` are written into the file on first open and locked. 
 
 If you've installed the CLI, `grimoire --help` prints this same orientation in the terminal — commands, the mount model, output conventions, and environment variables in one screen. The reference below mirrors it for repo browsers.
 
-Every command operates over a grimoire mount: a directory that holds the SQLite file (`<mount>/grimoire.db`) and the embedder model cache (`<mount>/models/`). `info` is the one command that doesn't load the embedder — it inspects the file via `Grimoire.peek` — but it still resolves the db path through the mount.
+Every command operates over a grimoire mount: a directory that holds the SQLite file (`<mount>/grimoire.db`) and the embedder model cache (`<mount>/models/`). Bare `grimoire` (no subcommand) prints the file's metadata via `Grimoire.peek`, without loading the embedder.
 
-Pass it explicitly with `--mount <dir>`, or set the environment variable once for the shell:
+Pass the mount explicitly with `--mount <dir>`, or set the environment variable once for the shell:
 
 ```sh
 export GRIMOIRE_MOUNT=$PWD/.grimoire
@@ -285,50 +300,42 @@ The flag overrides the env var: `--mount <dir>` over `GRIMOIRE_MOUNT`.
 ### Commands
 
 ```sh
-grimoire init
-grimoire add "<content>" [--kind K] [--payload '{...}'] [--threshold N] [--keyword K ...]
-grimoire ingest <jsonl-file>
-grimoire update <entry_id> [--kind K] [--content "..."] [--payload '{...}'] [--threshold N] [--keyword K ...] [--clear-payload | --clear-threshold | --clear-keywords]
-grimoire update-many <jsonl-file>
-grimoire vector-search "<query>" [--k N] [--kind K] [--dynamic-threshold]
-grimoire keyword-search "<query>" [--k N] [--kind K]
-grimoire list [--kind K] [--limit N] [--after-id ID]
+grimoire                                   # print info for the mounted grimoire
+grimoire init [--model M]
+grimoire add "<content>" [--group-key K] [--group-ref R] [--payload '{...}'] [--threshold N] [--keyword K ...]
+grimoire update <entry_id> [--content "..."] [--group-key K | --clear-group-key] [--group-ref R | --clear-group-ref] [--payload '{...}' | --clear-payload] [--threshold N | --clear-threshold] [--keyword K ... | --clear-keywords]
 grimoire get <entry_id>
 grimoire delete <entry_id>
-grimoire delete-many <ids-file | ->
-grimoire info
+grimoire query [--group-key K] [--group-ref R] [--after ISO] [--before ISO] [--cursor ID] [--limit N]
+grimoire search "<query>" [--mode vector|keyword] [--group-key K] [--after ISO] [--before ISO] [--k N] [--dynamic-threshold]
+grimoire import <jsonl-file>
+grimoire export [-o PATH] [--force]
+grimoire destroy [--yes]
 ```
 
 All read commands print one JSON object per line — pipe to `jq` for filtering.
 
-### JSONL format for `ingest`
+### Paging
 
-One object per line. `kind` and `content` are required; `payload`, `threshold`, and `keywords` are optional. `content` is the text that gets embedded and searched; `payload` is the structured object returned alongside a match — the thing the content describes; `keywords` is a list of explicit search terms that augment recall in `keyword_search`.
-
-```jsonl
-{"kind": "creature", "content": "A solar phoenix reborn from its own ashes", "payload": {"id": "phoenix-001", "habitat": "volcano"}, "keywords": ["phoenix", "fire-bird"]}
-{"kind": "creature", "content": "An ancient wyrm hoarding obsidian in the Ash Peaks", "payload": {"id": "wyrm-014", "habitat": "mountain"}, "threshold": 0.5, "keywords": ["wyrm", "dragon"]}
-```
-
-### JSONL format for `update-many`
-
-Same shape, plus a required `id` and PATCH semantics: any field you include is changed, any field you omit is left alone, and an explicit `null` clears nullable fields (`payload`, `threshold`, `keywords`).
-
-```jsonl
-{"id": "01J9...A1", "content": "An ancient wyrm hoarding obsidian and starlight in the Ash Peaks"}
-{"id": "01J9...B2", "kind": "legend", "keywords": ["phoenix", "fire-bird", "rebirth"]}
-{"id": "01J9...C3", "payload": null}
-```
-
-Unknown ids are reported in the summary line; they don't fail the run.
-
-### Id-list format for `delete-many`
-
-One ULID per line. Blank lines and `#`-prefixed comments are skipped. Pass `-` to read ids from stdin so the command composes with the read commands:
+`query` paginates with `--cursor`: pass the id of the last entry from the previous page to walk forward. The id IS the cursor — ULIDs sort lexicographically by creation time, so `id > cursor` walks the next page in chronological order without a separate cursor type:
 
 ```sh
-grimoire list --kind stale | jq -r .id | grimoire delete-many -
+LAST=$(grimoire query --limit 100 | tail -1 | jq -r .id)
+grimoire query --limit 100 --cursor "$LAST"
 ```
+
+`search` returns top-`k` by score (vector distance or BM25), so paging doesn't apply — adjust `--k` to widen the result set.
+
+### JSONL format for `import` and `export`
+
+One object per line. `content` is required; `group_key`, `group_ref`, `payload`, `threshold`, and `keywords` are optional. `content` is the text that gets embedded and searched; `payload` is the structured object returned alongside a match — the thing the content describes; `keywords` is a list of explicit search terms that augment recall in keyword search.
+
+```jsonl
+{"group_key": "creature", "group_ref": "phoenix-001", "content": "A solar phoenix reborn from its own ashes", "payload": {"habitat": "volcano"}, "keywords": ["phoenix", "fire-bird"]}
+{"group_key": "creature", "group_ref": "wyrm-014", "content": "An ancient wyrm hoarding obsidian in the Ash Peaks", "payload": {"habitat": "mountain"}, "threshold": 0.5, "keywords": ["wyrm", "dragon"]}
+```
+
+`import` is additive: collisions on `(group_key, group_ref)` abort the run, and the run reports the offending record so the file can be fixed and re-run. `export` writes the same shape (minus `id` — re-imported records get fresh ULIDs).
 
 ## How it works
 

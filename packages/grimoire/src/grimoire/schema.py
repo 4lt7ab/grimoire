@@ -23,16 +23,27 @@ def create(conn: sqlite3.Connection, embedder: Embedder) -> None:
         );
         CREATE TABLE entries (
             id         TEXT PRIMARY KEY,
-            kind       TEXT NOT NULL,
+            group_key  TEXT,
+            group_ref  TEXT,
             content    TEXT NOT NULL,
             keywords   TEXT,
             payload    TEXT,
             threshold  REAL
         );
-        CREATE INDEX entries_kind ON entries(kind);
+        CREATE INDEX entries_group_key ON entries(group_key);
+        -- Uniqueness on (group_key, group_ref) where group_ref is set.
+        -- COALESCE collapses NULL group_key to '' so the ungrouped namespace
+        -- is treated as a single group for dedupe, not as "no constraint"
+        -- (SQLite's default UNIQUE treats NULLs as distinct, which would
+        -- silently let consumers stack duplicate group_refs in that bucket).
+        -- Caveat: a literal empty-string group_key shares this bucket with
+        -- NULL group_key for uniqueness purposes — don't use "" as a group.
+        CREATE UNIQUE INDEX entries_group_ref_uniq
+            ON entries(COALESCE(group_key, ''), group_ref)
+            WHERE group_ref IS NOT NULL;
         CREATE VIRTUAL TABLE vectors USING vec0(
             entry_id  TEXT PRIMARY KEY,
-            kind      TEXT partition key,
+            group_key TEXT partition key,
             embedding FLOAT[{embedder.dimension}]
         );
         CREATE VIRTUAL TABLE entries_fts USING fts5(

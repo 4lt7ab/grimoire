@@ -22,17 +22,17 @@ Five floors, each guarded by a riddle. The accepted answers for each floor are s
 uv run python examples/riddle_tower.py
 ```
 
-Showcases `dynamic_threshold` (per-record similarity gates), `kind` partitioning (one floor per kind), and persistence (progress lives in the same grimoire file).
+Showcases `dynamic_threshold` (per-record similarity gates), `group_key` partitioning (one floor per group), and persistence (progress lives in the same grimoire file).
 
 ### `bestiary.py` — a creature catalog with a CLI
 
 A tiny domain-shaped CLI in ~90 lines. `add` to record a creature, `find` to query in natural language, `list` to browse, `edit` to revise an entry in place, `remove` to delete. Sits directly on the library — everything else is delegated.
 
 ```sh
-uv run python examples/bestiary.py add --kind dragon "Old Wyrm of the Ash Peaks. Hoards obsidian, breathes fire."
-uv run python examples/bestiary.py add --kind phoenix "Solar phoenix. Reborn at dawn from its own ashes."
+uv run python examples/bestiary.py add --group_key dragon "Old Wyrm of the Ash Peaks. Hoards obsidian, breathes fire."
+uv run python examples/bestiary.py add --group_key phoenix "Solar phoenix. Reborn at dawn from its own ashes."
 uv run python examples/bestiary.py find "creatures that come back from the dead"
-uv run python examples/bestiary.py list --kind dragon
+uv run python examples/bestiary.py list --group_key dragon
 uv run python examples/bestiary.py edit <id> --description "Old Wyrm of the Ash Peaks. Hoards obsidian and starlight."
 ```
 
