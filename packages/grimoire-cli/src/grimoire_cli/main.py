@@ -104,6 +104,18 @@ mount_app = typer.Typer(
 )
 app.add_typer(mount_app)
 
+entry_app = typer.Typer(
+    name="entry",
+    no_args_is_help=True,
+    pretty_exceptions_enable=False,
+    help=(
+        "Operate on entries within a database — add, get, update, delete, "
+        "and bulk import/export. Hot-path reads (`grimoire search`, "
+        "`grimoire query`) stay at the top level."
+    ),
+)
+app.add_typer(entry_app)
+
 
 @app.callback(invoke_without_command=True)
 def _callback(ctx: typer.Context, mount: Mount = None) -> None:
@@ -368,7 +380,7 @@ def search(
             _print_entry(entry)
 
 
-@app.command(name="import")
+@entry_app.command(name="import")
 def import_records(
     ctx: typer.Context,
     file: Annotated[
@@ -414,7 +426,7 @@ def import_records(
     typer.echo(f"Imported {len(records)} records into {_db_path(mount, db)}")
 
 
-@app.command()
+@entry_app.command()
 def export(
     ctx: typer.Context,
     db: Db = None,
@@ -546,7 +558,7 @@ def mount_destroy(
     typer.echo(f"Destroyed mount at {mount}")
 
 
-@app.command()
+@entry_app.command()
 def add(
     ctx: typer.Context,
     content: Annotated[str, typer.Argument(help="Content text for the new entry.")],
@@ -610,7 +622,7 @@ def add(
     _print_entry(entry)
 
 
-@app.command()
+@entry_app.command()
 def update(
     ctx: typer.Context,
     entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
@@ -721,7 +733,7 @@ def update(
         _print_entry(entry)
 
 
-@app.command()
+@entry_app.command()
 def get(
     ctx: typer.Context,
     entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
@@ -736,7 +748,7 @@ def get(
         _print_entry(entry)
 
 
-@app.command()
+@entry_app.command()
 def delete(
     ctx: typer.Context,
     entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
