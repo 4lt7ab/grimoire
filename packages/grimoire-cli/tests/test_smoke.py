@@ -82,6 +82,54 @@ def populated_mount(tmp_path, _shared_models_cache):
     return mount
 
 
+# ---------- output formatting (--raw, TTY auto-detect) ----------
+
+
+def test_default_output_is_jsonl_when_piped(populated_mount):
+    """CliRunner doesn't attach a TTY, so default output is the JSONL shape."""
+    result = runner.invoke(app, ["--mount", str(populated_mount), "ls"])
+    assert result.exit_code == 0, result.output
+    rows = _json_lines(result.output)
+    assert len(rows) == 1
+    assert rows[0]["name"] is None  # default DB
+
+
+def test_raw_flag_forces_jsonl_at_tty(populated_mount, monkeypatch):
+    """`--raw` must emit JSONL even when stdout claims to be a TTY."""
+    monkeypatch.setattr("grimoire_cli.output._is_tty", lambda: True)
+    # Without --raw, pretty output would emit a Rich table (no parseable JSON).
+    pretty = runner.invoke(app, ["--mount", str(populated_mount), "ls"])
+    assert pretty.exit_code == 0
+    assert _json_lines(pretty.output) == []  # no JSON objects in the table
+
+    # With --raw, JSONL flows out the same as in pipe mode.
+    raw = runner.invoke(app, ["--mount", str(populated_mount), "--raw", "ls"])
+    assert raw.exit_code == 0
+    rows = _json_lines(raw.output)
+    assert len(rows) == 1
+    assert rows[0]["name"] is None
+
+
+def test_pretty_table_at_tty_for_ls(populated_mount, monkeypatch):
+    """Pretty output renders a table with the column headers, not JSON."""
+    monkeypatch.setattr("grimoire_cli.output._is_tty", lambda: True)
+    result = runner.invoke(app, ["--mount", str(populated_mount), "ls"])
+    assert result.exit_code == 0
+    # Rich draws bold headers — substring check is enough.
+    for header in ("NAME", "MODEL", "DIM", "ENTRIES", "DEFAULT"):
+        assert header in result.output
+    assert "(default)" in result.output  # default DB row label
+
+
+def test_pretty_entries_at_tty_for_query(populated_mount, monkeypatch):
+    """Query renders a CONTENT/GROUP/REF table at the terminal."""
+    monkeypatch.setattr("grimoire_cli.output._is_tty", lambda: True)
+    result = runner.invoke(app, ["--mount", str(populated_mount), "query"])
+    assert result.exit_code == 0
+    for header in ("ID", "GROUP", "REF", "CONTENT"):
+        assert header in result.output
+
+
 # ---------- help / no-args ----------
 
 

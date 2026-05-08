@@ -18,6 +18,13 @@ from grimoire.mount import (
     _resolve_mount,
 )
 
+from grimoire_cli.output import (
+    emit_db_info,
+    emit_entries,
+    emit_entry,
+    emit_listing,
+)
+
 DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
 EXPORT_FILENAME = "export.jsonl"
 # Each batch is one atomic transaction; on failure, only the in-flight batch
@@ -118,7 +125,21 @@ app.add_typer(entry_app)
 
 
 @app.callback(invoke_without_command=True)
-def _callback(ctx: typer.Context, mount: Mount = None) -> None:
+def _callback(
+    ctx: typer.Context,
+    mount: Mount = None,
+    raw: Annotated[
+        bool,
+        typer.Option(
+            "--raw",
+            help=(
+                "Force JSONL output even at a terminal. By default, output is "
+                "pretty when stdout is a TTY and JSONL when piped — pass --raw "
+                "to keep the JSONL shape interactively (e.g. for inspection)."
+            ),
+        ),
+    ] = False,
+) -> None:
     """Manage a grimoire datastore — a single-file SQLite + sqlite-vec semantic store.
 
     With no subcommand, prints metadata for the default database in the mount
@@ -131,14 +152,13 @@ def _callback(ctx: typer.Context, mount: Mount = None) -> None:
     mount with --mount <dir> or set GRIMOIRE_MOUNT; defaults to ~/.grimoire.
     Pick a database within the mount with --db <name>.
 
-    Read commands (query, search, get) print one JSON object per line —
-    pipe to `jq` for filtering. Run `grimoire <command> --help` for any
-    subcommand.
+    Read commands (query, search, get) print a pretty table at the terminal
+    and JSONL when piped. Pass --raw to force JSONL at the terminal.
     """
     resolved = _resolve_mount(mount)
-    ctx.obj = {"mount": resolved}
+    ctx.obj = {"mount": resolved, "raw": raw}
     if ctx.invoked_subcommand is None:
-        _emit_info(_db_path(resolved, None), label="default database")
+        _emit_info(_db_path(resolved, None), label="default database", raw=raw)
 
 
 @mount_app.callback(invoke_without_command=True)
@@ -196,7 +216,7 @@ def _mount_callback(
                 f"drop --model or use a different --mount"
             )
 
-    _emit_listing(handle)
+    _emit_listing(handle, raw=ctx.obj["raw"])
 
 
 @app.command()
@@ -256,18 +276,18 @@ def create(
     except InvalidMount as exc:
         _fail(str(exc))
 
-    _emit_info(db_file, label=f"database {name!r}")
+    _emit_info(db_file, label=f"database {name!r}", raw=ctx.obj["raw"])
 
 
 @app.command()
 def ls(ctx: typer.Context) -> None:
-    """List databases in the mount as JSONL — one object per database.
+    """List databases in the mount.
 
     Default database (if present) is listed first, then named databases in
-    alphabetical order. Each line includes name (null for default), model,
-    dimension, entry_count, and is_default.
+    alphabetical order. Pretty table at the terminal; JSONL when piped or
+    with --raw — one object per database (name null for default).
     """
-    _emit_listing(Grimoire.mount(ctx.obj["mount"]))
+    _emit_listing(Grimoire.mount(ctx.obj["mount"]), raw=ctx.obj["raw"])
 
 
 @app.command()
@@ -306,15 +326,15 @@ def query(
     after_dt = _parse_iso("--after", after)
     before_dt = _parse_iso("--before", before)
     with _open_grimoire(mount, db) as g:
-        for entry in g.list(
+        entries = g.list(
             group_key=group_key,
             group_ref=group_ref,
             limit=limit,
             after_id=cursor,
             created_after=after_dt,
             created_before=before_dt,
-        ):
-            _print_entry(entry)
+        )
+    emit_entries(entries, raw=ctx.obj["raw"])
 
 
 @app.command()
@@ -376,8 +396,7 @@ def search(
                 created_after=after_dt,
                 created_before=before_dt,
             )
-        for entry in results:
-            _print_entry(entry)
+    emit_entries(results, raw=ctx.obj["raw"])
 
 
 @entry_app.command(name="import")
@@ -619,7 +638,7 @@ def add(
             )
         except sqlite3.IntegrityError as exc:
             _fail(f"collision on (group_key, group_ref): {exc}")
-    _print_entry(entry)
+    emit_entry(entry, raw=ctx.obj["raw"])
 
 
 @entry_app.command()
@@ -730,7 +749,7 @@ def update(
             _fail(f"collision on (group_key, group_ref): {exc}")
         if entry is None:
             _fail(f"No entry with id {entry_id!r}")
-        _print_entry(entry)
+        emit_entry(entry, raw=ctx.obj["raw"])
 
 
 @entry_app.command()
@@ -745,7 +764,7 @@ def get(
         entry = g.get(entry_id)
         if entry is None:
             _fail(f"No entry with id {entry_id!r}")
-        _print_entry(entry)
+        emit_entry(entry, raw=ctx.obj["raw"])
 
 
 @entry_app.command()
@@ -785,40 +804,17 @@ def _open_grimoire(mount: Path, name: str | None) -> Grimoire:
         _fail(str(exc))
 
 
-def _emit_info(db: Path, *, label: str) -> None:
-    """Print a one-line JSON summary for the database at `db`. Errors if missing."""
+def _emit_info(db: Path, *, label: str, raw: bool) -> None:
+    """Print a database summary; pretty at TTY, JSON otherwise. Errors if missing."""
     stats = Grimoire.peek(db)
     if stats is None:
         _fail(f"No grimoire ({label}) at {db}")
-    typer.echo(
-        json.dumps(
-            {
-                "path": str(db),
-                "model": stats.model,
-                "dimension": stats.dimension,
-                "schema_version": stats.schema_version,
-                "entry_count": stats.entry_count,
-                "groups": stats.groups,
-            }
-        )
-    )
+    emit_db_info(db, stats, raw=raw)
 
 
-def _emit_listing(handle) -> None:
-    """Print one JSON object per database in the mount; shared by `mount` and `ls`."""
-    for info in handle.list():
-        typer.echo(
-            json.dumps(
-                {
-                    "name": info.name,
-                    "path": str(info.path),
-                    "model": info.model,
-                    "dimension": info.dimension,
-                    "entry_count": info.entry_count,
-                    "is_default": info.is_default,
-                }
-            )
-        )
+def _emit_listing(handle, *, raw: bool) -> None:
+    """Print one row per database in the mount; shared by `mount` and `ls`."""
+    emit_listing(handle.list(), raw=raw)
 
 
 def _load_records(path: Path) -> list[dict]:
@@ -851,31 +847,6 @@ def _validate_record(record: object, path: Path, line_no: int) -> None:
         )
 
 
-def _entry_record(entry: Entry) -> dict[str, object]:
-    """Build the JSON shape printed by read commands.
-
-    Includes id and any non-null fields, plus distance/rank when the entry
-    came from a search result. Mirrors the on-disk shape minus the columns
-    that aren't set.
-    """
-    record: dict[str, object] = {"id": entry.id, "content": entry.content}
-    if entry.group_key is not None:
-        record["group_key"] = entry.group_key
-    if entry.group_ref is not None:
-        record["group_ref"] = entry.group_ref
-    if entry.keywords is not None:
-        record["keywords"] = entry.keywords
-    if entry.payload is not None:
-        record["payload"] = entry.payload
-    if entry.threshold is not None:
-        record["threshold"] = entry.threshold
-    if entry.distance is not None:
-        record["distance"] = entry.distance
-    if entry.rank is not None:
-        record["rank"] = entry.rank
-    return record
-
-
 def _export_record(entry: Entry) -> dict[str, object]:
     """Build the JSON shape written by `export` (round-trippable through `import`).
 
@@ -894,10 +865,6 @@ def _export_record(entry: Entry) -> dict[str, object]:
     if entry.threshold is not None:
         record["threshold"] = entry.threshold
     return record
-
-
-def _print_entry(entry: Entry) -> None:
-    typer.echo(json.dumps(_entry_record(entry)))
 
 
 def _parse_iso(flag: str, value: str | None) -> datetime | None:
