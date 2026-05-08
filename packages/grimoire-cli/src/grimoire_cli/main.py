@@ -12,7 +12,6 @@ from grimoire import (
     GrimoireNotFound,
     InvalidMount,
 )
-from grimoire.core import _open_file
 from grimoire.mount import (
     MODELS_DIRNAME,
     _db_path,
@@ -137,18 +136,20 @@ def _mount_callback(
         str | None,
         typer.Option(
             help=(
-                "fastembed model name. Used only when creating the default "
-                "database; passing this against an existing database whose "
-                "locked model differs is an error."
+                "fastembed model name. Used only when first creating the "
+                "default database; passing it against an existing database "
+                "whose locked model differs is an error."
             ),
         ),
     ] = None,
 ) -> None:
-    """Set up the mount with its default database.
+    """Set up the mount with its default database; report what's in the mount.
 
     With no subcommand, ensures the mount directory and shared model cache
-    exist, then creates the default database at <mount>/grimoire.db (or
-    validates the existing one). Idempotent — safe to re-run.
+    exist, creates the default database at <mount>/grimoire.db if missing,
+    then prints the same JSONL listing as `grimoire ls`. Idempotent — re-running
+    on a mount whose default database already exists skips the embedder load
+    entirely and just prints the listing.
 
     Subcommands operate on the mount as a whole. `grimoire mount destroy`
     wipes the entire mount.
@@ -156,37 +157,34 @@ def _mount_callback(
     if ctx.invoked_subcommand is not None:
         return
 
-    mount: Path = ctx.obj["mount"]
-    db_file = _db_path(mount, None)
+    mount_path: Path = ctx.obj["mount"]
+    handle = Grimoire.mount(mount_path)  # ensures mount root + models/ exist
 
-    stats = Grimoire.peek(db_file)
-    if stats is not None and model is not None and model != stats.model:
-        _fail(
-            f"file is locked to model {stats.model!r}; "
-            f"drop --model or use a different --mount"
-        )
+    if not handle.has(None):
+        # No default DB yet — create it. This is the only path that needs
+        # fastembed at all; re-runs against an existing default DB skip it.
+        model_name = model or DEFAULT_MODEL
+        try:
+            from grimoire.embedders import FastembedEmbedder
 
-    model_name = stats.model if stats else (model or DEFAULT_MODEL)
+            embedder = FastembedEmbedder(
+                model_name, cache_folder=mount_path / MODELS_DIRNAME
+            )
+        except ImportError as exc:
+            _fail(str(exc))
+        try:
+            Grimoire.create(embedder=embedder, mount=mount_path).close()
+        except GrimoireError as exc:
+            _fail(str(exc))
+    elif model is not None:
+        stats = handle.peek(None)
+        if stats is not None and model != stats.model:
+            _fail(
+                f"file is locked to model {stats.model!r}; "
+                f"drop --model or use a different --mount"
+            )
 
-    try:
-        from grimoire.embedders import FastembedEmbedder
-
-        embedder = FastembedEmbedder(model_name, cache_folder=mount / MODELS_DIRNAME)
-    except ImportError as exc:
-        _fail(str(exc))
-
-    try:
-        if stats is None:
-            Grimoire.create(embedder=embedder, mount=mount).close()
-        else:
-            # Idempotent re-mount: validate the embedder against the existing
-            # file via the file-level helper. `Grimoire.open` would auto-load
-            # a second fastembed instance, which we already have in hand.
-            _open_file(db_file, embedder=embedder).close()
-    except GrimoireError as exc:
-        _fail(str(exc))
-
-    _emit_info(db_file, label="default database")
+    _emit_listing(handle)
 
 
 @app.command()
@@ -257,21 +255,7 @@ def ls(ctx: typer.Context) -> None:
     alphabetical order. Each line includes name (null for default), model,
     dimension, entry_count, and is_default.
     """
-    mount: Path = ctx.obj["mount"]
-    handle = Grimoire.mount(mount)
-    for info in handle.list():
-        typer.echo(
-            json.dumps(
-                {
-                    "name": info.name,
-                    "path": str(info.path),
-                    "model": info.model,
-                    "dimension": info.dimension,
-                    "entry_count": info.entry_count,
-                    "is_default": info.is_default,
-                }
-            )
-        )
+    _emit_listing(Grimoire.mount(ctx.obj["mount"]))
 
 
 @app.command()
@@ -806,6 +790,23 @@ def _emit_info(db: Path, *, label: str) -> None:
             }
         )
     )
+
+
+def _emit_listing(handle) -> None:
+    """Print one JSON object per database in the mount; shared by `mount` and `ls`."""
+    for info in handle.list():
+        typer.echo(
+            json.dumps(
+                {
+                    "name": info.name,
+                    "path": str(info.path),
+                    "model": info.model,
+                    "dimension": info.dimension,
+                    "entry_count": info.entry_count,
+                    "is_default": info.is_default,
+                }
+            )
+        )
 
 
 def _load_records(path: Path) -> list[dict]:

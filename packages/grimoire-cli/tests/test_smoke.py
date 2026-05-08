@@ -168,6 +168,54 @@ def test_mount_is_idempotent(tmp_path, _shared_models_cache):
     _mount(mount)
 
 
+def test_mount_emits_listing_like_ls(populated_mount, _shared_models_cache):
+    """`mount` and `ls` produce the same JSONL shape; both report the default DB."""
+    pytest.importorskip("fastembed")
+    runner.invoke(app, ["--mount", str(populated_mount), "create", "alpha"])
+
+    mount_result = runner.invoke(app, ["--mount", str(populated_mount), "mount"])
+    ls_result = runner.invoke(app, ["--mount", str(populated_mount), "ls"])
+    assert mount_result.exit_code == 0, mount_result.output
+    assert ls_result.exit_code == 0, ls_result.output
+
+    mount_rows = _json_lines(mount_result.output)
+    ls_rows = _json_lines(ls_result.output)
+    assert mount_rows == ls_rows
+    # Default DB is reported by both.
+    names = [r["name"] for r in mount_rows]
+    assert names == [None, "alpha"]
+    assert mount_rows[0]["is_default"] is True
+
+
+def test_mount_skips_embedder_load_on_rerun(tmp_path, _shared_models_cache):
+    """Re-running `mount` against an existing default DB needs no fastembed.
+
+    Pin: the listing path must not import fastembed when the default DB
+    already exists. Simulated by removing fastembed from sys.modules and
+    rerunning — would explode if the codepath touched it.
+    """
+    pytest.importorskip("fastembed")
+    mount = _new_mount(tmp_path, _shared_models_cache)
+    _mount(mount)  # first run creates the DB; needs fastembed
+
+    # Re-run should succeed without re-importing fastembed.
+    import sys
+
+    fastembed_mods = {k: v for k, v in sys.modules.items() if k.startswith("fastembed")}
+    for k in fastembed_mods:
+        del sys.modules[k]
+    try:
+        result = runner.invoke(app, ["--mount", str(mount), "mount"])
+        assert result.exit_code == 0, result.output
+        # Listing reports the default DB.
+        rows = _json_lines(result.output)
+        assert any(r["is_default"] for r in rows)
+        # fastembed remained absent — re-mount didn't pull it back in.
+        assert not any(k.startswith("fastembed") for k in sys.modules)
+    finally:
+        sys.modules.update(fastembed_mods)
+
+
 # ---------- create (named DBs only) ----------
 
 
