@@ -1,59 +1,84 @@
 import json
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, NoReturn
 
 import typer
-from grimoire import Entry, Grimoire, GrimoireError, GrimoireNotFound
+from grimoire import (
+    Entry,
+    Grimoire,
+    GrimoireError,
+    GrimoireNotFound,
+    InvalidMount,
+)
+from grimoire.core import _open_file
+from grimoire.mount import (
+    MODELS_DIRNAME,
+    _db_path,
+    _resolve_mount,
+)
 
-RECOGNIZED_FIELDS = {"kind", "content", "payload", "threshold", "keywords"}
-REQUIRED_FIELDS = {"kind", "content"}
-UPDATE_RECOGNIZED_FIELDS = {"id", *RECOGNIZED_FIELDS}
-UPDATE_REQUIRED_FIELDS = {"id"}
+DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
+EXPORT_FILENAME = "export.jsonl"
 # Each batch is one atomic transaction; on failure, only the in-flight batch
 # rolls back. Smaller = better recovery granularity, slightly more overhead.
 # 200 captures ~95% of fastembed's batching speedup vs single calls.
-INGEST_BATCH_SIZE = 200
+IMPORT_BATCH_SIZE = 200
 PROGRESS_EVERY = 1000
-DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
-DB_FILENAME = "grimoire.db"
-MODELS_DIRNAME = "models"
+
+RECOGNIZED_FIELDS = {
+    "group_key",
+    "group_ref",
+    "content",
+    "payload",
+    "threshold",
+    "keywords",
+}
+REQUIRED_FIELDS = {"content"}
 
 
-# Reusable annotations — every command needs --mount, and the read commands
-# share --kind, --k, --created-after, and --created-before. Defining them
-# once keeps help text in lockstep across the CLI.
-def _normalize_mount(value: Path) -> Path:
-    # Pathlib doesn't expand ~ on its own, and a literal ~ in cache_dir
-    # propagates into ONNX Runtime as a missing-file error. Expand once,
-    # at the boundary, so every downstream caller sees an absolute path.
-    return Path(value).expanduser()
-
-
+# Reusable annotations — every command shares the mount lookup, and read commands
+# share filters/paging. Defining them once keeps help text in lockstep.
 Mount = Annotated[
-    Path,
+    Path | None,
     typer.Option(
-        help="Path to the grimoire mount directory.",
-        envvar="GRIMOIRE_MOUNT",
-        callback=_normalize_mount,
+        "--mount",
+        help=(
+            "Path to the grimoire mount directory. Defaults to ~/.grimoire; "
+            "can also be set via the GRIMOIRE_MOUNT environment variable."
+        ),
     ),
 ]
-Kind = Annotated[
-    str | None,
-    typer.Option(help="Restrict results to entries of this kind."),
-]
-K = Annotated[int, typer.Option(help="Number of results to return.")]
-CreatedAfter = Annotated[
+Db = Annotated[
     str | None,
     typer.Option(
-        "--created-after",
+        "--db",
+        help=(
+            "Name of a database within the mount. Omit to target the default "
+            "database at <mount>/grimoire.db."
+        ),
+    ),
+]
+GroupKey = Annotated[
+    str | None,
+    typer.Option("--group-key", help="Filter to entries with this group_key."),
+]
+GroupRef = Annotated[
+    str | None,
+    typer.Option("--group-ref", help="Filter to entries with this group_ref."),
+]
+After = Annotated[
+    str | None,
+    typer.Option(
+        "--after",
         help="ISO 8601 lower bound on entry creation time (inclusive).",
     ),
 ]
-CreatedBefore = Annotated[
+Before = Annotated[
     str | None,
     typer.Option(
-        "--created-before",
+        "--before",
         help="ISO 8601 upper bound on entry creation time (exclusive).",
     ),
 ]
@@ -61,57 +86,85 @@ CreatedBefore = Annotated[
 
 app = typer.Typer(
     name="grimoire",
-    no_args_is_help=True,
+    no_args_is_help=False,
     pretty_exceptions_enable=False,
     epilog=(
         "Environment variables:\n\n"
         "  GRIMOIRE_MOUNT  Default mount directory. Overridden by --mount."
     ),
 )
+mount_app = typer.Typer(
+    name="mount",
+    no_args_is_help=True,
+    pretty_exceptions_enable=False,
+    help="Mount-level operations (destroy the entire mount, etc.).",
+)
+app.add_typer(mount_app)
 
 
-@app.callback()
-def _callback() -> None:
+@app.callback(invoke_without_command=True)
+def _callback(ctx: typer.Context, mount: Mount = None) -> None:
     """Manage a grimoire datastore — a single-file SQLite + sqlite-vec semantic store.
 
-    Every command operates over a mount directory that holds the SQLite file
-    (<mount>/grimoire.db) and the embedder model cache (<mount>/models/).
-    Specify it with --mount <dir> or set the GRIMOIRE_MOUNT environment
-    variable once for the shell.
+    With no subcommand, prints metadata for the default database in the mount
+    (model, dimension, schema version, entry count, per-group counts).
 
-    Read commands (search, list, get, info) print one JSON object per line —
-    pipe to `jq` for filtering.
+    Every command operates over a mount directory that holds the SQLite files
+    and the shared embedder model cache. A mount can hold one default database
+    at <mount>/grimoire.db plus any number of named databases under
+    <mount>/<name>/grimoire.db, tracked in <mount>/grimoire.toml. Specify the
+    mount with --mount <dir> or set GRIMOIRE_MOUNT; defaults to ~/.grimoire.
+    Pick a database within the mount with --db <name>.
 
-    Run `grimoire init` for one-time setup, then `grimoire <command> --help`
-    for the flags and arguments of any subcommand.
+    Read commands (query, search, get) print one JSON object per line —
+    pipe to `jq` for filtering. Run `grimoire <command> --help` for any
+    subcommand.
     """
+    resolved = _resolve_mount(mount)
+    ctx.obj = {"mount": resolved}
+    if ctx.invoked_subcommand is None:
+        _emit_info(_db_path(resolved, None), label="default database")
 
 
 @app.command()
 def init(
-    mount: Mount,
+    ctx: typer.Context,
+    db: Db = None,
     model: Annotated[
         str | None,
         typer.Option(
             help=(
-                "fastembed model name. Used only when creating a new grimoire; "
-                "passing this against an existing grimoire whose locked model "
+                "fastembed model name. Used only when creating a new database; "
+                "passing this against an existing database whose locked model "
                 "differs is an error."
             ),
         ),
     ] = None,
+    description: Annotated[
+        str | None,
+        typer.Option(
+            "--description",
+            help=(
+                "Optional human-readable description recorded in the manifest. "
+                "Named databases only; ignored for the default database."
+            ),
+        ),
+    ] = None,
 ) -> None:
-    """Create or verify a grimoire and warm its embedder. One-time setup."""
-    db = mount / DB_FILENAME
-    cache_folder = mount / MODELS_DIRNAME
-    mount.mkdir(parents=True, exist_ok=True)
-    cache_folder.mkdir(parents=True, exist_ok=True)
+    """Create or verify a database and warm its embedder. One-time setup.
 
-    stats = Grimoire.peek(db)
+    Without --db, targets the default database at <mount>/grimoire.db.
+    With --db <name>, targets <mount>/<name>/grimoire.db and registers it
+    in the manifest.
+    """
+    mount: Path = ctx.obj["mount"]
+    db_file = _db_path(mount, db)
+
+    stats = Grimoire.peek(db_file)
     if stats is not None and model is not None and model != stats.model:
         _fail(
             f"file is locked to model {stats.model!r}; "
-            f"drop --model or use a different --mount path"
+            f"drop --model or use a different --db / --mount"
         )
 
     model_name = stats.model if stats else (model or DEFAULT_MODEL)
@@ -119,20 +172,167 @@ def init(
     try:
         from grimoire.embedders import FastembedEmbedder
 
-        embedder = FastembedEmbedder(model_name, cache_folder=cache_folder)
+        embedder = FastembedEmbedder(model_name, cache_folder=mount / MODELS_DIRNAME)
     except ImportError as exc:
         _fail(str(exc))
 
     try:
-        Grimoire.init(db, embedder=embedder).close()
+        if stats is None:
+            Grimoire.create(
+                db,
+                embedder=embedder,
+                mount=mount,
+                description=description,
+            ).close()
+        else:
+            # Idempotent re-init: validate the embedder against the existing
+            # file via the file-level helper. `Grimoire.open` would auto-load
+            # a second fastembed instance, which we already have in hand.
+            _open_file(db_file, embedder=embedder).close()
     except GrimoireError as exc:
         _fail(str(exc))
 
-    _emit_info(db)
+    _emit_info(db_file, label="default database" if db is None else f"database {db!r}")
 
 
 @app.command()
-def ingest(
+def ls(ctx: typer.Context) -> None:
+    """List databases in the mount as JSONL — one object per database.
+
+    Default database (if present) is listed first, then named databases in
+    alphabetical order. Each line includes name (null for default), model,
+    dimension, entry_count, and is_default.
+    """
+    mount: Path = ctx.obj["mount"]
+    handle = Grimoire.mount(mount)
+    for info in handle.list():
+        typer.echo(
+            json.dumps(
+                {
+                    "name": info.name,
+                    "path": str(info.path),
+                    "model": info.model,
+                    "dimension": info.dimension,
+                    "entry_count": info.entry_count,
+                    "is_default": info.is_default,
+                }
+            )
+        )
+
+
+@app.command()
+def query(
+    ctx: typer.Context,
+    db: Db = None,
+    group_key: GroupKey = None,
+    group_ref: GroupRef = None,
+    after: After = None,
+    before: Before = None,
+    cursor: Annotated[
+        str | None,
+        typer.Option(
+            help=(
+                "Pagination cursor: return entries with id > this value. "
+                "Pass the id of the last entry from the previous page."
+            ),
+        ),
+    ] = None,
+    limit: Annotated[
+        int, typer.Option(help="Maximum number of entries to return.")
+    ] = 100,
+) -> None:
+    """List entries chronologically with optional filters and ULID-cursor paging.
+
+    Filters and paging compose. The natural pipeline:
+
+        LAST=$(grimoire query --limit 100 | tail -1 | jq -r .id)
+        grimoire query --limit 100 --cursor "$LAST"
+
+    is idiomatic because the entry id IS the cursor — ULIDs sort
+    lexicographically by creation time, so `id > cursor` walks the next
+    page in chronological order without a separate cursor type.
+    """
+    mount: Path = ctx.obj["mount"]
+    after_dt = _parse_iso("--after", after)
+    before_dt = _parse_iso("--before", before)
+    with _open_grimoire(mount, db) as g:
+        for entry in g.list(
+            group_key=group_key,
+            group_ref=group_ref,
+            limit=limit,
+            after_id=cursor,
+            created_after=after_dt,
+            created_before=before_dt,
+        ):
+            _print_entry(entry)
+
+
+@app.command()
+def search(
+    ctx: typer.Context,
+    query_text: Annotated[
+        str,
+        typer.Argument(metavar="QUERY", help="Query text."),
+    ],
+    db: Db = None,
+    mode: Annotated[
+        str,
+        typer.Option(
+            help=(
+                "Search mode: 'vector' for semantic similarity (default), "
+                "'keyword' for FTS5 BM25 ranking. Different rankings, "
+                "different result sets — pick the one that matches your query."
+            ),
+        ),
+    ] = "vector",
+    group_key: GroupKey = None,
+    after: After = None,
+    before: Before = None,
+    k: Annotated[int, typer.Option(help="Number of results to return.")] = 10,
+    dynamic_threshold: Annotated[
+        bool,
+        typer.Option(
+            "--dynamic-threshold",
+            help=(
+                "Filter results by each entry's stored similarity threshold. "
+                "Vector mode only."
+            ),
+        ),
+    ] = False,
+) -> None:
+    """Run a vector or keyword search against a database in the mount."""
+    if mode not in ("vector", "keyword"):
+        _fail("--mode must be 'vector' or 'keyword'")
+    if mode == "keyword" and dynamic_threshold:
+        _fail("--dynamic-threshold is only valid with --mode vector")
+    mount: Path = ctx.obj["mount"]
+    after_dt = _parse_iso("--after", after)
+    before_dt = _parse_iso("--before", before)
+    with _open_grimoire(mount, db) as g:
+        if mode == "vector":
+            results = g.vector_search(
+                query_text,
+                group_key=group_key,
+                k=k,
+                dynamic_threshold=dynamic_threshold,
+                created_after=after_dt,
+                created_before=before_dt,
+            )
+        else:
+            results = g.keyword_search(
+                query_text,
+                group_key=group_key,
+                k=k,
+                created_after=after_dt,
+                created_before=before_dt,
+            )
+        for entry in results:
+            _print_entry(entry)
+
+
+@app.command(name="import")
+def import_records(
+    ctx: typer.Context,
     file: Annotated[
         Path,
         typer.Argument(
@@ -143,96 +343,190 @@ def ingest(
             readable=True,
         ),
     ],
-    mount: Mount,
+    db: Db = None,
 ) -> None:
-    """Bulk-ingest records into a grimoire."""
+    """Bulk-import records into a database from a JSONL file.
+
+    Additive: records are appended to the existing database. Collisions on
+    `(group_key, group_ref)` raise an error and abort the import — the file
+    must be free of conflicts with existing records, or the conflicting
+    records must be removed/updated first.
+    """
+    mount: Path = ctx.obj["mount"]
     records = _load_records(file)
     if not records:
-        typer.echo(f"No records to ingest from {file}")
+        typer.echo(f"No records to import from {file}")
         return
 
     total = 0
     last_milestone = 0
-    with _open_grimoire(mount) as g:
-        for chunk_start in range(0, len(records), INGEST_BATCH_SIZE):
-            chunk = records[chunk_start : chunk_start + INGEST_BATCH_SIZE]
-            g.add_many(chunk)
+    with _open_grimoire(mount, db) as g:
+        for chunk_start in range(0, len(records), IMPORT_BATCH_SIZE):
+            chunk = records[chunk_start : chunk_start + IMPORT_BATCH_SIZE]
+            try:
+                g.add_many(chunk)
+            except sqlite3.IntegrityError as exc:
+                _fail(f"collision in batch starting at record {chunk_start + 1}: {exc}")
             total += len(chunk)
             milestone = total // PROGRESS_EVERY
             if milestone > last_milestone and total < len(records):
-                typer.echo(f"  ingested {total}...", err=True)
+                typer.echo(f"  imported {total}...", err=True)
                 last_milestone = milestone
 
-    typer.echo(f"Ingested {len(records)} records into {mount / DB_FILENAME}")
+    typer.echo(f"Imported {len(records)} records into {_db_path(mount, db)}")
 
 
-@app.command(name="vector-search")
-def vector_search(
-    query: Annotated[str, typer.Argument(help="Query text to embed and search for.")],
-    mount: Mount,
-    kind: Kind = None,
-    k: K = 10,
-    dynamic_threshold: Annotated[
-        bool,
+@app.command()
+def export(
+    ctx: typer.Context,
+    db: Db = None,
+    output: Annotated[
+        Path | None,
         typer.Option(
-            "--dynamic-threshold",
-            help="Filter results by each entry's stored similarity threshold.",
-        ),
-    ] = False,
-    created_after: CreatedAfter = None,
-    created_before: CreatedBefore = None,
-) -> None:
-    """Run a vector (semantic) search against a grimoire."""
-    after = _parse_iso("--created-after", created_after)
-    before = _parse_iso("--created-before", created_before)
-    with _open_grimoire(mount) as g:
-        for entry in g.vector_search(
-            query,
-            kind=kind,
-            k=k,
-            dynamic_threshold=dynamic_threshold,
-            created_after=after,
-            created_before=before,
-        ):
-            _print_entry(entry)
-
-
-@app.command(name="keyword-search")
-def keyword_search(
-    query: Annotated[
-        str,
-        typer.Argument(
+            "--output",
+            "-o",
             help=(
-                "FTS5 query string. Plain words match tokens; supports phrases, "
-                "prefix matches, and boolean operators."
+                "Output JSONL path. Defaults to <mount>/export.jsonl. "
+                "Refuses to overwrite an existing file unless --force is set."
             ),
         ),
-    ],
-    mount: Mount,
-    kind: Kind = None,
-    k: K = 10,
-    created_after: CreatedAfter = None,
-    created_before: CreatedBefore = None,
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Overwrite the output path if it exists."),
+    ] = False,
 ) -> None:
-    """Run a keyword (FTS5) search against a grimoire."""
-    after = _parse_iso("--created-after", created_after)
-    before = _parse_iso("--created-before", created_before)
-    with _open_grimoire(mount) as g:
-        for entry in g.keyword_search(
-            query,
-            kind=kind,
-            k=k,
-            created_after=after,
-            created_before=before,
-        ):
-            _print_entry(entry)
+    """Export every entry in a database to a JSONL file.
+
+    The output format mirrors `import`'s expected input — entries can be
+    round-tripped (content, group_key, group_ref, payload, threshold,
+    keywords are preserved). Ids are NOT preserved on round-trip; they're
+    grimoire-assigned and re-imported records get fresh ULIDs.
+    """
+    mount: Path = ctx.obj["mount"]
+    if output is None:
+        output = mount / EXPORT_FILENAME
+    if output.exists() and not force:
+        _fail(f"{output} exists; pass --force to overwrite")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    total = 0
+    with (
+        _open_grimoire(mount, db) as g,
+        output.open("w", encoding="utf-8") as f,
+    ):
+        cursor: str | None = None
+        while True:
+            batch = g.list(limit=500, after_id=cursor)
+            if not batch:
+                break
+            for entry in batch:
+                json.dump(_export_record(entry), f)
+                f.write("\n")
+            total += len(batch)
+            cursor = batch[-1].id
+    typer.echo(f"Exported {total} records to {output}")
+
+
+@app.command()
+def destroy(
+    ctx: typer.Context,
+    name: Annotated[
+        str | None,
+        typer.Argument(
+            help=(
+                "Name of the database to destroy. Omit to destroy the default "
+                "database at <mount>/grimoire.db. Use `grimoire mount destroy` "
+                "to wipe the entire mount."
+            ),
+        ),
+    ] = None,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            "-y",
+            help="Skip the interactive confirmation prompt.",
+        ),
+    ] = False,
+) -> None:
+    """Delete a single database from the mount.
+
+    Without NAME, drops the default database at <mount>/grimoire.db. With
+    NAME, drops <mount>/<name>/grimoire.db and removes its manifest entry.
+    Idempotent — missing files or manifest entries are tolerated.
+    """
+    mount: Path = ctx.obj["mount"]
+    db_file = _db_path(mount, name)
+    if not db_file.exists():
+        label = "default database" if name is None else f"database {name!r}"
+        typer.echo(f"Nothing to destroy: no {label} at {db_file}")
+        return
+    if not yes:
+        label = "the default database" if name is None else f"database {name!r}"
+        typer.confirm(
+            f"Permanently destroy {label} at {db_file}?",
+            abort=True,
+        )
+    try:
+        Grimoire.destroy(name, mount=mount)
+    except (GrimoireError, InvalidMount) as exc:
+        _fail(str(exc))
+    if name is None:
+        typer.echo(f"Destroyed default database at {db_file}")
+    else:
+        typer.echo(f"Destroyed database {name!r}")
+
+
+@mount_app.command("destroy")
+def mount_destroy(
+    ctx: typer.Context,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            "-y",
+            help="Skip the interactive confirmation prompt.",
+        ),
+    ] = False,
+) -> None:
+    """Destroy the entire mount: every database, the manifest, the model cache.
+
+    There is no undo. Use `grimoire destroy [NAME]` for per-database removal.
+    """
+    mount: Path = ctx.obj["mount"]
+    if not mount.exists():
+        typer.echo(f"Nothing to destroy: {mount} does not exist")
+        return
+    if not yes:
+        typer.confirm(
+            f"Permanently destroy the entire mount at {mount} and everything under it?",
+            abort=True,
+        )
+    handle = Grimoire.mount(mount)
+    handle.destroy()
+    typer.echo(f"Destroyed mount at {mount}")
 
 
 @app.command()
 def add(
+    ctx: typer.Context,
     content: Annotated[str, typer.Argument(help="Content text for the new entry.")],
-    mount: Mount,
-    kind: Annotated[str, typer.Option(help="Kind label for the entry.")] = "note",
+    db: Db = None,
+    group_key: Annotated[
+        str | None,
+        typer.Option("--group-key", help="Group label for partitioning."),
+    ] = None,
+    group_ref: Annotated[
+        str | None,
+        typer.Option(
+            "--group-ref",
+            help=(
+                "Consumer-set unique reference within the group. "
+                "Collisions on (group_key, group_ref) raise an error."
+            ),
+        ),
+    ] = None,
     payload: Annotated[
         str | None,
         typer.Option(help="Optional JSON object to attach as the entry payload."),
@@ -246,13 +540,14 @@ def add(
         typer.Option(
             "--keyword",
             help=(
-                "Add an explicit search keyword to boost recall in keyword-search. "
-                "Repeatable: --keyword foo --keyword bar."
+                "Add an explicit search keyword to boost recall in keyword "
+                "search. Repeatable: --keyword foo --keyword bar."
             ),
         ),
     ] = None,
 ) -> None:
-    """Add a single record to a grimoire."""
+    """Add a single record to a database in the mount."""
+    mount: Path = ctx.obj["mount"]
     payload_obj: dict | None = None
     if payload is not None:
         try:
@@ -262,75 +557,46 @@ def add(
         if not isinstance(parsed, dict):
             _fail("--payload must be a JSON object")
         payload_obj = parsed
-    with _open_grimoire(mount) as g:
-        entry = g.add(
-            kind=kind,
-            content=content,
-            payload=payload_obj,
-            threshold=threshold,
-            keywords=keyword or None,
-        )
+    with _open_grimoire(mount, db) as g:
+        try:
+            entry = g.add(
+                content=content,
+                group_key=group_key,
+                group_ref=group_ref,
+                payload=payload_obj,
+                threshold=threshold,
+                keywords=keyword or None,
+            )
+        except sqlite3.IntegrityError as exc:
+            _fail(f"collision on (group_key, group_ref): {exc}")
     _print_entry(entry)
 
 
 @app.command()
-def info(mount: Mount) -> None:
-    """Show metadata and counts for a grimoire file."""
-    _emit_info(mount / DB_FILENAME)
-
-
-@app.command(name="list")
-def list_entries(
-    mount: Mount,
-    kind: Kind = None,
-    limit: Annotated[
-        int, typer.Option(help="Maximum number of entries to return.")
-    ] = 100,
-    after_id: Annotated[
-        str | None, typer.Option(help="Cursor: return entries with id > this value.")
-    ] = None,
-    created_after: CreatedAfter = None,
-    created_before: CreatedBefore = None,
-) -> None:
-    """Paginate entries in chronological order (by id)."""
-    after = _parse_iso("--created-after", created_after)
-    before = _parse_iso("--created-before", created_before)
-    with _open_grimoire(mount) as g:
-        for entry in g.list(
-            kind=kind,
-            limit=limit,
-            after_id=after_id,
-            created_after=after,
-            created_before=before,
-        ):
-            _print_entry(entry)
-
-
-@app.command()
-def get(
-    entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
-    mount: Mount,
-) -> None:
-    """Fetch a single entry by id."""
-    with _open_grimoire(mount) as g:
-        entry = g.get(entry_id)
-        if entry is None:
-            _fail(f"No entry with id {entry_id!r}")
-        _print_entry(entry)
-
-
-@app.command()
 def update(
+    ctx: typer.Context,
     entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
-    mount: Mount,
-    kind: Annotated[
-        str | None,
-        typer.Option(help="Replace the entry's kind label."),
-    ] = None,
+    db: Db = None,
     content: Annotated[
         str | None,
         typer.Option(help="Replace the entry's content (re-embeds and re-indexes)."),
     ] = None,
+    group_key: Annotated[
+        str | None,
+        typer.Option("--group-key", help="Replace the entry's group_key."),
+    ] = None,
+    clear_group_key: Annotated[
+        bool,
+        typer.Option("--clear-group-key", help="Clear the group_key (set to NULL)."),
+    ] = False,
+    group_ref: Annotated[
+        str | None,
+        typer.Option("--group-ref", help="Replace the entry's group_ref."),
+    ] = None,
+    clear_group_ref: Annotated[
+        bool,
+        typer.Option("--clear-group-ref", help="Clear the group_ref (set to NULL)."),
+    ] = False,
     payload: Annotated[
         str | None,
         typer.Option(help="Replace the payload with this JSON object."),
@@ -352,8 +618,8 @@ def update(
         typer.Option(
             "--keyword",
             help=(
-                "Replace the keyword list. Repeatable: --keyword foo --keyword bar. "
-                "Use --clear-keywords to remove all keywords."
+                "Replace the keyword list. Repeatable: --keyword foo "
+                "--keyword bar. Use --clear-keywords to remove all keywords."
             ),
         ),
     ] = None,
@@ -363,6 +629,10 @@ def update(
     ] = False,
 ) -> None:
     """Patch fields on an existing entry. Omitted fields are left unchanged."""
+    if group_key is not None and clear_group_key:
+        _fail("--group-key and --clear-group-key are mutually exclusive")
+    if group_ref is not None and clear_group_ref:
+        _fail("--group-ref and --clear-group-ref are mutually exclusive")
     if payload is not None and clear_payload:
         _fail("--payload and --clear-payload are mutually exclusive")
     if threshold is not None and clear_threshold:
@@ -373,10 +643,16 @@ def update(
     # Build kwargs that distinguish "unset" (omit) from "set to None" (clear)
     # by simply not passing the key when the user didn't supply anything.
     kwargs: dict[str, object] = {}
-    if kind is not None:
-        kwargs["kind"] = kind
     if content is not None:
         kwargs["content"] = content
+    if clear_group_key:
+        kwargs["group_key"] = None
+    elif group_key is not None:
+        kwargs["group_key"] = group_key
+    if clear_group_ref:
+        kwargs["group_ref"] = None
+    elif group_ref is not None:
+        kwargs["group_ref"] = group_ref
     if clear_payload:
         kwargs["payload"] = None
     elif payload is not None:
@@ -396,131 +672,74 @@ def update(
     elif keyword is not None:
         kwargs["keywords"] = keyword
 
-    with _open_grimoire(mount) as g:
-        entry = g.update(entry_id, **kwargs)
+    mount: Path = ctx.obj["mount"]
+    with _open_grimoire(mount, db) as g:
+        try:
+            entry = g.update(entry_id, **kwargs)
+        except sqlite3.IntegrityError as exc:
+            _fail(f"collision on (group_key, group_ref): {exc}")
         if entry is None:
             _fail(f"No entry with id {entry_id!r}")
         _print_entry(entry)
 
 
-@app.command(name="update-many")
-def update_many(
-    file: Annotated[
-        Path,
-        typer.Argument(
-            help=(
-                "Path to a JSONL file. One JSON object per line; each must include "
-                "`id` and may include `kind`, `content`, `payload`, `threshold`, "
-                "`keywords`. Absent keys leave the field unchanged; an explicit "
-                "`null` clears nullable fields."
-            ),
-            exists=True,
-            file_okay=True,
-            dir_okay=False,
-            readable=True,
-        ),
-    ],
-    mount: Mount,
+@app.command()
+def get(
+    ctx: typer.Context,
+    entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
+    db: Db = None,
 ) -> None:
-    """Bulk-patch entries in a grimoire from a JSONL file."""
-    records = _load_update_records(file)
-    if not records:
-        typer.echo(f"No records to update from {file}")
-        return
-
-    total = 0
-    missing = 0
-    last_milestone = 0
-    with _open_grimoire(mount) as g:
-        for chunk_start in range(0, len(records), INGEST_BATCH_SIZE):
-            chunk = records[chunk_start : chunk_start + INGEST_BATCH_SIZE]
-            for entry in g.update_many(chunk):
-                total += 1
-                if entry is None:
-                    missing += 1
-            milestone = total // PROGRESS_EVERY
-            if milestone > last_milestone and total < len(records):
-                typer.echo(f"  updated {total}...", err=True)
-                last_milestone = milestone
-
-    msg = f"Updated {len(records) - missing} of {len(records)} records"
-    if missing:
-        msg += f" ({missing} unknown id{'s' if missing != 1 else ''})"
-    typer.echo(msg)
+    """Fetch a single entry by id."""
+    mount: Path = ctx.obj["mount"]
+    with _open_grimoire(mount, db) as g:
+        entry = g.get(entry_id)
+        if entry is None:
+            _fail(f"No entry with id {entry_id!r}")
+        _print_entry(entry)
 
 
 @app.command()
 def delete(
+    ctx: typer.Context,
     entry_id: Annotated[str, typer.Argument(help="Entry id (ULID).")],
-    mount: Mount,
+    db: Db = None,
 ) -> None:
     """Delete an entry by id."""
-    with _open_grimoire(mount) as g:
+    mount: Path = ctx.obj["mount"]
+    with _open_grimoire(mount, db) as g:
         if not g.delete(entry_id):
             _fail(f"No entry with id {entry_id!r}")
     typer.echo(f"Deleted {entry_id}")
 
 
-@app.command(name="delete-many")
-def delete_many(
-    file: Annotated[
-        Path,
-        typer.Argument(
-            help=(
-                "Path to a file with one entry id per line. Pass '-' to read "
-                "ids from stdin. Blank lines and lines starting with '#' are "
-                "ignored."
-            ),
-        ),
-    ],
-    mount: Mount,
-) -> None:
-    """Bulk-delete entries by id."""
-    ids = _load_ids(file)
-    if not ids:
-        typer.echo(f"No ids to delete from {file}")
-        return
-
-    with _open_grimoire(mount) as g:
-        results = g.delete_many(ids)
-
-    deleted = sum(1 for ok in results if ok)
-    missing = len(results) - deleted
-    msg = f"Deleted {deleted} of {len(results)} ids"
-    if missing:
-        msg += f" ({missing} unknown id{'s' if missing != 1 else ''})"
-    typer.echo(msg)
+# --- helpers ---------------------------------------------------------------
 
 
-def _open_grimoire(mount: Path) -> Grimoire:
-    """Open the grimoire under `mount`, auto-detecting the model from the file.
+def _open_grimoire(mount: Path, name: str | None) -> Grimoire:
+    """Open a database under `mount`, auto-loading its embedder.
 
-    Surfaces `GrimoireNotFound` as a friendly "run grimoire init first" error.
+    Surfaces `GrimoireNotFound` as a friendly "run grimoire init first" error
+    and `InvalidMount` as a usage error for malformed names.
     """
-    db = mount / DB_FILENAME
-    cache_folder = mount / MODELS_DIRNAME
-    cache_folder.mkdir(parents=True, exist_ok=True)
-    stats = Grimoire.peek(db)
-    if stats is None:
-        _fail(f"no grimoire at {db}; run 'grimoire init' first")
     try:
-        from grimoire.embedders import FastembedEmbedder
-
-        embedder = FastembedEmbedder(stats.model, cache_folder=cache_folder)
+        return Grimoire.open(name, mount=mount)
+    except GrimoireNotFound:
+        label = "default database" if name is None else f"database {name!r}"
+        _fail(
+            f"no {label} at {_db_path(mount, name)}; "
+            f"run 'grimoire init{' --db ' + name if name else ''}' first"
+        )
     except ImportError as exc:
         _fail(str(exc))
-    try:
-        return Grimoire.open(db, embedder=embedder)
-    except GrimoireNotFound:
-        _fail(f"no grimoire at {db}; run 'grimoire init' first")
-    except GrimoireError as exc:
+    except (GrimoireError, InvalidMount) as exc:
         _fail(str(exc))
 
 
-def _emit_info(db: Path) -> None:
+def _emit_info(db: Path, *, label: str) -> None:
+    """Print a one-line JSON summary for the database at `db`. Errors if missing."""
     stats = Grimoire.peek(db)
     if stats is None:
-        _fail(f"No grimoire at {db}")
+        _fail(f"No grimoire ({label}) at {db}")
     typer.echo(
         json.dumps(
             {
@@ -529,7 +748,7 @@ def _emit_info(db: Path) -> None:
                 "dimension": stats.dimension,
                 "schema_version": stats.schema_version,
                 "entry_count": stats.entry_count,
-                "kinds": stats.kinds,
+                "groups": stats.groups,
             }
         )
     )
@@ -565,67 +784,18 @@ def _validate_record(record: object, path: Path, line_no: int) -> None:
         )
 
 
-def _load_update_records(path: Path) -> list[dict]:
-    records: list[dict] = []
-    with path.open(encoding="utf-8") as f:
-        for line_no, raw in enumerate(f, 1):
-            line = raw.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
-                _fail(f"{path}:{line_no}: invalid JSON: {exc.msg}")
-            _validate_update_record(record, path, line_no)
-            records.append(record)
-    return records
+def _entry_record(entry: Entry) -> dict[str, object]:
+    """Build the JSON shape printed by read commands.
 
-
-def _validate_update_record(record: object, path: Path, line_no: int) -> None:
-    if not isinstance(record, dict):
-        _fail(f"{path}:{line_no}: record must be a JSON object")
-    missing = UPDATE_REQUIRED_FIELDS - record.keys()
-    if missing:
-        _fail(f"{path}:{line_no}: missing required fields: {sorted(missing)}")
-    unknown = record.keys() - UPDATE_RECOGNIZED_FIELDS
-    if unknown:
-        _fail(
-            f"{path}:{line_no}: unknown fields {sorted(unknown)}. "
-            f"Put extra metadata in `payload`."
-        )
-
-
-def _load_ids(path: Path) -> list[str]:
-    """Read entry ids one per line from `path`. '-' means stdin.
-
-    Blank lines and `#`-prefixed comments are skipped, matching common
-    pipeline conventions (e.g. `grimoire list | jq -r .id`).
+    Includes id and any non-null fields, plus distance/rank when the entry
+    came from a search result. Mirrors the on-disk shape minus the columns
+    that aren't set.
     """
-    if str(path) == "-":
-        source = typer.get_text_stream("stdin")
-    else:
-        if not path.exists():
-            _fail(f"file not found: {path}")
-        source = path.open(encoding="utf-8")
-    ids: list[str] = []
-    try:
-        for raw in source:
-            line = raw.strip()
-            if not line or line.startswith("#"):
-                continue
-            ids.append(line)
-    finally:
-        if str(path) != "-":
-            source.close()
-    return ids
-
-
-def _print_entry(entry: Entry) -> None:
-    record: dict[str, object] = {
-        "id": entry.id,
-        "kind": entry.kind,
-        "content": entry.content,
-    }
+    record: dict[str, object] = {"id": entry.id, "content": entry.content}
+    if entry.group_key is not None:
+        record["group_key"] = entry.group_key
+    if entry.group_ref is not None:
+        record["group_ref"] = entry.group_ref
     if entry.keywords is not None:
         record["keywords"] = entry.keywords
     if entry.payload is not None:
@@ -636,7 +806,31 @@ def _print_entry(entry: Entry) -> None:
         record["distance"] = entry.distance
     if entry.rank is not None:
         record["rank"] = entry.rank
-    typer.echo(json.dumps(record))
+    return record
+
+
+def _export_record(entry: Entry) -> dict[str, object]:
+    """Build the JSON shape written by `export` (round-trippable through `import`).
+
+    Drops `id` (grimoire-assigned, re-imported records get fresh ULIDs) and
+    drops result-only fields (`distance`, `rank`).
+    """
+    record: dict[str, object] = {"content": entry.content}
+    if entry.group_key is not None:
+        record["group_key"] = entry.group_key
+    if entry.group_ref is not None:
+        record["group_ref"] = entry.group_ref
+    if entry.keywords is not None:
+        record["keywords"] = entry.keywords
+    if entry.payload is not None:
+        record["payload"] = entry.payload
+    if entry.threshold is not None:
+        record["threshold"] = entry.threshold
+    return record
+
+
+def _print_entry(entry: Entry) -> None:
+    typer.echo(json.dumps(_entry_record(entry)))
 
 
 def _parse_iso(flag: str, value: str | None) -> datetime | None:

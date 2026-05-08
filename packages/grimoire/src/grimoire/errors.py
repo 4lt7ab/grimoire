@@ -16,3 +16,15 @@ class SchemaVersionError(GrimoireError):
 
 class InvalidEmbedder(GrimoireError):
     """An embedder reported a model or dimension outside the allowed shape."""
+
+
+class DatabaseExists(GrimoireError):
+    """A database with this name already exists in the mount."""
+
+
+class InvalidMount(GrimoireError):
+    """A mount path or database name is malformed or reserved."""
+
+
+class MountDestroyed(GrimoireError):
+    """An operation was attempted on a Mount handle that has been destroyed."""

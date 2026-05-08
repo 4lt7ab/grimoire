@@ -25,7 +25,7 @@ def _new_mount(tmp_path: Path, shared: Path, name: str = "store") -> Path:
 def _init(mount: Path) -> None:
     """Run `grimoire init` on a mount; assumes fastembed is available."""
     pytest.importorskip("fastembed")
-    result = runner.invoke(app, ["init", "--mount", str(mount)])
+    result = runner.invoke(app, ["--mount", str(mount), "init"])
     assert result.exit_code == 0, result.output
 
 
@@ -50,899 +50,812 @@ def _last_json_line(output: str) -> dict:
     raise ValueError(f"No JSON object found in output: {output!r}")
 
 
+def _json_lines(output: str) -> list[dict]:
+    """Parse one JSON object per line from CLI output."""
+    out: list[dict] = []
+    for line in output.replace("\r", "\n").splitlines():
+        line = line.strip()
+        if not line.startswith("{") or not line.endswith("}"):
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+@pytest.fixture
+def populated_mount(tmp_path, _shared_models_cache):
+    """A mount with a few entries already added — for read-side tests."""
+    mount = _new_mount(tmp_path, _shared_models_cache)
+    _init(mount)
+    for content, group_key, group_ref in [
+        ("the moon is full", "note", None),
+        ("dragons fly at midnight", "note", "dragon-001"),
+        ("lumos lights the way", "spell", "lumos"),
+    ]:
+        cmd = ["--mount", str(mount), "add", content, "--group-key", group_key]
+        if group_ref:
+            cmd += ["--group-ref", group_ref]
+        result = runner.invoke(app, cmd)
+        assert result.exit_code == 0, result.output
+    return mount
+
+
 # ---------- help / no-args ----------
 
 
-def test_help_lists_all_commands():
+def test_help_lists_new_command_set():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     for cmd in (
         "init",
-        "ingest",
-        "vector-search",
-        "keyword-search",
-        "list",
-        "get",
-        "delete",
-        "delete-many",
+        "ls",
+        "query",
+        "search",
+        "import",
+        "export",
+        "destroy",
         "add",
         "update",
-        "update-many",
-        "info",
+        "delete",
+        "get",
+        "mount",
     ):
         assert cmd in result.output
 
 
-def test_no_args_shows_help():
-    # Click convention: missing subcommand exits 2, but help is still shown.
-    result = runner.invoke(app, [])
-    assert "ingest" in result.output
-
-
-# ---------- ingest ----------
-
-
-def test_ingest_help_describes_options():
-    result = runner.invoke(app, ["ingest", "--help"])
-    assert result.exit_code == 0
-    assert "--mount" in result.output
-
-
-def test_ingest_missing_file_fails(tmp_path):
-    mount = tmp_path / "store"
-    result = runner.invoke(
-        app, ["ingest", str(tmp_path / "nope.jsonl"), "--mount", str(mount)]
-    )
-    assert result.exit_code != 0
-
-
-def test_ingest_rejects_invalid_json(tmp_path):
-    mount = tmp_path / "store"
-    data = tmp_path / "bad.jsonl"
-    data.write_text("not valid json\n")
-    result = runner.invoke(app, ["ingest", str(data), "--mount", str(mount)])
-    assert result.exit_code == 1
-    assert "invalid JSON" in result.output
-
-
-def test_ingest_rejects_missing_required_field(tmp_path):
-    mount = tmp_path / "store"
-    data = tmp_path / "missing.jsonl"
-    data.write_text(json.dumps({"content": "no kind"}) + "\n")
-    result = runner.invoke(app, ["ingest", str(data), "--mount", str(mount)])
-    assert result.exit_code == 1
-    assert "missing required fields" in result.output
-    assert "'kind'" in result.output
-
-
-def test_ingest_rejects_unknown_field(tmp_path):
-    mount = tmp_path / "store"
-    data = tmp_path / "extra.jsonl"
-    data.write_text(
-        json.dumps({"kind": "note", "content": "x", "extra": "stuff"}) + "\n"
-    )
-    result = runner.invoke(app, ["ingest", str(data), "--mount", str(mount)])
-    assert result.exit_code == 1
-    assert "unknown fields" in result.output
-
-
-def test_ingest_empty_file_succeeds(tmp_path):
-    mount = tmp_path / "store"
-    data = tmp_path / "empty.jsonl"
-    data.write_text("")
-    result = runner.invoke(app, ["ingest", str(data), "--mount", str(mount)])
-    assert result.exit_code == 0
-    assert "No records" in result.output
-
-
-# ---------- read-side commands: missing-mount rejection ----------
-
-
-@pytest.mark.parametrize(
-    "cmd_args",
-    [
-        ["vector-search", "query"],
-        ["keyword-search", "query"],
-        ["list"],
-        ["get", "01HXXXXXXXXXXXXXXXXXXXXXXX"],
-        ["delete", "01HXXXXXXXXXXXXXXXXXXXXXXX"],
-        ["info"],
-    ],
-)
-def test_command_rejects_missing_mount(tmp_path, cmd_args):
-    result = runner.invoke(app, [*cmd_args, "--mount", str(tmp_path / "nope")])
-    assert result.exit_code != 0
-
-
-def test_top_level_help_is_self_documenting():
-    """`grimoire --help` should orient a new operator without a doc lookup."""
+def test_help_does_not_list_removed_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    out = result.output
-    assert "grimoire.db" in out
-    assert "models/" in out
-    assert "jq" in out
-    assert "GRIMOIRE_MOUNT" in out
-    assert "Environment variables" in out
-    for cmd in (
-        "init",
+    for removed in (
+        "ingest",
+        "vector-search",
+        "keyword-search",
+        "list ",
         "info",
-        "add",
-        "update",
-        "ingest",
-        "vector-search",
-        "keyword-search",
-        "list",
-        "get",
-        "delete",
-    ):
-        assert cmd in out
-
-
-@pytest.mark.parametrize(
-    "cmd",
-    [
-        "init",
-        "ingest",
-        "vector-search",
-        "keyword-search",
-        "list",
-        "get",
-        "delete",
-        "delete-many",
-        "add",
-        "update",
         "update-many",
-        "info",
-    ],
-)
-def test_command_help_describes_mount_option(cmd):
-    result = runner.invoke(app, [cmd, "--help"])
-    assert result.exit_code == 0
-    assert "--mount" in result.output
-    assert "GRIMOIRE_MOUNT" in result.output
+        "delete-many",
+    ):
+        assert removed not in result.output
 
 
-@pytest.mark.parametrize(
-    "cmd_args",
-    [
-        ["init"],
-        ["info"],
-        ["list"],
-        ["vector-search", "query"],
-        ["keyword-search", "query"],
-        ["get", "01HXXXXXXXXXXXXXXXXXXXXXXX"],
-        ["delete", "01HXXXXXXXXXXXXXXXXXXXXXXX"],
-    ],
-)
-def test_command_requires_mount_when_envvar_unset(cmd_args):
-    result = runner.invoke(app, cmd_args)
+def test_no_args_with_no_grimoire_errors(tmp_path):
+    """Bare `grimoire` against an empty mount fails clearly."""
+    result = runner.invoke(app, ["--mount", str(tmp_path / "empty")])
     assert result.exit_code != 0
-    assert "GRIMOIRE_MOUNT" in result.output
+    assert "No grimoire" in result.output
 
 
-def test_envvar_supplies_mount_path(monkeypatch, tmp_path):
-    monkeypatch.setenv("GRIMOIRE_MOUNT", str(tmp_path / "missing"))
-    result = runner.invoke(app, ["info"])
-    assert result.exit_code == 1
-    assert "No grimoire at" in result.output
+def test_no_args_emits_info_for_existing_grimoire(populated_mount):
+    """Bare `grimoire` (no subcommand) prints the info JSON."""
+    result = runner.invoke(app, ["--mount", str(populated_mount)])
+    assert result.exit_code == 0, result.output
+    parsed = _last_json_line(result.output)
+    assert parsed["entry_count"] == 3
+    assert parsed["groups"] == {"note": 2, "spell": 1}
+    assert "model" in parsed and "dimension" in parsed
 
 
 # ---------- init ----------
 
 
 def test_init_creates_db_and_prints_info(tmp_path, _shared_models_cache):
-    pytest.importorskip("fastembed")
     mount = _new_mount(tmp_path, _shared_models_cache)
-    result = runner.invoke(app, ["init", "--mount", str(mount)])
-    assert result.exit_code == 0, result.output
-    parsed = _last_json_line(result.output)
-    assert parsed["path"] == str(mount / "grimoire.db")
-    assert parsed["model"]
-    assert parsed["dimension"] > 0
-    assert parsed["schema_version"] == 2
-    assert parsed["entry_count"] == 0
-    assert parsed["kinds"] == {}
+    _init(mount)
     assert (mount / "grimoire.db").exists()
+    result = runner.invoke(app, ["--mount", str(mount)])
+    parsed = _last_json_line(result.output)
+    assert parsed["entry_count"] == 0
+    assert parsed["groups"] == {}
 
 
 def test_init_creates_mount_dir_if_missing(tmp_path, _shared_models_cache):
     pytest.importorskip("fastembed")
-    # Mount does not exist yet; init must create it. The models subdir, however,
-    # needs to be the shared cache to avoid a second model download in the test
-    # session — so we create the mount + symlink up front for this assertion.
-    mount = _new_mount(tmp_path, _shared_models_cache, name="fresh")
-    assert runner.invoke(app, ["init", "--mount", str(mount)]).exit_code == 0
-    assert (mount / "grimoire.db").exists()
-    assert (mount / "models").exists()
+    fresh = tmp_path / "fresh"
+    assert not fresh.exists()
+    fresh.mkdir(parents=True)
+    (fresh / "models").symlink_to(_shared_models_cache, target_is_directory=True)
+    result = runner.invoke(app, ["--mount", str(fresh), "init"])
+    assert result.exit_code == 0, result.output
+    assert (fresh / "grimoire.db").exists()
 
 
 def test_init_is_idempotent(tmp_path, _shared_models_cache):
-    pytest.importorskip("fastembed")
-    mount = _new_mount(tmp_path, _shared_models_cache)
-    first = runner.invoke(app, ["init", "--mount", str(mount)])
-    assert first.exit_code == 0
-    second = runner.invoke(app, ["init", "--mount", str(mount)])
-    assert second.exit_code == 0
-    assert _last_json_line(first.output) == _last_json_line(second.output)
-
-
-def test_init_strict_mismatch_on_explicit_model(tmp_path, _shared_models_cache):
-    pytest.importorskip("fastembed")
-    mount = _new_mount(tmp_path, _shared_models_cache)
-    assert runner.invoke(app, ["init", "--mount", str(mount)]).exit_code == 0
-
-    result = runner.invoke(
-        app, ["init", "--mount", str(mount), "--model", "some-other-model"]
-    )
-    assert result.exit_code == 1
-    assert "locked to model" in result.output
-
-
-# ---------- write commands against a missing grimoire ----------
-
-
-def test_add_against_missing_grimoire_says_run_init_first(tmp_path):
-    pytest.importorskip("fastembed")
-    mount = tmp_path / "nope"
-    result = runner.invoke(app, ["add", "hello", "--mount", str(mount)])
-    assert result.exit_code == 1
-    assert "no grimoire at" in result.output
-    assert "grimoire init" in result.output
-
-
-def test_ingest_against_missing_grimoire_says_run_init_first(tmp_path):
-    pytest.importorskip("fastembed")
-    mount = tmp_path / "nope"
-    data = tmp_path / "records.jsonl"
-    data.write_text(json.dumps({"kind": "note", "content": "hello"}) + "\n")
-    result = runner.invoke(app, ["ingest", str(data), "--mount", str(mount)])
-    assert result.exit_code == 1
-    assert "no grimoire at" in result.output
-    assert "grimoire init" in result.output
-
-
-# ---------- end-to-end (gated on fastembed) ----------
-
-
-@pytest.fixture
-def populated_mount(tmp_path, _shared_models_cache):
-    pytest.importorskip("fastembed")
-
     mount = _new_mount(tmp_path, _shared_models_cache)
     _init(mount)
-    data = tmp_path / "records.jsonl"
-    data.write_text(
-        json.dumps({"kind": "note", "content": "the moon is full"})
-        + "\n"
-        + json.dumps({"kind": "note", "content": "dragons fly at midnight"})
-        + "\n"
+    _init(mount)
+
+
+# ---------- add / get / delete ----------
+
+
+def test_add_minimal_record(populated_mount):
+    result = runner.invoke(
+        app, ["--mount", str(populated_mount), "add", "a brand new entry"]
     )
-    result = runner.invoke(app, ["ingest", str(data), "--mount", str(mount)])
-    assert result.exit_code == 0
-    return mount
+    assert result.exit_code == 0, result.output
+    parsed = _last_json_line(result.output)
+    assert parsed["content"] == "a brand new entry"
+    assert "group_key" not in parsed
+    assert "group_ref" not in parsed
 
 
-def test_list_outputs_jsonl(populated_mount):
-    result = runner.invoke(app, ["list", "--mount", str(populated_mount)])
-    assert result.exit_code == 0
-    lines = [line for line in result.output.splitlines() if line.strip()]
-    assert len(lines) == 2
-    parsed = [json.loads(line) for line in lines]
-    assert {p["content"] for p in parsed} == {
-        "the moon is full",
-        "dragons fly at midnight",
-    }
-
-
-def test_search_returns_relevant_entry_first(populated_mount):
+def test_add_with_group_key_and_group_ref(populated_mount):
     result = runner.invoke(
         app,
         [
-            "vector-search",
-            "the moon is full",
             "--mount",
             str(populated_mount),
-            "--k",
-            "2",
+            "add",
+            "indexed entry",
+            "--group-key",
+            "indexed",
+            "--group-ref",
+            "ref-1",
         ],
     )
-    assert result.exit_code == 0
-    lines = [line for line in result.output.splitlines() if line.strip()]
-    parsed = [json.loads(line) for line in lines]
-    assert parsed[0]["content"] == "the moon is full"
-    assert "distance" in parsed[0]
+    assert result.exit_code == 0, result.output
+    parsed = _last_json_line(result.output)
+    assert parsed["group_key"] == "indexed"
+    assert parsed["group_ref"] == "ref-1"
 
 
-def test_keyword_search_finds_token(populated_mount):
+def test_add_collision_on_group_ref_fails(populated_mount):
+    """The fixture has (note, dragon-001); re-adding should fail."""
     result = runner.invoke(
         app,
-        ["keyword-search", "moon", "--mount", str(populated_mount), "--k", "5"],
+        [
+            "--mount",
+            str(populated_mount),
+            "add",
+            "another dragon",
+            "--group-key",
+            "note",
+            "--group-ref",
+            "dragon-001",
+        ],
     )
+    assert result.exit_code != 0
+    assert "collision" in result.output.lower()
+
+
+def test_get_returns_entry(populated_mount):
+    listing = runner.invoke(app, ["--mount", str(populated_mount), "query"])
+    first = _json_lines(listing.output)[0]
+    result = runner.invoke(app, ["--mount", str(populated_mount), "get", first["id"]])
     assert result.exit_code == 0
-    lines = [line for line in result.output.splitlines() if line.strip()]
-    parsed = [json.loads(line) for line in lines]
-    assert len(parsed) == 1
-    assert parsed[0]["content"] == "the moon is full"
-    assert "rank" in parsed[0]
-    assert "distance" not in parsed[0]
+    parsed = _last_json_line(result.output)
+    assert parsed["id"] == first["id"]
 
 
-def test_keyword_search_returns_nothing_on_no_match(populated_mount):
+def test_get_unknown_id_fails(populated_mount):
     result = runner.invoke(
-        app,
-        ["keyword-search", "phoenix", "--mount", str(populated_mount)],
+        app, ["--mount", str(populated_mount), "get", "01HXXXXXXXXXXXXXXXXXXXXXXX"]
     )
-    assert result.exit_code == 0
-    assert [line for line in result.output.splitlines() if line.strip()] == []
-
-
-def test_get_fetches_by_id(populated_mount):
-    list_result = runner.invoke(
-        app, ["list", "--mount", str(populated_mount), "--limit", "1"]
-    )
-    first = json.loads(list_result.output.strip())
-
-    get_result = runner.invoke(
-        app, ["get", first["id"], "--mount", str(populated_mount)]
-    )
-    assert get_result.exit_code == 0
-    assert json.loads(get_result.output.strip())["id"] == first["id"]
-
-
-def test_get_missing_id_fails(populated_mount):
-    result = runner.invoke(
-        app,
-        ["get", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--mount", str(populated_mount)],
-    )
-    assert result.exit_code == 1
-    assert "No entry" in result.output
+    assert result.exit_code != 0
 
 
 def test_delete_removes_entry(populated_mount):
-    list_result = runner.invoke(
-        app, ["list", "--mount", str(populated_mount), "--limit", "1"]
+    listing = runner.invoke(app, ["--mount", str(populated_mount), "query"])
+    target = _json_lines(listing.output)[0]
+    result = runner.invoke(
+        app, ["--mount", str(populated_mount), "delete", target["id"]]
     )
-    first = json.loads(list_result.output.strip())
-
-    del_result = runner.invoke(
-        app, ["delete", first["id"], "--mount", str(populated_mount)]
-    )
-    assert del_result.exit_code == 0
-    assert f"Deleted {first['id']}" in del_result.output
-
-    after = runner.invoke(app, ["list", "--mount", str(populated_mount)])
-    remaining = [json.loads(line) for line in after.output.splitlines() if line.strip()]
-    assert all(r["id"] != first["id"] for r in remaining)
+    assert result.exit_code == 0
+    after = runner.invoke(app, ["--mount", str(populated_mount), "query"])
+    assert target["id"] not in {e["id"] for e in _json_lines(after.output)}
 
 
-def test_update_changes_content(populated_mount):
-    list_result = runner.invoke(
-        app, ["list", "--mount", str(populated_mount), "--limit", "1"]
-    )
-    first = json.loads(list_result.output.strip())
-
-    upd = runner.invoke(
+def test_delete_unknown_id_fails(populated_mount):
+    result = runner.invoke(
         app,
-        [
-            "update",
-            first["id"],
-            "--mount",
-            str(populated_mount),
-            "--content",
-            "a brand new line",
-        ],
+        ["--mount", str(populated_mount), "delete", "01HXXXXXXXXXXXXXXXXXXXXXXX"],
     )
-    assert upd.exit_code == 0, upd.output
-    parsed = _last_json_line(upd.output)
-    assert parsed["id"] == first["id"]
-    assert parsed["content"] == "a brand new line"
+    assert result.exit_code != 0
 
 
-def test_update_clear_keywords_drops_them(tmp_path, _shared_models_cache):
-    pytest.importorskip("fastembed")
-    mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
-    add_res = runner.invoke(
-        app,
-        [
-            "add",
-            "hello world",
-            "--mount",
-            str(mount),
-            "--keyword",
-            "alpha",
-            "--keyword",
-            "beta",
-        ],
-    )
-    assert add_res.exit_code == 0
-    added_id = _last_json_line(add_res.output)["id"]
-
-    upd = runner.invoke(
-        app,
-        ["update", added_id, "--mount", str(mount), "--clear-keywords"],
-    )
-    assert upd.exit_code == 0, upd.output
-    parsed = _last_json_line(upd.output)
-    assert "keywords" not in parsed
+# ---------- update ----------
 
 
-def test_update_replaces_keywords(tmp_path, _shared_models_cache):
-    pytest.importorskip("fastembed")
-    mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
-    add_res = runner.invoke(
-        app,
-        ["add", "hello world", "--mount", str(mount), "--keyword", "old"],
-    )
-    added_id = _last_json_line(add_res.output)["id"]
-
-    upd = runner.invoke(
-        app,
-        [
-            "update",
-            added_id,
-            "--mount",
-            str(mount),
-            "--keyword",
-            "new",
-            "--keyword",
-            "fresh",
-        ],
-    )
-    assert upd.exit_code == 0, upd.output
-    parsed = _last_json_line(upd.output)
-    assert parsed["keywords"] == ["new", "fresh"]
-
-
-def test_update_missing_id_fails(populated_mount):
+def test_update_patches_content(populated_mount):
+    listing = runner.invoke(app, ["--mount", str(populated_mount), "query"])
+    target = _json_lines(listing.output)[0]
     result = runner.invoke(
         app,
         [
-            "update",
-            "01HXXXXXXXXXXXXXXXXXXXXXXX",
             "--mount",
             str(populated_mount),
+            "update",
+            target["id"],
             "--content",
-            "x",
+            "rewritten",
         ],
     )
-    assert result.exit_code == 1
-    assert "No entry" in result.output
+    assert result.exit_code == 0
+    parsed = _last_json_line(result.output)
+    assert parsed["content"] == "rewritten"
 
 
-def test_update_rejects_keyword_and_clear_keywords_together(populated_mount):
-    list_result = runner.invoke(
-        app, ["list", "--mount", str(populated_mount), "--limit", "1"]
-    )
-    first = json.loads(list_result.output.strip())
+def test_update_clears_group_key(populated_mount):
+    listing = runner.invoke(app, ["--mount", str(populated_mount), "query"])
+    target = _json_lines(listing.output)[0]
     result = runner.invoke(
         app,
         [
-            "update",
-            first["id"],
             "--mount",
             str(populated_mount),
-            "--keyword",
-            "x",
-            "--clear-keywords",
+            "update",
+            target["id"],
+            "--clear-group-key",
         ],
     )
-    assert result.exit_code == 1
+    assert result.exit_code == 0
+    parsed = _last_json_line(result.output)
+    assert "group_key" not in parsed
+
+
+def test_update_set_and_clear_group_ref(populated_mount):
+    listing = runner.invoke(app, ["--mount", str(populated_mount), "query"])
+    target = _json_lines(listing.output)[0]
+    set_result = runner.invoke(
+        app,
+        [
+            "--mount",
+            str(populated_mount),
+            "update",
+            target["id"],
+            "--group-ref",
+            "freshly-set",
+        ],
+    )
+    assert set_result.exit_code == 0
+    assert _last_json_line(set_result.output)["group_ref"] == "freshly-set"
+
+    clear_result = runner.invoke(
+        app,
+        [
+            "--mount",
+            str(populated_mount),
+            "update",
+            target["id"],
+            "--clear-group-ref",
+        ],
+    )
+    assert clear_result.exit_code == 0
+    assert "group_ref" not in _last_json_line(clear_result.output)
+
+
+def test_update_mutual_exclusion_errors(populated_mount):
+    listing = runner.invoke(app, ["--mount", str(populated_mount), "query"])
+    target = _json_lines(listing.output)[0]
+    result = runner.invoke(
+        app,
+        [
+            "--mount",
+            str(populated_mount),
+            "update",
+            target["id"],
+            "--group-key",
+            "x",
+            "--clear-group-key",
+        ],
+    )
+    assert result.exit_code != 0
     assert "mutually exclusive" in result.output
 
 
-def test_update_rejects_invalid_payload_json(populated_mount):
-    list_result = runner.invoke(
-        app, ["list", "--mount", str(populated_mount), "--limit", "1"]
-    )
-    first = json.loads(list_result.output.strip())
+def test_update_collision_fails(populated_mount):
+    """Updating an entry into an existing (group_key, group_ref) should fail."""
+    listing = runner.invoke(app, ["--mount", str(populated_mount), "query"])
+    entries = _json_lines(listing.output)
+    moon = next(e for e in entries if e["content"] == "the moon is full")
     result = runner.invoke(
         app,
         [
-            "update",
-            first["id"],
             "--mount",
             str(populated_mount),
-            "--payload",
-            "{not json",
+            "update",
+            moon["id"],
+            "--group-key",
+            "note",
+            "--group-ref",
+            "dragon-001",
         ],
     )
-    assert result.exit_code == 1
-    assert "valid JSON" in result.output
+    assert result.exit_code != 0
+    assert "collision" in result.output.lower()
 
 
-def test_update_many_patches_records_from_jsonl(populated_mount, tmp_path):
-    list_result = runner.invoke(app, ["list", "--mount", str(populated_mount)])
-    rows = [
-        json.loads(line) for line in list_result.output.splitlines() if line.strip()
-    ]
-    data = tmp_path / "patches.jsonl"
-    data.write_text(
-        json.dumps({"id": rows[0]["id"], "content": "patched zero"})
-        + "\n"
-        + json.dumps({"id": rows[1]["id"], "kind": "spell"})
-        + "\n"
-    )
+def test_update_unknown_id_fails(populated_mount):
     result = runner.invoke(
-        app, ["update-many", str(data), "--mount", str(populated_mount)]
+        app,
+        [
+            "--mount",
+            str(populated_mount),
+            "update",
+            "01HXXXXXXXXXXXXXXXXXXXXXXX",
+            "--content",
+            "x",
+        ],
+    )
+    assert result.exit_code != 0
+
+
+# ---------- query ----------
+
+
+def test_query_returns_all_entries_chronologically(populated_mount):
+    result = runner.invoke(app, ["--mount", str(populated_mount), "query"])
+    assert result.exit_code == 0
+    entries = _json_lines(result.output)
+    assert len(entries) == 3
+    ids = [e["id"] for e in entries]
+    assert ids == sorted(ids)
+
+
+def test_query_filter_by_group_key(populated_mount):
+    result = runner.invoke(
+        app,
+        ["--mount", str(populated_mount), "query", "--group-key", "spell"],
+    )
+    entries = _json_lines(result.output)
+    assert len(entries) == 1
+    assert entries[0]["group_key"] == "spell"
+
+
+def test_query_filter_by_group_ref(populated_mount):
+    result = runner.invoke(
+        app,
+        ["--mount", str(populated_mount), "query", "--group-ref", "dragon-001"],
+    )
+    entries = _json_lines(result.output)
+    assert len(entries) == 1
+    assert entries[0]["group_ref"] == "dragon-001"
+
+
+def test_query_combined_filters(populated_mount):
+    result = runner.invoke(
+        app,
+        [
+            "--mount",
+            str(populated_mount),
+            "query",
+            "--group-key",
+            "note",
+            "--group-ref",
+            "dragon-001",
+        ],
+    )
+    entries = _json_lines(result.output)
+    assert len(entries) == 1
+
+
+def test_query_paginates_via_cursor(populated_mount):
+    page1 = _json_lines(
+        runner.invoke(
+            app, ["--mount", str(populated_mount), "query", "--limit", "2"]
+        ).output
+    )
+    assert len(page1) == 2
+    page2 = _json_lines(
+        runner.invoke(
+            app,
+            [
+                "--mount",
+                str(populated_mount),
+                "query",
+                "--limit",
+                "2",
+                "--cursor",
+                page1[-1]["id"],
+            ],
+        ).output
+    )
+    assert len(page2) == 1
+    assert page2[0]["id"] not in {e["id"] for e in page1}
+
+
+def test_query_invalid_iso_fails(populated_mount):
+    result = runner.invoke(
+        app,
+        ["--mount", str(populated_mount), "query", "--after", "not-a-date"],
+    )
+    assert result.exit_code != 0
+
+
+# ---------- search ----------
+
+
+def test_search_default_mode_is_vector(populated_mount):
+    result = runner.invoke(
+        app, ["--mount", str(populated_mount), "search", "the moon is full"]
     )
     assert result.exit_code == 0, result.output
-    assert "Updated 2 of 2" in result.output
-
-    after = runner.invoke(app, ["list", "--mount", str(populated_mount)])
-    parsed = [json.loads(line) for line in after.output.splitlines() if line.strip()]
-    by_id = {p["id"]: p for p in parsed}
-    assert by_id[rows[0]["id"]]["content"] == "patched zero"
-    assert by_id[rows[1]["id"]]["kind"] == "spell"
+    entries = _json_lines(result.output)
+    assert len(entries) > 0
+    assert "distance" in entries[0]
 
 
-def test_update_many_reports_unknown_ids(populated_mount, tmp_path):
-    data = tmp_path / "patches.jsonl"
-    data.write_text(
-        json.dumps({"id": "01HXXXXXXXXXXXXXXXXXXXXXXX", "content": "ghost"}) + "\n"
-    )
+def test_search_keyword_mode(populated_mount):
     result = runner.invoke(
-        app, ["update-many", str(data), "--mount", str(populated_mount)]
+        app,
+        [
+            "--mount",
+            str(populated_mount),
+            "search",
+            "lumos",
+            "--mode",
+            "keyword",
+        ],
     )
     assert result.exit_code == 0, result.output
-    assert "Updated 0 of 1" in result.output
-    assert "1 unknown id" in result.output
+    entries = _json_lines(result.output)
+    assert any(e["content"] == "lumos lights the way" for e in entries)
+    assert "rank" in entries[0]
 
 
-def test_update_many_rejects_missing_id(populated_mount, tmp_path):
-    data = tmp_path / "patches.jsonl"
-    data.write_text(json.dumps({"content": "no id here"}) + "\n")
+def test_search_invalid_mode_fails(populated_mount):
     result = runner.invoke(
-        app, ["update-many", str(data), "--mount", str(populated_mount)]
+        app,
+        [
+            "--mount",
+            str(populated_mount),
+            "search",
+            "x",
+            "--mode",
+            "fuzzy",
+        ],
     )
-    assert result.exit_code == 1
-    assert "missing required fields" in result.output
-    assert "'id'" in result.output
+    assert result.exit_code != 0
+    assert "vector" in result.output and "keyword" in result.output
 
 
-def test_update_many_rejects_unknown_field(populated_mount, tmp_path):
-    data = tmp_path / "patches.jsonl"
+def test_search_dynamic_threshold_rejected_in_keyword_mode(populated_mount):
+    result = runner.invoke(
+        app,
+        [
+            "--mount",
+            str(populated_mount),
+            "search",
+            "lumos",
+            "--mode",
+            "keyword",
+            "--dynamic-threshold",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "vector" in result.output
+
+
+def test_search_filters_by_group_key(populated_mount):
+    result = runner.invoke(
+        app,
+        [
+            "--mount",
+            str(populated_mount),
+            "search",
+            "lumos",
+            "--mode",
+            "keyword",
+            "--group-key",
+            "spell",
+        ],
+    )
+    entries = _json_lines(result.output)
+    assert all(e["group_key"] == "spell" for e in entries)
+
+
+# ---------- import ----------
+
+
+def test_import_records_into_grimoire(tmp_path, _shared_models_cache):
+    mount = _new_mount(tmp_path, _shared_models_cache)
+    _init(mount)
+    data = tmp_path / "data.jsonl"
     data.write_text(
-        json.dumps({"id": "01HXXXXXXXXXXXXXXXXXXXXXXX", "extra": "stuff"}) + "\n"
+        "\n".join(
+            [
+                json.dumps({"content": "first", "group_key": "note"}),
+                json.dumps(
+                    {
+                        "content": "second",
+                        "group_key": "note",
+                        "group_ref": "ref-x",
+                    }
+                ),
+            ]
+        )
+        + "\n"
     )
-    result = runner.invoke(
-        app, ["update-many", str(data), "--mount", str(populated_mount)]
-    )
-    assert result.exit_code == 1
-    assert "unknown fields" in result.output
+    result = runner.invoke(app, ["--mount", str(mount), "import", str(data)])
+    assert result.exit_code == 0, result.output
+    listing = runner.invoke(app, ["--mount", str(mount), "query"])
+    assert len(_json_lines(listing.output)) == 2
 
 
-def test_update_many_empty_file_succeeds(populated_mount, tmp_path):
-    data = tmp_path / "empty.jsonl"
+def test_import_collision_aborts(tmp_path, _shared_models_cache):
+    """Adding a record whose (group_key, group_ref) already exists fails loudly."""
+    mount = _new_mount(tmp_path, _shared_models_cache)
+    _init(mount)
+    runner.invoke(
+        app,
+        [
+            "--mount",
+            str(mount),
+            "add",
+            "existing",
+            "--group-key",
+            "doc",
+            "--group-ref",
+            "shared",
+        ],
+    )
+    data = tmp_path / "data.jsonl"
+    data.write_text(
+        json.dumps({"content": "x", "group_key": "doc", "group_ref": "shared"}) + "\n"
+    )
+    result = runner.invoke(app, ["--mount", str(mount), "import", str(data)])
+    assert result.exit_code != 0
+    assert "collision" in result.output.lower()
+
+
+def test_import_rejects_record_missing_content(tmp_path, _shared_models_cache):
+    mount = _new_mount(tmp_path, _shared_models_cache)
+    _init(mount)
+    data = tmp_path / "data.jsonl"
+    data.write_text(json.dumps({"group_key": "note"}) + "\n")
+    result = runner.invoke(app, ["--mount", str(mount), "import", str(data)])
+    assert result.exit_code != 0
+    assert "content" in result.output
+
+
+def test_import_rejects_unknown_field(tmp_path, _shared_models_cache):
+    mount = _new_mount(tmp_path, _shared_models_cache)
+    _init(mount)
+    data = tmp_path / "data.jsonl"
+    data.write_text(json.dumps({"content": "x", "extra": "boom"}) + "\n")
+    result = runner.invoke(app, ["--mount", str(mount), "import", str(data)])
+    assert result.exit_code != 0
+
+
+def test_import_empty_file_is_noop(tmp_path, _shared_models_cache):
+    mount = _new_mount(tmp_path, _shared_models_cache)
+    _init(mount)
+    data = tmp_path / "data.jsonl"
     data.write_text("")
-    result = runner.invoke(
-        app, ["update-many", str(data), "--mount", str(populated_mount)]
-    )
+    result = runner.invoke(app, ["--mount", str(mount), "import", str(data)])
     assert result.exit_code == 0
     assert "No records" in result.output
 
 
-def test_delete_many_removes_listed_ids(populated_mount, tmp_path):
-    list_result = runner.invoke(app, ["list", "--mount", str(populated_mount)])
-    rows = [
-        json.loads(line) for line in list_result.output.splitlines() if line.strip()
-    ]
-    data = tmp_path / "ids.txt"
-    data.write_text("\n".join(r["id"] for r in rows) + "\n")
-    result = runner.invoke(
-        app, ["delete-many", str(data), "--mount", str(populated_mount)]
-    )
+# ---------- export ----------
+
+
+def test_export_writes_default_path(populated_mount):
+    result = runner.invoke(app, ["--mount", str(populated_mount), "export"])
     assert result.exit_code == 0, result.output
-    assert "Deleted 2 of 2" in result.output
-
-    after = runner.invoke(app, ["list", "--mount", str(populated_mount)])
-    assert [line for line in after.output.splitlines() if line.strip()] == []
-
-
-def test_delete_many_reports_unknown_ids(populated_mount, tmp_path):
-    data = tmp_path / "ids.txt"
-    data.write_text("01HXXXXXXXXXXXXXXXXXXXXXXX\n")
-    result = runner.invoke(
-        app, ["delete-many", str(data), "--mount", str(populated_mount)]
-    )
-    assert result.exit_code == 0
-    assert "Deleted 0 of 1" in result.output
-    assert "1 unknown id" in result.output
+    out = populated_mount / "export.jsonl"
+    assert out.exists()
+    lines = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+    assert len(lines) == 3
+    assert all("id" not in r for r in lines)
 
 
-def test_delete_many_skips_blank_and_comment_lines(populated_mount, tmp_path):
-    list_result = runner.invoke(
-        app, ["list", "--mount", str(populated_mount), "--limit", "1"]
-    )
-    first = json.loads(list_result.output.strip())
-    data = tmp_path / "ids.txt"
-    data.write_text(f"# delete just one\n\n{first['id']}\n\n")
-    result = runner.invoke(
-        app, ["delete-many", str(data), "--mount", str(populated_mount)]
-    )
-    assert result.exit_code == 0
-    assert "Deleted 1 of 1" in result.output
+def test_export_refuses_to_overwrite(populated_mount):
+    out = populated_mount / "export.jsonl"
+    out.write_text("preexisting\n")
+    result = runner.invoke(app, ["--mount", str(populated_mount), "export"])
+    assert result.exit_code != 0
+    assert "exists" in result.output
+    assert out.read_text() == "preexisting\n"
 
 
-def test_delete_many_empty_file_succeeds(populated_mount, tmp_path):
-    data = tmp_path / "empty.txt"
-    data.write_text("")
-    result = runner.invoke(
-        app, ["delete-many", str(data), "--mount", str(populated_mount)]
-    )
-    assert result.exit_code == 0
-    assert "No ids" in result.output
-
-
-def test_delete_many_reads_ids_from_stdin(populated_mount):
-    list_result = runner.invoke(
-        app, ["list", "--mount", str(populated_mount), "--limit", "1"]
-    )
-    first = json.loads(list_result.output.strip())
-    result = runner.invoke(
-        app,
-        ["delete-many", "-", "--mount", str(populated_mount)],
-        input=f"{first['id']}\n",
-    )
+def test_export_force_overwrites(populated_mount):
+    out = populated_mount / "export.jsonl"
+    out.write_text("preexisting\n")
+    result = runner.invoke(app, ["--mount", str(populated_mount), "export", "--force"])
     assert result.exit_code == 0, result.output
-    assert "Deleted 1 of 1" in result.output
+    assert "preexisting" not in out.read_text()
 
 
-def test_delete_missing_id_fails(populated_mount):
+def test_export_custom_path(populated_mount, tmp_path):
+    out = tmp_path / "custom.jsonl"
     result = runner.invoke(
-        app,
-        ["delete", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--mount", str(populated_mount)],
-    )
-    assert result.exit_code == 1
-    assert "No entry" in result.output
-
-
-def test_list_filters_by_kind(populated_mount):
-    pytest.importorskip("fastembed")
-
-    # Add a record of a different kind.
-    data = populated_mount.parent / "second.jsonl"
-    data.write_text(json.dumps({"kind": "spell", "content": "lumos"}) + "\n")
-    runner.invoke(app, ["ingest", str(data), "--mount", str(populated_mount)])
-
-    result = runner.invoke(
-        app, ["list", "--mount", str(populated_mount), "--kind", "spell"]
+        app, ["--mount", str(populated_mount), "export", "-o", str(out)]
     )
     assert result.exit_code == 0
-    lines = [line for line in result.output.splitlines() if line.strip()]
-    assert len(lines) == 1
-    assert json.loads(lines[0])["kind"] == "spell"
+    assert out.exists()
 
 
-# ---------- info / add / search --dynamic-threshold ----------
-
-
-def test_info_reports_metadata_and_counts(populated_mount):
-    result = runner.invoke(app, ["info", "--mount", str(populated_mount)])
-    assert result.exit_code == 0
-    parsed = json.loads(result.output.strip())
-    assert parsed["path"] == str(populated_mount / "grimoire.db")
-    assert parsed["model"]
-    assert parsed["dimension"] > 0
-    assert parsed["schema_version"] == 2
-    assert parsed["entry_count"] == 2
-    assert parsed["kinds"] == {"note": 2}
-
-
-def test_info_rejects_non_grimoire_file(tmp_path):
-    import sqlite3
-
-    mount = tmp_path / "store"
-    mount.mkdir()
-    db = mount / "grimoire.db"
-    conn = sqlite3.connect(db)
-    conn.execute("CREATE TABLE other (x INTEGER)")
-    conn.commit()
-    conn.close()
-    result = runner.invoke(app, ["info", "--mount", str(mount)])
-    assert result.exit_code == 1
-    assert "No grimoire at" in result.output
-
-
-def test_info_reports_missing_path_with_friendly_error(tmp_path):
-    result = runner.invoke(app, ["info", "--mount", str(tmp_path / "nope")])
-    assert result.exit_code == 1
-    assert "No grimoire at" in result.output
-
-
-def test_add_inserts_a_single_record(tmp_path, _shared_models_cache):
-    pytest.importorskip("fastembed")
-
-    mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
-    add_result = runner.invoke(
-        app,
-        ["add", "the moon is full", "--kind", "note", "--mount", str(mount)],
-    )
-    assert add_result.exit_code == 0
-    parsed = json.loads(add_result.output.strip())
-    assert parsed["content"] == "the moon is full"
-    assert parsed["kind"] == "note"
-    assert "id" in parsed
-
-    list_result = runner.invoke(app, ["list", "--mount", str(mount)])
-    assert list_result.exit_code == 0
-    rows = [
-        json.loads(line) for line in list_result.output.splitlines() if line.strip()
-    ]
-    assert len(rows) == 1
-    assert rows[0]["id"] == parsed["id"]
-
-
-def test_add_rejects_non_object_payload(tmp_path, _shared_models_cache):
-    pytest.importorskip("fastembed")
-
-    mount = _new_mount(tmp_path, _shared_models_cache)
-    result = runner.invoke(
-        app,
-        ["add", "hello", "--mount", str(mount), "--payload", '"just a string"'],
-    )
-    assert result.exit_code == 1
-    assert "JSON object" in result.output
-
-
-def test_add_rejects_invalid_payload_json(tmp_path, _shared_models_cache):
-    pytest.importorskip("fastembed")
-
-    mount = _new_mount(tmp_path, _shared_models_cache)
-    result = runner.invoke(
-        app, ["add", "hello", "--mount", str(mount), "--payload", "{not json"]
-    )
-    assert result.exit_code == 1
-    assert "valid JSON" in result.output
-
-
-def test_search_dynamic_threshold_filters_results(tmp_path, _shared_models_cache):
-    pytest.importorskip("fastembed")
-
-    mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
-    # Two entries both gated on a very tight threshold (0.0); only an
-    # exact-match query should make it through.
-    data = tmp_path / "records.jsonl"
-    data.write_text(
-        json.dumps({"kind": "note", "content": "the moon is full", "threshold": 0.0})
-        + "\n"
-        + json.dumps(
-            {"kind": "note", "content": "dragons fly at midnight", "threshold": 0.0}
-        )
-        + "\n"
-    )
-    assert (
-        runner.invoke(app, ["ingest", str(data), "--mount", str(mount)]).exit_code == 0
-    )
-
-    ungated = runner.invoke(
-        app, ["vector-search", "the moon is full", "--mount", str(mount), "--k", "5"]
-    )
-    assert ungated.exit_code == 0
-    assert len([line for line in ungated.output.splitlines() if line.strip()]) == 2
-
-    gated = runner.invoke(
-        app,
-        [
-            "vector-search",
-            "the moon is full",
-            "--mount",
-            str(mount),
-            "--k",
-            "5",
-            "--dynamic-threshold",
-        ],
-    )
-    assert gated.exit_code == 0
-    gated_lines = [line for line in gated.output.splitlines() if line.strip()]
-    assert len(gated_lines) == 1
-    assert json.loads(gated_lines[0])["content"] == "the moon is full"
-
-
-# ---------- keywords ----------
-
-
-def test_add_with_repeatable_keyword_flag(tmp_path, _shared_models_cache):
-    pytest.importorskip("fastembed")
-    mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
-    result = runner.invoke(
-        app,
-        [
-            "add",
-            "hello world",
-            "--mount",
-            str(mount),
-            "--keyword",
-            "alpha",
-            "--keyword",
-            "beta",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    parsed = _last_json_line(result.output)
-    assert parsed["keywords"] == ["alpha", "beta"]
-
-
-def test_add_without_keyword_flag_omits_keywords_in_output(
-    tmp_path, _shared_models_cache
+def test_export_then_import_round_trips_content(
+    tmp_path, _shared_models_cache, populated_mount
 ):
-    pytest.importorskip("fastembed")
-    mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
-    result = runner.invoke(app, ["add", "hello world", "--mount", str(mount)])
+    """Export from one grimoire, import into a fresh one — content survives."""
+    out = tmp_path / "round.jsonl"
+    runner.invoke(app, ["--mount", str(populated_mount), "export", "-o", str(out)])
+    fresh = _new_mount(tmp_path, _shared_models_cache, name="fresh")
+    _init(fresh)
+    result = runner.invoke(app, ["--mount", str(fresh), "import", str(out)])
     assert result.exit_code == 0, result.output
-    parsed = _last_json_line(result.output)
-    assert "keywords" not in parsed
+    listing = _json_lines(runner.invoke(app, ["--mount", str(fresh), "query"]).output)
+    assert len(listing) == 3
+    contents = {e["content"] for e in listing}
+    assert contents == {
+        "the moon is full",
+        "dragons fly at midnight",
+        "lumos lights the way",
+    }
 
 
-def test_ingest_carries_keywords_through(tmp_path, _shared_models_cache):
-    pytest.importorskip("fastembed")
-    mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
-    data = tmp_path / "records.jsonl"
-    data.write_text(
-        json.dumps(
-            {
-                "kind": "spell",
-                "content": "Coaxes a locked door to forget its keeper",
-                "keywords": ["lockpick", "skeleton-key"],
-            }
-        )
-        + "\n"
-    )
-    assert (
-        runner.invoke(app, ["ingest", str(data), "--mount", str(mount)]).exit_code == 0
-    )
-
-    list_result = runner.invoke(app, ["list", "--mount", str(mount)])
-    assert list_result.exit_code == 0
-    parsed = json.loads(list_result.output.strip())
-    assert parsed["keywords"] == ["lockpick", "skeleton-key"]
+# ---------- destroy (per-database) ----------
 
 
-def test_ingest_handles_non_ascii_content(tmp_path, _shared_models_cache):
-    """JSONL is utf-8 by spec; ingest must not depend on the locale encoding."""
-    pytest.importorskip("fastembed")
-    mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
-    data = tmp_path / "utf8.jsonl"
-    payload = "über naïve café — 日本語 🜂"
-    data.write_text(
-        json.dumps({"kind": "note", "content": payload}, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    result = runner.invoke(app, ["ingest", str(data), "--mount", str(mount)])
-    assert result.exit_code == 0, result.output
-
-    list_result = runner.invoke(app, ["list", "--mount", str(mount)])
-    assert list_result.exit_code == 0
-    parsed = json.loads(list_result.output.strip())
-    assert parsed["content"] == payload
-
-
-def test_keyword_search_finds_via_keywords_field(tmp_path, _shared_models_cache):
-    pytest.importorskip("fastembed")
-    mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
-    data = tmp_path / "records.jsonl"
-    data.write_text(
-        json.dumps(
-            {
-                "kind": "spell",
-                "content": "Coaxes a locked door to forget its keeper",
-                "keywords": ["lockpick"],
-            }
-        )
-        + "\n"
-    )
-    runner.invoke(app, ["ingest", str(data), "--mount", str(mount)])
-    result = runner.invoke(app, ["keyword-search", "lockpick", "--mount", str(mount)])
+def test_destroy_removes_default_db(populated_mount):
+    """Bare `destroy` removes only the default database, leaving the mount intact."""
+    result = runner.invoke(app, ["--mount", str(populated_mount), "destroy", "--yes"])
     assert result.exit_code == 0
-    parsed = json.loads(result.output.strip())
-    assert parsed["content"] == "Coaxes a locked door to forget its keeper"
-    assert parsed["keywords"] == ["lockpick"]
+    assert not (populated_mount / "grimoire.db").exists()
+    # Mount root, models cache, and (if any) named DBs survive.
+    assert populated_mount.exists()
+    assert (populated_mount / "models").exists()
+
+
+def test_destroy_default_requires_confirmation(populated_mount):
+    """Without --yes, abort if the user doesn't type 'y'."""
+    result = runner.invoke(
+        app, ["--mount", str(populated_mount), "destroy"], input="n\n"
+    )
+    assert result.exit_code != 0
+    assert (populated_mount / "grimoire.db").exists()
+
+
+def test_destroy_default_y_at_prompt_proceeds(populated_mount):
+    result = runner.invoke(
+        app, ["--mount", str(populated_mount), "destroy"], input="y\n"
+    )
+    assert result.exit_code == 0
+    assert not (populated_mount / "grimoire.db").exists()
+
+
+def test_destroy_default_missing_is_noop(tmp_path, _shared_models_cache):
+    """Destroying a default DB that doesn't exist exits cleanly with a message."""
+    mount = _new_mount(tmp_path, _shared_models_cache, name="empty-mount")
+    result = runner.invoke(app, ["--mount", str(mount), "destroy", "--yes"])
+    assert result.exit_code == 0
+    assert "Nothing to destroy" in result.output
+
+
+def test_destroy_named_db_removes_subdir_and_manifest_entry(
+    populated_mount, _shared_models_cache
+):
+    """`destroy NAME` removes the named DB and its manifest entry."""
+    pytest.importorskip("fastembed")
+    # Create a named DB alongside the default.
+    init_named = runner.invoke(
+        app, ["--mount", str(populated_mount), "init", "--db", "side"]
+    )
+    assert init_named.exit_code == 0, init_named.output
+    assert (populated_mount / "side" / "grimoire.db").exists()
+
+    result = runner.invoke(
+        app, ["--mount", str(populated_mount), "destroy", "side", "--yes"]
+    )
+    assert result.exit_code == 0
+    assert not (populated_mount / "side").exists()
+    # Default DB unaffected.
+    assert (populated_mount / "grimoire.db").exists()
+
+
+def test_destroy_unknown_name_is_noop(populated_mount):
+    result = runner.invoke(
+        app, ["--mount", str(populated_mount), "destroy", "ghost", "--yes"]
+    )
+    assert result.exit_code == 0
+    assert "Nothing to destroy" in result.output
+
+
+# ---------- mount destroy (full wipe) ----------
+
+
+def test_mount_destroy_wipes_entire_mount(populated_mount):
+    result = runner.invoke(
+        app, ["--mount", str(populated_mount), "mount", "destroy", "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    assert not populated_mount.exists()
+
+
+def test_mount_destroy_requires_confirmation(populated_mount):
+    result = runner.invoke(
+        app,
+        ["--mount", str(populated_mount), "mount", "destroy"],
+        input="n\n",
+    )
+    assert result.exit_code != 0
+    assert populated_mount.exists()
+
+
+def test_mount_destroy_missing_mount_is_noop(tmp_path):
+    nope = tmp_path / "nope"
+    result = runner.invoke(app, ["--mount", str(nope), "mount", "destroy", "--yes"])
+    assert result.exit_code == 0
+    assert "Nothing to destroy" in result.output
+
+
+# ---------- ls ----------
+
+
+def test_ls_lists_default_when_only_default_present(populated_mount):
+    result = runner.invoke(app, ["--mount", str(populated_mount), "ls"])
+    assert result.exit_code == 0, result.output
+    rows = _json_lines(result.output)
+    assert len(rows) == 1
+    assert rows[0]["name"] is None
+    assert rows[0]["is_default"] is True
+    assert rows[0]["entry_count"] == 3
+
+
+def test_ls_lists_default_and_named(populated_mount, _shared_models_cache):
+    pytest.importorskip("fastembed")
+    runner.invoke(app, ["--mount", str(populated_mount), "init", "--db", "alpha"])
+    runner.invoke(app, ["--mount", str(populated_mount), "init", "--db", "beta"])
+    result = runner.invoke(app, ["--mount", str(populated_mount), "ls"])
+    assert result.exit_code == 0, result.output
+    rows = _json_lines(result.output)
+    names = [r["name"] for r in rows]
+    # Default first, then named in alphabetical order.
+    assert names == [None, "alpha", "beta"]
+    assert rows[0]["is_default"] is True
+    assert all(r["is_default"] is False for r in rows[1:])
+
+
+def test_ls_empty_mount_emits_nothing(tmp_path):
+    result = runner.invoke(app, ["--mount", str(tmp_path / "fresh"), "ls"])
+    assert result.exit_code == 0
+    assert _json_lines(result.output) == []
+
+
+# ---------- named-DB workflow (--db) ----------
+
+
+def test_named_db_init_create_search_round_trip(populated_mount, _shared_models_cache):
+    """A named DB lives alongside the default and is independently addressable."""
+    pytest.importorskip("fastembed")
+    init_named = runner.invoke(
+        app, ["--mount", str(populated_mount), "init", "--db", "spells"]
+    )
+    assert init_named.exit_code == 0, init_named.output
+
+    add_named = runner.invoke(
+        app,
+        [
+            "--mount",
+            str(populated_mount),
+            "add",
+            "alohomora opens locks",
+            "--db",
+            "spells",
+        ],
+    )
+    assert add_named.exit_code == 0, add_named.output
+
+    # Default DB is unchanged — still 3 entries from the populated_mount fixture.
+    default_q = runner.invoke(app, ["--mount", str(populated_mount), "query"])
+    assert len(_json_lines(default_q.output)) == 3
+
+    # Named DB has the one entry we added.
+    named_q = runner.invoke(
+        app, ["--mount", str(populated_mount), "query", "--db", "spells"]
+    )
+    rows = _json_lines(named_q.output)
+    assert len(rows) == 1
+    assert rows[0]["content"] == "alohomora opens locks"
+
+
+def test_open_unknown_named_db_errors_clearly(populated_mount):
+    result = runner.invoke(
+        app, ["--mount", str(populated_mount), "query", "--db", "nope"]
+    )
+    assert result.exit_code != 0
+    assert "nope" in result.output

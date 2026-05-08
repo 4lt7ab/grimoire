@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import struct
 from collections.abc import Iterable, Mapping
@@ -12,8 +13,18 @@ import sqlite_vec
 from ulid import ULID
 
 from grimoire.embedder import Embedder
-from grimoire.errors import GrimoireNotFound
+from grimoire.errors import DatabaseExists, GrimoireNotFound
 from grimoire.models import Entry, Stats
+from grimoire.mount import (
+    MODELS_DIRNAME,
+    Mount,
+    _db_path,
+    _ensure_mount_dirs,
+    _register,
+    _resolve_mount,
+    _unregister,
+    _validate_name,
+)
 from grimoire.schema import create, validate
 
 _WARMUP_PROBE = " "
@@ -54,76 +65,139 @@ class Grimoire:
         self._embedder = embedder
 
     @classmethod
-    def init(
+    def mount(cls, path: str | Path | None = None) -> Mount:
+        """Resolve and prepare a mount, returning a handle for mount-level ops.
+
+        Resolution order: explicit `path` arg > `GRIMOIRE_MOUNT` env var >
+        `~/.grimoire`. Creates the mount directory and the shared `models/`
+        cache if missing. The manifest TOML is written lazily — on the first
+        named-DB create — so a brand-new mount with only a default DB
+        carries no manifest file.
+        """
+        mount_path = _resolve_mount(path)
+        _ensure_mount_dirs(mount_path)
+        return Mount(mount_path)
+
+    @classmethod
+    def create(
         cls,
-        path: str | Path,
+        name: str | None = None,
         *,
         embedder: Embedder,
+        mount: str | Path | None = None,
+        description: str | None = None,
         check_same_thread: bool = True,
     ) -> Self:
-        """Create the grimoire if missing, validate if present, and warm the embedder.
+        """Create a database in the mount and return an open Grimoire.
 
-        Idempotent. After this returns, the file exists with a lock row matching
-        the supplied embedder, and the embedder has been exercised once via
-        `embed(_WARMUP_PROBE)` so any deferred setup work has happened.
-
-        Pass `check_same_thread=False` to share the instance across worker
-        threads — needed for sync HTTP handlers running under FastAPI's,
-        Starlette's, or gunicorn's thread pool. SQLite's connection-level
-        locking still serializes access; this lifts Python's stdlib
-        thread-affinity guard, it doesn't add concurrency.
+        `name=None` creates the default at `<mount>/grimoire.db`. A name
+        creates `<mount>/<name>/grimoire.db` and registers it in the manifest.
+        Raises `DatabaseExists` if a database with this name is already
+        present in the mount; use `Grimoire.open` to attach to an existing one.
         """
-        path = Path(path)
-        is_new = not path.exists()
-        if is_new:
-            path.parent.mkdir(parents=True, exist_ok=True)
-        conn = _open_conn(str(path), check_same_thread=check_same_thread)
+        if name is not None:
+            _validate_name(name)
+        mount_path = _resolve_mount(mount)
+        _ensure_mount_dirs(mount_path)
+
+        db = _db_path(mount_path, name)
+        if db.exists():
+            label = "default database" if name is None else f"database {name!r}"
+            raise DatabaseExists(f"{label} already exists at {db}")
+
+        # Track the named subdir we create so a failed init leaves nothing
+        # behind. The default DB writes directly into the mount root, so
+        # there's no per-DB subdir to clean up.
+        created_subdir: Path | None = None
+        if name is not None:
+            subdir = mount_path / name
+            created_subdir = subdir if not subdir.exists() else None
+            subdir.mkdir(parents=True, exist_ok=True)
+
         try:
-            if is_new:
-                create(conn, embedder)
-            else:
-                validate(conn, embedder)
-            embedder.embed(_WARMUP_PROBE)
-            return cls(conn=conn, embedder=embedder)
+            grimoire = _create_file(
+                db, embedder=embedder, check_same_thread=check_same_thread
+            )
         except BaseException:
-            conn.close()
-            # WAL mode writes header bytes during `_open_conn`, so a failed
-            # init on a brand-new file leaves a non-empty (and useless)
-            # SQLite file behind. Clean up the file and its WAL siblings
-            # to preserve the "failed init leaves no garbage" invariant.
-            if is_new:
-                for sibling in (
-                    path,
-                    path.parent / (path.name + "-wal"),
-                    path.parent / (path.name + "-shm"),
-                    path.parent / (path.name + "-journal"),
-                ):
-                    sibling.unlink(missing_ok=True)
+            if created_subdir is not None:
+                shutil.rmtree(created_subdir, ignore_errors=True)
             raise
+
+        if name is not None:
+            try:
+                _register(
+                    mount_path, name, model=embedder.model, description=description
+                )
+            except BaseException:
+                grimoire.close()
+                if created_subdir is not None:
+                    shutil.rmtree(created_subdir, ignore_errors=True)
+                raise
+        return grimoire
 
     @classmethod
     def open(
         cls,
-        path: str | Path,
+        name: str | None = None,
         *,
-        embedder: Embedder,
+        mount: str | Path | None = None,
         check_same_thread: bool = True,
     ) -> Self:
-        """Open an existing grimoire; raises `GrimoireNotFound` if missing.
+        """Open an existing database in the mount.
 
-        Pass `check_same_thread=False` to share the instance across worker
-        threads. See `init` for the full note.
+        `name=None` opens the default at `<mount>/grimoire.db`; a name opens
+        `<mount>/<name>/grimoire.db`. The embedder is reconstructed from the
+        file's lock row using `FastembedEmbedder` and the shared `<mount>/models/`
+        cache — requires the `fastembed` extra. Mount-aware DBs are therefore
+        fastembed-bound by contract; custom-embedder workflows must operate
+        below this API.
         """
-        path = Path(path)
-        if not path.exists():
-            raise GrimoireNotFound(f"No grimoire at {path}")
-        conn = _open_conn(str(path), check_same_thread=check_same_thread)
-        try:
-            validate(conn, embedder)
-            return cls(conn=conn, embedder=embedder)
-        except BaseException:
-            conn.close()
-            raise
+        if name is not None:
+            _validate_name(name)
+        mount_path = _resolve_mount(mount)
+        db = _db_path(mount_path, name)
+        if not db.exists():
+            label = "default database" if name is None else f"database {name!r}"
+            raise GrimoireNotFound(f"No {label} at {db}")
+        embedder = _autoload_embedder(db, mount_path)
+        return _open_file(db, embedder=embedder, check_same_thread=check_same_thread)
+
+    @classmethod
+    def destroy(
+        cls,
+        name: str | None = None,
+        *,
+        mount: str | Path | None = None,
+    ) -> None:
+        """Delete a database from the mount.
+
+        `name=None` removes the default DB; a name removes the named DB and
+        its subdirectory and drops the manifest entry. Idempotent: missing
+        files or manifest entries are silently tolerated, since the goal
+        state is "gone."
+        """
+        if name is not None:
+            _validate_name(name)
+        mount_path = _resolve_mount(mount)
+        db = _db_path(mount_path, name)
+
+        # Unlink the SQLite file plus its WAL/SHM siblings, in case the file
+        # was open elsewhere and the journal hasn't been folded back in.
+        for sibling in (
+            db,
+            db.parent / (db.name + "-wal"),
+            db.parent / (db.name + "-shm"),
+            db.parent / (db.name + "-journal"),
+        ):
+            sibling.unlink(missing_ok=True)
+
+        if name is not None:
+            subdir = mount_path / name
+            # Best-effort: remove the now-empty subdir. Leave it alone if the
+            # caller has put other files in there.
+            if subdir.exists() and not any(subdir.iterdir()):
+                subdir.rmdir()
+            _unregister(mount_path, name)
 
     @classmethod
     def peek(cls, path: str | Path) -> Stats | None:
@@ -146,8 +220,9 @@ class Grimoire:
                     return None
                 version = conn.execute("PRAGMA user_version").fetchone()[0]
                 count = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
-                kind_rows = conn.execute(
-                    "SELECT kind, COUNT(*) FROM entries GROUP BY kind ORDER BY kind"
+                group_key_rows = conn.execute(
+                    "SELECT group_key, COUNT(*) FROM entries "
+                    "GROUP BY group_key ORDER BY group_key"
                 ).fetchall()
             finally:
                 conn.close()
@@ -158,14 +233,15 @@ class Grimoire:
             dimension=row[1],
             schema_version=version,
             entry_count=count,
-            kinds=dict(kind_rows),
+            groups=dict(group_key_rows),
         )
 
     def add(
         self,
         *,
-        kind: str,
         content: str,
+        group_key: str | None = None,
+        group_ref: str | None = None,
         payload: dict[str, Any] | None = None,
         threshold: float | None = None,
         keywords: list[str] | None = None,
@@ -179,14 +255,23 @@ class Grimoire:
         with self._conn:
             self._conn.execute(
                 """
-                INSERT INTO entries (id, kind, content, keywords, payload, threshold)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO entries
+                    (id, group_key, group_ref, content, keywords, payload, threshold)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (entry_id, kind, content, keywords_json, payload_json, threshold),
+                (
+                    entry_id,
+                    group_key,
+                    group_ref,
+                    content,
+                    keywords_json,
+                    payload_json,
+                    threshold,
+                ),
             )
             self._conn.execute(
-                "INSERT INTO vectors (entry_id, kind, embedding) VALUES (?, ?, ?)",
-                (entry_id, kind, _pack(vector)),
+                "INSERT INTO vectors (entry_id, group_key, embedding) VALUES (?, ?, ?)",
+                (entry_id, group_key, _pack(vector)),
             )
             self._conn.execute(
                 "INSERT INTO entries_fts (content, keywords, entry_id) "
@@ -196,7 +281,8 @@ class Grimoire:
 
         return Entry(
             id=entry_id,
-            kind=kind,
+            group_key=group_key,
+            group_ref=group_ref,
             content=content,
             payload=payload,
             threshold=threshold,
@@ -207,8 +293,9 @@ class Grimoire:
         """Insert many records in one transaction with one batched embed call.
 
         Each record is a mapping accepting the same keys as `add`'s kwargs:
-        `kind` and `content` are required; `payload`, `threshold`, and
-        `keywords` are optional. Returns the inserted entries in input order.
+        `content` is required; `group_key`, `group_ref`, `payload`,
+        `threshold`, and `keywords` are optional. Returns the inserted
+        entries in input order.
 
         Atomic: if embedding or any insert fails, nothing is committed —
         unlike a loop over `add`, which would leave partial state behind.
@@ -227,7 +314,8 @@ class Grimoire:
 
         for record, vector in zip(records, vectors, strict=True):
             entry_id = str(ULID())
-            kind = record["kind"]
+            group_key = record.get("group_key")
+            group_ref = record.get("group_ref")
             content = record["content"]
             payload = record.get("payload")
             threshold = record.get("threshold")
@@ -238,15 +326,24 @@ class Grimoire:
             keywords_text = " ".join(keywords) if keywords else ""
 
             entries_rows.append(
-                (entry_id, kind, content, keywords_json, payload_json, threshold)
+                (
+                    entry_id,
+                    group_key,
+                    group_ref,
+                    content,
+                    keywords_json,
+                    payload_json,
+                    threshold,
+                )
             )
-            vectors_rows.append((entry_id, kind, _pack(vector)))
+            vectors_rows.append((entry_id, group_key, _pack(vector)))
             fts_rows.append((content, keywords_text, entry_id))
 
             entries.append(
                 Entry(
                     id=entry_id,
-                    kind=kind,
+                    group_key=group_key,
+                    group_ref=group_ref,
                     content=content,
                     payload=payload,
                     threshold=threshold,
@@ -256,12 +353,13 @@ class Grimoire:
 
         with self._conn:
             self._conn.executemany(
-                "INSERT INTO entries (id, kind, content, keywords, payload, threshold) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO entries "
+                "(id, group_key, group_ref, content, keywords, payload, threshold) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 entries_rows,
             )
             self._conn.executemany(
-                "INSERT INTO vectors (entry_id, kind, embedding) VALUES (?, ?, ?)",
+                "INSERT INTO vectors (entry_id, group_key, embedding) VALUES (?, ?, ?)",
                 vectors_rows,
             )
             self._conn.executemany(
@@ -274,27 +372,60 @@ class Grimoire:
 
     def get(self, entry_id: str) -> Entry | None:
         row = self._conn.execute(
-            "SELECT id, kind, content, keywords, payload, threshold "
+            "SELECT id, group_key, group_ref, content, keywords, payload, threshold "
             "FROM entries WHERE id = ?",
             (entry_id,),
         ).fetchone()
         return _row_to_entry(row) if row is not None else None
 
+    def get_by_group_ref(
+        self, *, group_key: str | None, group_ref: str
+    ) -> Entry | None:
+        """Look up an entry by its consumer-set `group_ref` within a group.
+
+        `group_ref` is a non-NULL, consumer-supplied identifier; uniqueness
+        is enforced per `(group_key, group_ref)` pair, so the same `group_ref`
+        can be reused across groups (and within the ungrouped namespace,
+        where `group_key` is NULL). Returns None if no match.
+        """
+        if group_key is None:
+            row = self._conn.execute(
+                "SELECT id, group_key, group_ref, content, keywords, "
+                "payload, threshold "
+                "FROM entries WHERE group_key IS NULL AND group_ref = ?",
+                (group_ref,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT id, group_key, group_ref, content, keywords, "
+                "payload, threshold "
+                "FROM entries WHERE group_key = ? AND group_ref = ?",
+                (group_key, group_ref),
+            ).fetchone()
+        return _row_to_entry(row) if row is not None else None
+
     def list(
         self,
         *,
-        kind: str | None = None,
+        group_key: str | None = None,
+        group_ref: str | None = None,
         limit: int = 100,
         after_id: str | None = None,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
     ) -> list[Entry]:
-        sql = "SELECT id, kind, content, keywords, payload, threshold FROM entries"
+        sql = (
+            "SELECT id, group_key, group_ref, content, keywords, payload, threshold "
+            "FROM entries"
+        )
         params: list[Any] = []
         clauses: list[str] = []
-        if kind is not None:
-            clauses.append("kind = ?")
-            params.append(kind)
+        if group_key is not None:
+            clauses.append("group_key = ?")
+            params.append(group_key)
+        if group_ref is not None:
+            clauses.append("group_ref = ?")
+            params.append(group_ref)
         if after_id is not None:
             clauses.append("id > ?")
             params.append(after_id)
@@ -316,29 +447,37 @@ class Grimoire:
         self,
         entry_id: str,
         *,
-        kind: str | None = None,
         content: str | None = None,
+        group_key: str | None | _Unset = _UNSET,
+        group_ref: str | None | _Unset = _UNSET,
         payload: dict[str, Any] | None | _Unset = _UNSET,
         threshold: float | None | _Unset = _UNSET,
         keywords: list[str] | None | _Unset = _UNSET,
     ) -> Entry | None:
         """Patch fields on an entry, leaving omitted fields untouched.
 
-        `kind` and `content` are non-nullable — pass a value to change them,
-        or omit (default `None`) to leave them alone. `payload`, `threshold`,
-        and `keywords` are nullable — omit to leave alone, pass `None` to
-        clear, or pass a new value to replace.
+        `content` is non-nullable — pass a value to change it, or omit
+        (default `None`) to leave it alone. `group_key`, `group_ref`,
+        `payload`, `threshold`, and `keywords` are all nullable — omit to
+        leave alone, pass `None` to clear, or pass a new value to replace.
 
-        Returns the updated entry, or `None` if the id is unknown. Re-embeds
-        only when `content` changed, re-indexes FTS only when `content` or
-        `keywords` changed, and rewrites the vector row only when `content`
-        or `kind` changed.
+        Returns the updated entry, or `None` if the id is unknown. Raises
+        `sqlite3.IntegrityError` if the resulting `(group_key, group_ref)`
+        pair would collide with another entry. Re-embeds only when `content`
+        changed, re-indexes FTS only when `content` or `keywords` changed,
+        and rewrites the vector row only when `content` or `group_key`
+        changed.
         """
         current = self.get(entry_id)
         if current is None:
             return None
 
-        new_kind = current.kind if kind is None else kind
+        new_group_key = (
+            current.group_key if isinstance(group_key, _Unset) else group_key
+        )
+        new_group_ref = (
+            current.group_ref if isinstance(group_ref, _Unset) else group_ref
+        )
         new_content = current.content if content is None else content
         new_payload = current.payload if isinstance(payload, _Unset) else payload
         new_threshold = (
@@ -348,7 +487,7 @@ class Grimoire:
 
         content_changed = new_content != current.content
         keywords_changed = new_keywords != current.keywords
-        kind_changed = new_kind != current.kind
+        group_key_changed = new_group_key != current.group_key
 
         payload_json = json.dumps(new_payload) if new_payload is not None else None
         keywords_json = json.dumps(new_keywords) if new_keywords is not None else None
@@ -358,11 +497,13 @@ class Grimoire:
             self._conn.execute(
                 """
                 UPDATE entries
-                SET kind = ?, content = ?, keywords = ?, payload = ?, threshold = ?
+                SET group_key = ?, group_ref = ?, content = ?,
+                    keywords = ?, payload = ?, threshold = ?
                 WHERE id = ?
                 """,
                 (
-                    new_kind,
+                    new_group_key,
+                    new_group_ref,
                     new_content,
                     keywords_json,
                     payload_json,
@@ -371,11 +512,11 @@ class Grimoire:
                 ),
             )
 
-            if content_changed or kind_changed:
-                # vec0 partitions on `kind`, so a kind change requires moving
-                # the row to a different partition — done as delete + reinsert.
-                # When only kind changed, reuse the stored embedding blob to
-                # avoid an unnecessary embedder call.
+            if content_changed or group_key_changed:
+                # vec0 partitions on `group_key`, so a group_key change requires
+                # moving the row to a different partition — done as delete +
+                # reinsert. When only group_key changed, reuse the stored
+                # embedding blob to avoid an unnecessary embedder call.
                 if content_changed:
                     new_blob = _pack(self._embedder.embed(new_content))
                 else:
@@ -388,8 +529,9 @@ class Grimoire:
                     "DELETE FROM vectors WHERE entry_id = ?", (entry_id,)
                 )
                 self._conn.execute(
-                    "INSERT INTO vectors (entry_id, kind, embedding) VALUES (?, ?, ?)",
-                    (entry_id, new_kind, new_blob),
+                    "INSERT INTO vectors (entry_id, group_key, embedding) "
+                    "VALUES (?, ?, ?)",
+                    (entry_id, new_group_key, new_blob),
                 )
 
             if content_changed or keywords_changed:
@@ -404,7 +546,8 @@ class Grimoire:
 
         return Entry(
             id=entry_id,
-            kind=new_kind,
+            group_key=new_group_key,
+            group_ref=new_group_ref,
             content=new_content,
             payload=new_payload,
             threshold=new_threshold,
@@ -415,14 +558,16 @@ class Grimoire:
         """Patch many entries in one transaction with one batched embed call.
 
         Each record must include `id`; remaining keys mirror `update`'s
-        kwargs (`kind`, `content`, `payload`, `threshold`, `keywords`).
-        Absent keys leave the field unchanged; passing `None` clears nullable
-        fields (`payload`, `threshold`, `keywords`).
+        kwargs (`group_key`, `group_ref`, `content`, `payload`, `threshold`,
+        `keywords`). Absent keys leave the field unchanged; passing `None`
+        clears nullable fields (`group_key`, `group_ref`, `payload`,
+        `threshold`, `keywords`).
 
         Returns one `Entry | None` per input record in input order — `None`
         when the id is unknown. Atomic: if embedding or any update fails,
-        nothing is committed — unlike a loop over `update`, which would leave
-        partial state behind.
+        nothing is committed — unlike a loop over `update`, which would
+        leave partial state behind. Raises `sqlite3.IntegrityError` if any
+        resulting `(group_key, group_ref)` pair would collide.
 
         Duplicate ids in input raise `ValueError`: which record wins is
         ambiguous, and the returned entries would lie about the post-batch
@@ -438,7 +583,7 @@ class Grimoire:
 
         placeholders = ",".join(["?"] * len(ids))
         rows = self._conn.execute(
-            f"SELECT id, kind, content, keywords, payload, threshold "
+            f"SELECT id, group_key, group_ref, content, keywords, payload, threshold "
             f"FROM entries WHERE id IN ({placeholders})",
             ids,
         ).fetchall()
@@ -453,20 +598,22 @@ class Grimoire:
             if current is None:
                 targets.append(None)
                 continue
-            new_kind = r.get("kind", current.kind)
+            new_group_key = r.get("group_key", current.group_key)
+            new_group_ref = r.get("group_ref", current.group_ref)
             new_content = r.get("content", current.content)
             new_payload = r.get("payload", current.payload)
             new_threshold = r.get("threshold", current.threshold)
             new_keywords = r.get("keywords", current.keywords)
             target = {
                 "id": r["id"],
-                "kind": new_kind,
+                "group_key": new_group_key,
+                "group_ref": new_group_ref,
                 "content": new_content,
                 "payload": new_payload,
                 "threshold": new_threshold,
                 "keywords": new_keywords,
                 "content_changed": new_content != current.content,
-                "kind_changed": new_kind != current.kind,
+                "group_key_changed": new_group_key != current.group_key,
                 "keywords_changed": new_keywords != current.keywords,
             }
             targets.append(target)
@@ -497,10 +644,12 @@ class Grimoire:
                 keywords_text = " ".join(t["keywords"]) if t["keywords"] else ""
 
                 self._conn.execute(
-                    "UPDATE entries SET kind = ?, content = ?, keywords = ?, "
-                    "payload = ?, threshold = ? WHERE id = ?",
+                    "UPDATE entries SET group_key = ?, group_ref = ?, "
+                    "content = ?, keywords = ?, payload = ?, threshold = ? "
+                    "WHERE id = ?",
                     (
-                        t["kind"],
+                        t["group_key"],
+                        t["group_ref"],
                         t["content"],
                         keywords_json,
                         payload_json,
@@ -509,11 +658,12 @@ class Grimoire:
                     ),
                 )
 
-                if t["content_changed"] or t["kind_changed"]:
+                if t["content_changed"] or t["group_key_changed"]:
                     if i in blobs:
                         new_blob = blobs[i]
                     else:
-                        # Kind changed but content did not — reuse stored embedding.
+                        # group_key changed but content did not — reuse stored
+                        # embedding.
                         row = self._conn.execute(
                             "SELECT embedding FROM vectors WHERE entry_id = ?",
                             (t["id"],),
@@ -523,9 +673,9 @@ class Grimoire:
                         "DELETE FROM vectors WHERE entry_id = ?", (t["id"],)
                     )
                     self._conn.execute(
-                        "INSERT INTO vectors (entry_id, kind, embedding) "
+                        "INSERT INTO vectors (entry_id, group_key, embedding) "
                         "VALUES (?, ?, ?)",
-                        (t["id"], t["kind"], new_blob),
+                        (t["id"], t["group_key"], new_blob),
                     )
 
                 if t["content_changed"] or t["keywords_changed"]:
@@ -541,7 +691,8 @@ class Grimoire:
                 results.append(
                     Entry(
                         id=t["id"],
-                        kind=t["kind"],
+                        group_key=t["group_key"],
+                        group_ref=t["group_ref"],
                         content=t["content"],
                         payload=t["payload"],
                         threshold=t["threshold"],
@@ -603,7 +754,7 @@ class Grimoire:
         self,
         query: str,
         *,
-        kind: str | None = None,
+        group_key: str | None = None,
         k: int = 10,
         dynamic_threshold: bool = False,
         created_after: datetime | None = None,
@@ -613,8 +764,8 @@ class Grimoire:
 
         Filters interact with the KNN in two different ways:
 
-        - `kind` is pushed into the vector index's partition key, so the
-          KNN considers only entries of that kind from the start.
+        - `group_key` is pushed into the vector index's partition key, so the
+          KNN considers only entries of that group_key from the start.
         - `created_after`, `created_before`, and `dynamic_threshold` apply
           AFTER the KNN returns its top-k. With a narrow time window or
           tight per-record thresholds, this can return fewer than `k`
@@ -624,15 +775,15 @@ class Grimoire:
         vector = self._embedder.embed(query)
 
         sql = (
-            "SELECT e.id, e.kind, e.content, e.keywords, e.payload, e.threshold, "
-            "v.distance "
+            "SELECT e.id, e.group_key, e.group_ref, e.content, e.keywords, "
+            "e.payload, e.threshold, v.distance "
             "FROM vectors v JOIN entries e ON e.id = v.entry_id "
             "WHERE v.embedding MATCH ? AND k = ?"
         )
         params: list[Any] = [_pack(vector), k]
-        if kind is not None:
-            sql += " AND v.kind = ?"
-            params.append(kind)
+        if group_key is not None:
+            sql += " AND v.group_key = ?"
+            params.append(group_key)
         if created_after is not None:
             sql += " AND e.id >= ?"
             params.append(_ulid_floor(created_after))
@@ -645,12 +796,13 @@ class Grimoire:
         results = [
             Entry(
                 id=r[0],
-                kind=r[1],
-                content=r[2],
-                keywords=json.loads(r[3]) if r[3] is not None else None,
-                payload=json.loads(r[4]) if r[4] is not None else None,
-                threshold=r[5],
-                distance=r[6],
+                group_key=r[1],
+                group_ref=r[2],
+                content=r[3],
+                keywords=json.loads(r[4]) if r[4] is not None else None,
+                payload=json.loads(r[5]) if r[5] is not None else None,
+                threshold=r[6],
+                distance=r[7],
             )
             for r in rows
         ]
@@ -664,21 +816,21 @@ class Grimoire:
         self,
         query: str,
         *,
-        kind: str | None = None,
+        group_key: str | None = None,
         k: int = 10,
         created_after: datetime | None = None,
         created_before: datetime | None = None,
     ) -> list[Entry]:
         sql = (
-            f"SELECT e.id, e.kind, e.content, e.keywords, e.payload, e.threshold, "
-            f"{_BM25_RANK} AS rank "
+            f"SELECT e.id, e.group_key, e.group_ref, e.content, e.keywords, "
+            f"e.payload, e.threshold, {_BM25_RANK} AS rank "
             "FROM entries_fts JOIN entries e ON e.id = entries_fts.entry_id "
             "WHERE entries_fts MATCH ?"
         )
         params: list[Any] = [query]
-        if kind is not None:
-            sql += " AND e.kind = ?"
-            params.append(kind)
+        if group_key is not None:
+            sql += " AND e.group_key = ?"
+            params.append(group_key)
         if created_after is not None:
             sql += " AND e.id >= ?"
             params.append(_ulid_floor(created_after))
@@ -692,12 +844,13 @@ class Grimoire:
         return [
             Entry(
                 id=r[0],
-                kind=r[1],
-                content=r[2],
-                keywords=json.loads(r[3]) if r[3] is not None else None,
-                payload=json.loads(r[4]) if r[4] is not None else None,
-                threshold=r[5],
-                rank=r[6],
+                group_key=r[1],
+                group_ref=r[2],
+                content=r[3],
+                keywords=json.loads(r[4]) if r[4] is not None else None,
+                payload=json.loads(r[5]) if r[5] is not None else None,
+                threshold=r[6],
+                rank=r[7],
             )
             for r in rows
         ]
@@ -710,6 +863,86 @@ class Grimoire:
 
     def __exit__(self, *exc: object) -> None:
         self.close()
+
+
+def _create_file(
+    path: Path,
+    *,
+    embedder: Embedder,
+    check_same_thread: bool = True,
+) -> Grimoire:
+    """Create a fresh grimoire file and warm its embedder.
+
+    Module-level rather than a classmethod because `Grimoire.create` is now
+    the mount-aware entry point — this is the file-level primitive it
+    composes with. Not part of the stable public API; kept reachable so
+    tests and advanced callers can build on it.
+    """
+    is_new = not path.exists()
+    if is_new:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    conn = _open_conn(str(path), check_same_thread=check_same_thread)
+    try:
+        if is_new:
+            create(conn, embedder)
+        else:
+            validate(conn, embedder)
+        embedder.embed(_WARMUP_PROBE)
+        return Grimoire(conn=conn, embedder=embedder)
+    except BaseException:
+        conn.close()
+        # WAL mode writes header bytes during `_open_conn`, so a failed
+        # init on a brand-new file leaves a non-empty (and useless)
+        # SQLite file behind. Clean up the file and its WAL siblings
+        # to preserve the "failed init leaves no garbage" invariant.
+        if is_new:
+            for sibling in (
+                path,
+                path.parent / (path.name + "-wal"),
+                path.parent / (path.name + "-shm"),
+                path.parent / (path.name + "-journal"),
+            ):
+                sibling.unlink(missing_ok=True)
+        raise
+
+
+def _open_file(
+    path: Path,
+    *,
+    embedder: Embedder,
+    check_same_thread: bool = True,
+) -> Grimoire:
+    """Open an existing grimoire file and validate the embedder against it."""
+    if not path.exists():
+        raise GrimoireNotFound(f"No grimoire at {path}")
+    conn = _open_conn(str(path), check_same_thread=check_same_thread)
+    try:
+        validate(conn, embedder)
+        return Grimoire(conn=conn, embedder=embedder)
+    except BaseException:
+        conn.close()
+        raise
+
+
+def _autoload_embedder(db: Path, mount: Path) -> Embedder:
+    """Reconstruct the embedder a file was created with from its lock row.
+
+    Limited to fastembed-bundled models: given the model name, FastembedEmbedder
+    can rebuild the embedder. Custom embedders that don't round-trip through a
+    string name should be passed explicitly via `Grimoire.open(..., embedder=)`.
+    """
+    stats = Grimoire.peek(db)
+    if stats is None:
+        raise GrimoireNotFound(f"Not a grimoire file: {db}")
+    try:
+        from grimoire.embedders import FastembedEmbedder
+    except ImportError as exc:
+        raise ImportError(
+            "Auto-loading an embedder requires the `fastembed` extra. "
+            "Install with: pip install grimoire[fastembed], "
+            "or pass embedder= explicitly to Grimoire.open."
+        ) from exc
+    return FastembedEmbedder(stats.model, cache_folder=mount / MODELS_DIRNAME)
 
 
 def _open_conn(path: str, *, check_same_thread: bool = True) -> sqlite3.Connection:
@@ -739,9 +972,10 @@ def _ulid_floor(dt: datetime) -> str:
 def _row_to_entry(row: tuple) -> Entry:
     return Entry(
         id=row[0],
-        kind=row[1],
-        content=row[2],
-        keywords=json.loads(row[3]) if row[3] is not None else None,
-        payload=json.loads(row[4]) if row[4] is not None else None,
-        threshold=row[5],
+        group_key=row[1],
+        group_ref=row[2],
+        content=row[3],
+        keywords=json.loads(row[4]) if row[4] is not None else None,
+        payload=json.loads(row[5]) if row[5] is not None else None,
+        threshold=row[6],
     )
