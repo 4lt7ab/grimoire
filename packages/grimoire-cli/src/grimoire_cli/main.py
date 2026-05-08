@@ -358,7 +358,10 @@ def search(
     group_key: GroupKey = None,
     after: After = None,
     before: Before = None,
-    k: Annotated[int, typer.Option(help="Number of results to return.")] = 10,
+    k: Annotated[
+        int,
+        typer.Option("-k", "--k", help="Number of results to return."),
+    ] = 10,
     dynamic_threshold: Annotated[
         bool,
         typer.Option(
