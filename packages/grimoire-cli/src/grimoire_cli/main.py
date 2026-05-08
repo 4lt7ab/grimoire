@@ -95,9 +95,13 @@ app = typer.Typer(
 )
 mount_app = typer.Typer(
     name="mount",
-    no_args_is_help=True,
+    invoke_without_command=True,
+    no_args_is_help=False,
     pretty_exceptions_enable=False,
-    help="Mount-level operations (destroy the entire mount, etc.).",
+    help=(
+        "Set up the mount and its default database, or operate on the mount "
+        "itself (e.g. `grimoire mount destroy`)."
+    ),
 )
 app.add_typer(mount_app)
 
@@ -126,45 +130,40 @@ def _callback(ctx: typer.Context, mount: Mount = None) -> None:
         _emit_info(_db_path(resolved, None), label="default database")
 
 
-@app.command()
-def init(
+@mount_app.callback(invoke_without_command=True)
+def _mount_callback(
     ctx: typer.Context,
-    db: Db = None,
     model: Annotated[
         str | None,
         typer.Option(
             help=(
-                "fastembed model name. Used only when creating a new database; "
-                "passing this against an existing database whose locked model "
-                "differs is an error."
-            ),
-        ),
-    ] = None,
-    description: Annotated[
-        str | None,
-        typer.Option(
-            "--description",
-            help=(
-                "Optional human-readable description recorded in the manifest. "
-                "Named databases only; ignored for the default database."
+                "fastembed model name. Used only when creating the default "
+                "database; passing this against an existing database whose "
+                "locked model differs is an error."
             ),
         ),
     ] = None,
 ) -> None:
-    """Create or verify a database and warm its embedder. One-time setup.
+    """Set up the mount with its default database.
 
-    Without --db, targets the default database at <mount>/grimoire.db.
-    With --db <name>, targets <mount>/<name>/grimoire.db and registers it
-    in the manifest.
+    With no subcommand, ensures the mount directory and shared model cache
+    exist, then creates the default database at <mount>/grimoire.db (or
+    validates the existing one). Idempotent — safe to re-run.
+
+    Subcommands operate on the mount as a whole. `grimoire mount destroy`
+    wipes the entire mount.
     """
+    if ctx.invoked_subcommand is not None:
+        return
+
     mount: Path = ctx.obj["mount"]
-    db_file = _db_path(mount, db)
+    db_file = _db_path(mount, None)
 
     stats = Grimoire.peek(db_file)
     if stats is not None and model is not None and model != stats.model:
         _fail(
             f"file is locked to model {stats.model!r}; "
-            f"drop --model or use a different --db / --mount"
+            f"drop --model or use a different --mount"
         )
 
     model_name = stats.model if stats else (model or DEFAULT_MODEL)
@@ -178,21 +177,76 @@ def init(
 
     try:
         if stats is None:
-            Grimoire.create(
-                db,
-                embedder=embedder,
-                mount=mount,
-                description=description,
-            ).close()
+            Grimoire.create(embedder=embedder, mount=mount).close()
         else:
-            # Idempotent re-init: validate the embedder against the existing
+            # Idempotent re-mount: validate the embedder against the existing
             # file via the file-level helper. `Grimoire.open` would auto-load
             # a second fastembed instance, which we already have in hand.
             _open_file(db_file, embedder=embedder).close()
     except GrimoireError as exc:
         _fail(str(exc))
 
-    _emit_info(db_file, label="default database" if db is None else f"database {db!r}")
+    _emit_info(db_file, label="default database")
+
+
+@app.command()
+def create(
+    ctx: typer.Context,
+    name: Annotated[
+        str,
+        typer.Argument(
+            help="Name of the new database. Lives at <mount>/<name>/grimoire.db."
+        ),
+    ],
+    model: Annotated[
+        str | None,
+        typer.Option(
+            help=(
+                "fastembed model name to lock the new database to. "
+                f"Defaults to {DEFAULT_MODEL!r}."
+            ),
+        ),
+    ] = None,
+    description: Annotated[
+        str | None,
+        typer.Option(
+            "--description",
+            help="Optional human-readable description recorded in the manifest.",
+        ),
+    ] = None,
+) -> None:
+    """Create a new named database in the mount.
+
+    Strict: errors if a database with this name already exists. The mount
+    directory and shared model cache are created on demand if missing — you
+    don't need to run `grimoire mount` first when you only want named DBs.
+    """
+    mount: Path = ctx.obj["mount"]
+    db_file = _db_path(mount, name)
+    if db_file.exists():
+        _fail(f"database {name!r} already exists at {db_file}")
+
+    model_name = model or DEFAULT_MODEL
+    try:
+        from grimoire.embedders import FastembedEmbedder
+
+        embedder = FastembedEmbedder(model_name, cache_folder=mount / MODELS_DIRNAME)
+    except ImportError as exc:
+        _fail(str(exc))
+
+    try:
+        Grimoire.create(
+            name,
+            embedder=embedder,
+            mount=mount,
+            description=description,
+        ).close()
+    except GrimoireError as exc:
+        _fail(str(exc))
+    except InvalidMount as exc:
+        _fail(str(exc))
+
+    _emit_info(db_file, label=f"database {name!r}")
 
 
 @app.command()

@@ -22,10 +22,10 @@ def _new_mount(tmp_path: Path, shared: Path, name: str = "store") -> Path:
     return mount
 
 
-def _init(mount: Path) -> None:
-    """Run `grimoire init` on a mount; assumes fastembed is available."""
+def _mount(mount: Path) -> None:
+    """Run `grimoire mount` on a mount; assumes fastembed is available."""
     pytest.importorskip("fastembed")
-    result = runner.invoke(app, ["--mount", str(mount), "init"])
+    result = runner.invoke(app, ["--mount", str(mount), "mount"])
     assert result.exit_code == 0, result.output
 
 
@@ -68,7 +68,7 @@ def _json_lines(output: str) -> list[dict]:
 def populated_mount(tmp_path, _shared_models_cache):
     """A mount with a few entries already added — for read-side tests."""
     mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
+    _mount(mount)
     for content, group_key, group_ref in [
         ("the moon is full", "note", None),
         ("dragons fly at midnight", "note", "dragon-001"),
@@ -89,7 +89,8 @@ def test_help_lists_new_command_set():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     for cmd in (
-        "init",
+        "mount",
+        "create",
         "ls",
         "query",
         "search",
@@ -100,7 +101,6 @@ def test_help_lists_new_command_set():
         "update",
         "delete",
         "get",
-        "mount",
     ):
         assert cmd in result.output
 
@@ -109,6 +109,7 @@ def test_help_does_not_list_removed_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     for removed in (
+        "init",
         "ingest",
         "vector-search",
         "keyword-search",
@@ -137,12 +138,12 @@ def test_no_args_emits_info_for_existing_grimoire(populated_mount):
     assert "model" in parsed and "dimension" in parsed
 
 
-# ---------- init ----------
+# ---------- mount (creates mount + default DB) ----------
 
 
-def test_init_creates_db_and_prints_info(tmp_path, _shared_models_cache):
+def test_mount_creates_db_and_prints_info(tmp_path, _shared_models_cache):
     mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
+    _mount(mount)
     assert (mount / "grimoire.db").exists()
     result = runner.invoke(app, ["--mount", str(mount)])
     parsed = _last_json_line(result.output)
@@ -150,21 +151,74 @@ def test_init_creates_db_and_prints_info(tmp_path, _shared_models_cache):
     assert parsed["groups"] == {}
 
 
-def test_init_creates_mount_dir_if_missing(tmp_path, _shared_models_cache):
+def test_mount_creates_mount_dir_if_missing(tmp_path, _shared_models_cache):
     pytest.importorskip("fastembed")
     fresh = tmp_path / "fresh"
     assert not fresh.exists()
     fresh.mkdir(parents=True)
     (fresh / "models").symlink_to(_shared_models_cache, target_is_directory=True)
-    result = runner.invoke(app, ["--mount", str(fresh), "init"])
+    result = runner.invoke(app, ["--mount", str(fresh), "mount"])
     assert result.exit_code == 0, result.output
     assert (fresh / "grimoire.db").exists()
 
 
-def test_init_is_idempotent(tmp_path, _shared_models_cache):
+def test_mount_is_idempotent(tmp_path, _shared_models_cache):
     mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
-    _init(mount)
+    _mount(mount)
+    _mount(mount)
+
+
+# ---------- create (named DBs only) ----------
+
+
+def test_create_named_db_lives_in_subdir(populated_mount, _shared_models_cache):
+    pytest.importorskip("fastembed")
+    result = runner.invoke(app, ["--mount", str(populated_mount), "create", "spells"])
+    assert result.exit_code == 0, result.output
+    assert (populated_mount / "spells" / "grimoire.db").exists()
+    # Default DB unaffected.
+    assert (populated_mount / "grimoire.db").exists()
+
+
+def test_create_errors_on_duplicate(populated_mount, _shared_models_cache):
+    pytest.importorskip("fastembed")
+    runner.invoke(app, ["--mount", str(populated_mount), "create", "alpha"])
+    result = runner.invoke(app, ["--mount", str(populated_mount), "create", "alpha"])
+    assert result.exit_code != 0
+    assert "already exists" in result.output
+
+
+def test_create_creates_mount_lazily(tmp_path, _shared_models_cache):
+    """`grimoire create` works without a prior `grimoire mount`."""
+    pytest.importorskip("fastembed")
+    fresh = tmp_path / "fresh"
+    assert not fresh.exists()
+    fresh.mkdir(parents=True)
+    (fresh / "models").symlink_to(_shared_models_cache, target_is_directory=True)
+    result = runner.invoke(app, ["--mount", str(fresh), "create", "alpha"])
+    assert result.exit_code == 0, result.output
+    assert (fresh / "alpha" / "grimoire.db").exists()
+    # No default DB was implicitly created.
+    assert not (fresh / "grimoire.db").exists()
+
+
+def test_create_records_description_in_manifest(populated_mount, _shared_models_cache):
+    pytest.importorskip("fastembed")
+    result = runner.invoke(
+        app,
+        [
+            "--mount",
+            str(populated_mount),
+            "create",
+            "annotated",
+            "--description",
+            "the annotated one",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    manifest = (populated_mount / "grimoire.toml").read_text()
+    assert "annotated" in manifest
+    assert "the annotated one" in manifest
 
 
 # ---------- add / get / delete ----------
@@ -551,7 +605,7 @@ def test_search_filters_by_group_key(populated_mount):
 
 def test_import_records_into_grimoire(tmp_path, _shared_models_cache):
     mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
+    _mount(mount)
     data = tmp_path / "data.jsonl"
     data.write_text(
         "\n".join(
@@ -577,7 +631,7 @@ def test_import_records_into_grimoire(tmp_path, _shared_models_cache):
 def test_import_collision_aborts(tmp_path, _shared_models_cache):
     """Adding a record whose (group_key, group_ref) already exists fails loudly."""
     mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
+    _mount(mount)
     runner.invoke(
         app,
         [
@@ -602,7 +656,7 @@ def test_import_collision_aborts(tmp_path, _shared_models_cache):
 
 def test_import_rejects_record_missing_content(tmp_path, _shared_models_cache):
     mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
+    _mount(mount)
     data = tmp_path / "data.jsonl"
     data.write_text(json.dumps({"group_key": "note"}) + "\n")
     result = runner.invoke(app, ["--mount", str(mount), "import", str(data)])
@@ -612,7 +666,7 @@ def test_import_rejects_record_missing_content(tmp_path, _shared_models_cache):
 
 def test_import_rejects_unknown_field(tmp_path, _shared_models_cache):
     mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
+    _mount(mount)
     data = tmp_path / "data.jsonl"
     data.write_text(json.dumps({"content": "x", "extra": "boom"}) + "\n")
     result = runner.invoke(app, ["--mount", str(mount), "import", str(data)])
@@ -621,7 +675,7 @@ def test_import_rejects_unknown_field(tmp_path, _shared_models_cache):
 
 def test_import_empty_file_is_noop(tmp_path, _shared_models_cache):
     mount = _new_mount(tmp_path, _shared_models_cache)
-    _init(mount)
+    _mount(mount)
     data = tmp_path / "data.jsonl"
     data.write_text("")
     result = runner.invoke(app, ["--mount", str(mount), "import", str(data)])
@@ -675,7 +729,7 @@ def test_export_then_import_round_trips_content(
     out = tmp_path / "round.jsonl"
     runner.invoke(app, ["--mount", str(populated_mount), "export", "-o", str(out)])
     fresh = _new_mount(tmp_path, _shared_models_cache, name="fresh")
-    _init(fresh)
+    _mount(fresh)
     result = runner.invoke(app, ["--mount", str(fresh), "import", str(out)])
     assert result.exit_code == 0, result.output
     listing = _json_lines(runner.invoke(app, ["--mount", str(fresh), "query"]).output)
@@ -732,9 +786,7 @@ def test_destroy_named_db_removes_subdir_and_manifest_entry(
     """`destroy NAME` removes the named DB and its manifest entry."""
     pytest.importorskip("fastembed")
     # Create a named DB alongside the default.
-    init_named = runner.invoke(
-        app, ["--mount", str(populated_mount), "init", "--db", "side"]
-    )
+    init_named = runner.invoke(app, ["--mount", str(populated_mount), "create", "side"])
     assert init_named.exit_code == 0, init_named.output
     assert (populated_mount / "side" / "grimoire.db").exists()
 
@@ -798,8 +850,8 @@ def test_ls_lists_default_when_only_default_present(populated_mount):
 
 def test_ls_lists_default_and_named(populated_mount, _shared_models_cache):
     pytest.importorskip("fastembed")
-    runner.invoke(app, ["--mount", str(populated_mount), "init", "--db", "alpha"])
-    runner.invoke(app, ["--mount", str(populated_mount), "init", "--db", "beta"])
+    runner.invoke(app, ["--mount", str(populated_mount), "create", "alpha"])
+    runner.invoke(app, ["--mount", str(populated_mount), "create", "beta"])
     result = runner.invoke(app, ["--mount", str(populated_mount), "ls"])
     assert result.exit_code == 0, result.output
     rows = _json_lines(result.output)
@@ -823,7 +875,7 @@ def test_named_db_init_create_search_round_trip(populated_mount, _shared_models_
     """A named DB lives alongside the default and is independently addressable."""
     pytest.importorskip("fastembed")
     init_named = runner.invoke(
-        app, ["--mount", str(populated_mount), "init", "--db", "spells"]
+        app, ["--mount", str(populated_mount), "create", "spells"]
     )
     assert init_named.exit_code == 0, init_named.output
 
