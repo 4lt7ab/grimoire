@@ -1,6 +1,6 @@
 {
   "name": "grimoire",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "description": "Wire the grimoire CLI — a SQLite + sqlite-vec semantic datastore — into Claude Code. Ships a setup skill that checks the install, initializes a mount, and drops a generic CLI cheat sheet into your global CLAUDE.md so future sessions don't burn tokens rediscovering grimoire's surface.",
   "author": {
     "name": "4lt7ab"
