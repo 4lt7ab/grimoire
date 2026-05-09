@@ -1,0 +1,20 @@
+{
+  "name": "grimoire",
+  "owner": {
+    "name": "4lt7ab"
+  },
+  "description": "Plugin marketplace for the grimoire ecosystem. Distributes the in-repo grimoire plugin — a setup skill that wires the grimoire CLI into Claude Code and drops a generic CLI cheat sheet into your global CLAUDE.md.",
+  "plugins": [
+    {
+      "name": "grimoire",
+      "source": "./plugin",
+      "description": "Wire the grimoire CLI — a SQLite + sqlite-vec semantic datastore — into Claude Code. Ships a setup skill that checks the install, initializes a mount, and drops a generic CLI cheat sheet into your global CLAUDE.md so future sessions don't burn tokens rediscovering grimoire's surface.",
+      "author": {
+        "name": "4lt7ab"
+      },
+      "homepage": "https://github.com/4lt7ab/grimoire",
+      "repository": "https://github.com/4lt7ab/grimoire",
+      "tags": ["grimoire", "semantic-search", "sqlite", "memory", "cli", "setup"]
+    }
+  ]
+}
