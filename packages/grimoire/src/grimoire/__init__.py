@@ -1,24 +1,25 @@
 from grimoire.core import Grimoire
 from grimoire.embedder import Embedder
 from grimoire.errors import (
-    DatabaseExists,
+    GrimoireDestroyed,
     GrimoireError,
     GrimoireMismatch,
     GrimoireNotFound,
     InvalidEmbedder,
     InvalidMount,
     MountDestroyed,
+    MountNotFound,
     SchemaVersionError,
 )
 from grimoire.models import Entry, Stats
 from grimoire.mount import DbInfo, Mount
 
 __all__ = [
-    "DatabaseExists",
     "DbInfo",
     "Embedder",
     "Entry",
     "Grimoire",
+    "GrimoireDestroyed",
     "GrimoireError",
     "GrimoireMismatch",
     "GrimoireNotFound",
@@ -26,6 +27,7 @@ __all__ = [
     "InvalidMount",
     "Mount",
     "MountDestroyed",
+    "MountNotFound",
     "SchemaVersionError",
     "Stats",
 ]

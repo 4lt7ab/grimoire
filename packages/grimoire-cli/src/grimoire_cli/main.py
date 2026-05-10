@@ -11,11 +11,8 @@ from grimoire import (
     GrimoireError,
     GrimoireNotFound,
     InvalidMount,
-)
-from grimoire.mount import (
-    MODELS_DIRNAME,
-    _db_path,
-    _resolve_mount,
+    Mount,
+    MountNotFound,
 )
 
 from grimoire_cli.output import (
@@ -49,7 +46,7 @@ REQUIRED_FIELDS: set[str] = set()
 
 # Reusable annotations — every command shares the mount lookup, and read commands
 # share filters/paging. Defining them once keeps help text in lockstep.
-Mount = Annotated[
+MountOpt = Annotated[
     Path | None,
     typer.Option(
         "--mount",
@@ -130,7 +127,7 @@ app.add_typer(entry_app)
 @app.callback(invoke_without_command=True)
 def _callback(
     ctx: typer.Context,
-    mount: Mount = None,
+    mount: MountOpt = None,
     raw: Annotated[
         bool,
         typer.Option(
@@ -158,10 +155,10 @@ def _callback(
     Read commands (query, search, get) print a pretty table at the terminal
     and JSONL when piped. Pass --raw to force JSONL at the terminal.
     """
-    resolved = _resolve_mount(mount)
+    resolved = Mount.resolve(mount)
     ctx.obj = {"mount": resolved, "raw": raw}
     if ctx.invoked_subcommand is None:
-        _emit_info(_db_path(resolved, None), label="default database", raw=raw)
+        _emit_info(resolved, name=None, label="default database", raw=raw)
 
 
 @mount_app.callback(invoke_without_command=True)
@@ -193,33 +190,31 @@ def _mount_callback(
         return
 
     mount_path: Path = ctx.obj["mount"]
-    handle = Grimoire.mount(mount_path)  # ensures mount root + models/ exist
+    mount = Mount(mount_path, create=True)  # ensures mount root + models/ exist
 
-    if not handle.has(None):
+    if not mount.has():
         # No default DB yet — create it. This is the only path that needs
         # fastembed at all; re-runs against an existing default DB skip it.
         model_name = model or DEFAULT_MODEL
         try:
             from grimoire.embedders import FastembedEmbedder
 
-            embedder = FastembedEmbedder(
-                model_name, cache_folder=mount_path / MODELS_DIRNAME
-            )
+            embedder = FastembedEmbedder(model_name, cache_folder=mount.models_path)
         except ImportError as exc:
             _fail(str(exc))
         try:
-            Grimoire.create(embedder=embedder, mount=mount_path).close()
+            Grimoire(mount=mount, embedder=embedder).close()
         except GrimoireError as exc:
             _fail(str(exc))
     elif model is not None:
-        stats = handle.peek(None)
+        stats = mount.peek()
         if stats is not None and model != stats.model:
             _fail(
                 f"file is locked to model {stats.model!r}; "
                 f"drop --model or use a different --mount"
             )
 
-    _emit_listing(handle, raw=ctx.obj["raw"])
+    _emit_listing(mount, raw=ctx.obj["raw"])
 
 
 @app.command()
@@ -254,32 +249,36 @@ def create(
     directory and shared model cache are created on demand if missing — you
     don't need to run `grimoire mount` first when you only want named DBs.
     """
-    mount: Path = ctx.obj["mount"]
-    db_file = _db_path(mount, name)
-    if db_file.exists():
-        _fail(f"database {name!r} already exists at {db_file}")
+    mount_path: Path = ctx.obj["mount"]
+    try:
+        mount = Mount(mount_path, create=True)
+    except InvalidMount as exc:
+        _fail(str(exc))
+    try:
+        if mount.has(name):
+            _fail(f"database {name!r} already exists at {mount.path_for(name)}")
+    except InvalidMount as exc:
+        _fail(str(exc))
 
     model_name = model or DEFAULT_MODEL
     try:
         from grimoire.embedders import FastembedEmbedder
 
-        embedder = FastembedEmbedder(model_name, cache_folder=mount / MODELS_DIRNAME)
+        embedder = FastembedEmbedder(model_name, cache_folder=mount.models_path)
     except ImportError as exc:
         _fail(str(exc))
 
     try:
-        Grimoire.create(
+        Grimoire(
             name,
-            embedder=embedder,
             mount=mount,
+            embedder=embedder,
             description=description,
         ).close()
-    except GrimoireError as exc:
-        _fail(str(exc))
-    except InvalidMount as exc:
+    except (GrimoireError, InvalidMount) as exc:
         _fail(str(exc))
 
-    _emit_info(db_file, label=f"database {name!r}", raw=ctx.obj["raw"])
+    _emit_info(mount_path, name=name, label=f"database {name!r}", raw=ctx.obj["raw"])
 
 
 @app.command()
@@ -290,7 +289,13 @@ def ls(ctx: typer.Context) -> None:
     alphabetical order. Pretty table at the terminal; JSONL when piped or
     with --raw — one object per database (name null for default).
     """
-    _emit_listing(Grimoire.mount(ctx.obj["mount"]), raw=ctx.obj["raw"])
+    mount_path: Path = ctx.obj["mount"]
+    try:
+        mount = Mount(mount_path)
+    except MountNotFound:
+        emit_listing([], raw=ctx.obj["raw"])
+        return
+    _emit_listing(mount, raw=ctx.obj["raw"])
 
 
 @app.command()
@@ -448,7 +453,7 @@ def import_records(
                 typer.echo(f"  imported {total}...", err=True)
                 last_milestone = milestone
 
-    typer.echo(f"Imported {len(records)} records into {_db_path(mount, db)}")
+    typer.echo(f"Imported {len(records)} records into {Mount(mount).path_for(db)}")
 
 
 @entry_app.command()
@@ -531,20 +536,28 @@ def destroy(
     NAME, drops <mount>/<name>/grimoire.db and removes its manifest entry.
     Idempotent — missing files or manifest entries are tolerated.
     """
-    mount: Path = ctx.obj["mount"]
-    db_file = _db_path(mount, name)
-    if not db_file.exists():
-        label = "default database" if name is None else f"database {name!r}"
-        typer.echo(f"Nothing to destroy: no {label} at {db_file}")
+    mount_path: Path = ctx.obj["mount"]
+    label = "default database" if name is None else f"database {name!r}"
+    try:
+        mount = Mount(mount_path)
+    except MountNotFound:
+        typer.echo(f"Nothing to destroy: no mount at {mount_path}")
         return
+    try:
+        if not mount.has(name):
+            typer.echo(f"Nothing to destroy: no {label} at {mount.path_for(name)}")
+            return
+    except InvalidMount as exc:
+        _fail(str(exc))
+    db_file = mount.path_for(name)
     if not yes:
-        label = "the default database" if name is None else f"database {name!r}"
+        prompt_label = "the default database" if name is None else f"database {name!r}"
         typer.confirm(
-            f"Permanently destroy {label} at {db_file}?",
+            f"Permanently destroy {prompt_label} at {db_file}?",
             abort=True,
         )
     try:
-        Grimoire.destroy(name, mount=mount)
+        mount.drop(name)
     except (GrimoireError, InvalidMount) as exc:
         _fail(str(exc))
     if name is None:
@@ -569,18 +582,20 @@ def mount_destroy(
 
     There is no undo. Use `grimoire destroy [NAME]` for per-database removal.
     """
-    mount: Path = ctx.obj["mount"]
-    if not mount.exists():
-        typer.echo(f"Nothing to destroy: {mount} does not exist")
+    mount_path: Path = ctx.obj["mount"]
+    try:
+        mount = Mount(mount_path)
+    except MountNotFound:
+        typer.echo(f"Nothing to destroy: {mount_path} does not exist")
         return
     if not yes:
         typer.confirm(
-            f"Permanently destroy the entire mount at {mount} and everything under it?",
+            f"Permanently destroy the entire mount at {mount_path} "
+            f"and everything under it?",
             abort=True,
         )
-    handle = Grimoire.mount(mount)
-    handle.destroy()
-    typer.echo(f"Destroyed mount at {mount}")
+    mount.destroy()
+    typer.echo(f"Destroyed mount at {mount_path}")
 
 
 @entry_app.command()
@@ -757,34 +772,36 @@ def delete(
 def _open_grimoire(mount: Path, name: str | None) -> Grimoire:
     """Open a database under `mount`, auto-loading its embedder.
 
-    Surfaces `GrimoireNotFound` as a friendly "run grimoire init first" error
-    and `InvalidMount` as a usage error for malformed names.
+    Surfaces `GrimoireNotFound` as a friendly "create it first" error and
+    `InvalidMount` as a usage error for malformed names.
     """
     try:
-        return Grimoire.open(name, mount=mount)
+        return Grimoire(name, mount=mount)
     except GrimoireNotFound:
         label = "default database" if name is None else f"database {name!r}"
-        _fail(
-            f"no {label} at {_db_path(mount, name)}; "
-            f"run 'grimoire init{' --db ' + name if name else ''}' first"
-        )
+        suggest = "grimoire mount" if name is None else f"grimoire create {name}"
+        _fail(f"no {label} in {mount}; run '{suggest}' first")
     except ImportError as exc:
         _fail(str(exc))
     except (GrimoireError, InvalidMount) as exc:
         _fail(str(exc))
 
 
-def _emit_info(db: Path, *, label: str, raw: bool) -> None:
+def _emit_info(mount_path: Path, *, name: str | None, label: str, raw: bool) -> None:
     """Print a database summary; pretty at TTY, JSON otherwise. Errors if missing."""
-    stats = Grimoire.peek(db)
+    try:
+        mount = Mount(mount_path)
+    except MountNotFound:
+        _fail(f"No grimoire ({label}) at {mount_path}")
+    stats = mount.peek(name)
     if stats is None:
-        _fail(f"No grimoire ({label}) at {db}")
-    emit_db_info(db, stats, raw=raw)
+        _fail(f"No grimoire ({label}) at {mount.path_for(name)}")
+    emit_db_info(mount.path_for(name), stats, raw=raw)
 
 
-def _emit_listing(handle, *, raw: bool) -> None:
+def _emit_listing(mount: Mount, *, raw: bool) -> None:
     """Print one row per database in the mount; shared by `mount` and `ls`."""
-    emit_listing(handle.list(), raw=raw)
+    emit_listing(mount.list(), raw=raw)
 
 
 def _load_records(path: Path) -> list[dict]:

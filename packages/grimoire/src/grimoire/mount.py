@@ -18,18 +18,20 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import tomllib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import tomli_w
 
-from grimoire.errors import InvalidMount, MountDestroyed
-
-if TYPE_CHECKING:
-    from grimoire.models import Stats
+from grimoire.errors import (
+    InvalidMount,
+    MountDestroyed,
+    MountNotFound,
+)
+from grimoire.models import Stats
 
 DEFAULT_MOUNT_DIRNAME = ".grimoire"
 MANIFEST_FILENAME = "grimoire.toml"
@@ -64,8 +66,15 @@ class DbInfo:
     is_default: bool
 
 
-def _resolve_mount(path: str | Path | None) -> Path:
-    """Resolve the mount path. Order: explicit arg > GRIMOIRE_MOUNT env > default."""
+def _resolve_mount(path: str | Path | Mount | None) -> Path:
+    """Resolve a mount-shaped argument to a concrete filesystem path.
+
+    Accepts a `Mount` handle (returns its path; triggers the destroyed-handle
+    check), an explicit string/Path, or None — in which case the order is
+    `GRIMOIRE_MOUNT` env var > default `~/.grimoire`.
+    """
+    if isinstance(path, Mount):
+        return path.path
     if path is not None:
         return Path(path).expanduser()
     env = os.environ.get("GRIMOIRE_MOUNT")
@@ -133,15 +142,77 @@ def _ensure_mount_dirs(mount: Path) -> None:
     (mount / MODELS_DIRNAME).mkdir(parents=True, exist_ok=True)
 
 
+def _peek_file(path: Path) -> Stats | None:
+    """Read metadata + counts from a grimoire file without opening it for use.
+
+    Returns None if the file is missing or not a grimoire database. Does not
+    load sqlite-vec or require an embedder, so it is safe for inspection
+    (mount listings, model auto-detect) before deciding how to open.
+    """
+    if not path.exists():
+        return None
+    try:
+        conn = sqlite3.connect(path)
+        try:
+            row = conn.execute(
+                "SELECT model, dimension FROM grimoire WHERE id = 1"
+            ).fetchone()
+            if row is None:
+                return None
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            count = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+            group_key_rows = conn.execute(
+                "SELECT group_key, COUNT(*) FROM entries "
+                "GROUP BY group_key ORDER BY group_key"
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return Stats(
+        model=row[0],
+        dimension=row[1],
+        schema_version=version,
+        entry_count=count,
+        groups=dict(group_key_rows),
+    )
+
+
 class Mount:
     """A handle to a grimoire mount directory.
 
-    Construct via `Grimoire.mount(path)` rather than directly. Operations on
-    a destroyed handle raise `MountDestroyed`.
+    `Mount(path)` attaches to an existing mount directory and raises
+    `MountNotFound` if the path does not exist. `Mount(path, create=True)`
+    materializes the mount root and the shared `models/` cache if either is
+    missing — idempotent. Operations on a destroyed handle raise
+    `MountDestroyed`.
     """
 
-    def __init__(self, path: Path) -> None:
-        self._path = path
+    @staticmethod
+    def resolve(path: str | Path | Mount | None = None) -> Path:
+        """Resolve a mount-shaped argument to a filesystem path without touching disk.
+
+        Order: explicit `path` arg (Mount handle, str, or Path) > `GRIMOIRE_MOUNT`
+        env var > default `~/.grimoire`. Useful when a caller needs the resolved
+        path before deciding whether to construct a handle (e.g. CLIs that may
+        be about to create the mount with `Mount(path, create=True)`).
+        """
+        return _resolve_mount(path)
+
+    def __init__(self, path: str | Path, *, create: bool = False) -> None:
+        resolved = Path(path).expanduser()
+        if create:
+            if resolved.exists() and not resolved.is_dir():
+                raise InvalidMount(
+                    f"Mount path {resolved} exists and is not a directory"
+                )
+            _ensure_mount_dirs(resolved)
+        else:
+            if not resolved.exists():
+                raise MountNotFound(f"No mount directory at {resolved}")
+            if not resolved.is_dir():
+                raise InvalidMount(f"Mount path {resolved} is not a directory")
+        self._path = resolved
         self._destroyed = False
 
     @property
@@ -149,20 +220,26 @@ class Mount:
         self._check_alive()
         return self._path
 
+    @property
+    def models_path(self) -> Path:
+        """Path to the shared embedder cache directory inside the mount."""
+        self._check_alive()
+        return self._path / MODELS_DIRNAME
+
     def _check_alive(self) -> None:
         if self._destroyed:
             raise MountDestroyed(
                 f"Mount at {self._path} has been destroyed; handle is unusable"
             )
 
-    def has(self, name: str | None) -> bool:
+    def has(self, name: str | None = None) -> bool:
         """True if a database with this name exists in the mount."""
         self._check_alive()
         if name is not None:
             _validate_name(name)
         return _db_path(self._path, name).exists()
 
-    def path_for(self, name: str | None) -> Path:
+    def path_for(self, name: str | None = None) -> Path:
         """Resolve the SQLite file path for `name` in this mount.
 
         `None` resolves to the default at `<mount>/grimoire.db`; a name to
@@ -174,15 +251,12 @@ class Mount:
             _validate_name(name)
         return _db_path(self._path, name)
 
-    def peek(self, name: str | None) -> Stats | None:
+    def peek(self, name: str | None = None) -> Stats | None:
         """Return Stats for a database without opening it. None if missing."""
-        # Imported lazily to avoid the circular core <-> mount import.
-        from grimoire.core import Grimoire
-
         self._check_alive()
         if name is not None:
             _validate_name(name)
-        return Grimoire.peek(_db_path(self._path, name))
+        return _peek_file(_db_path(self._path, name))
 
     def list(self) -> list[DbInfo]:
         """Return DbInfo for every database in the mount.
@@ -192,13 +266,11 @@ class Mount:
         whose files are missing are silently skipped — the goal is reflecting
         actual on-disk state, not the manifest's wishes.
         """
-        from grimoire.core import Grimoire
-
         self._check_alive()
         infos: list[DbInfo] = []
 
         default_path = _db_path(self._path, None)
-        default_stats = Grimoire.peek(default_path)
+        default_stats = _peek_file(default_path)
         if default_stats is not None:
             infos.append(
                 DbInfo(
@@ -214,7 +286,7 @@ class Mount:
         manifest = _read_manifest(self._path)
         for name in sorted(manifest["databases"].keys()):
             db_path = _db_path(self._path, name)
-            stats = Grimoire.peek(db_path)
+            stats = _peek_file(db_path)
             if stats is None:
                 continue
             infos.append(
@@ -228,6 +300,37 @@ class Mount:
                 )
             )
         return infos
+
+    def drop(self, name: str | None = None) -> None:
+        """Delete one database from the mount.
+
+        `None` removes the default DB; a name removes the named DB and its
+        subdirectory and drops the manifest entry. Idempotent: missing files
+        or manifest entries are silently tolerated, since the goal state is
+        "gone."
+        """
+        self._check_alive()
+        if name is not None:
+            _validate_name(name)
+
+        db = _db_path(self._path, name)
+        # Unlink the SQLite file plus its WAL/SHM siblings, in case the file
+        # was open elsewhere and the journal hasn't been folded back in.
+        for sibling in (
+            db,
+            db.parent / (db.name + "-wal"),
+            db.parent / (db.name + "-shm"),
+            db.parent / (db.name + "-journal"),
+        ):
+            sibling.unlink(missing_ok=True)
+
+        if name is not None:
+            subdir = self._path / name
+            # Best-effort: remove the now-empty subdir. Leave it alone if the
+            # caller has put other files in there.
+            if subdir.exists() and not any(subdir.iterdir()):
+                subdir.rmdir()
+            _unregister(self._path, name)
 
     def destroy(self) -> None:
         """Delete the entire mount directory and invalidate this handle.

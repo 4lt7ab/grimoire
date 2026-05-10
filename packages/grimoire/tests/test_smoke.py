@@ -11,9 +11,9 @@ from grimoire import (
     GrimoireMismatch,
     GrimoireNotFound,
     InvalidEmbedder,
+    Mount,
     Stats,
 )
-from grimoire.core import _create_file, _open_file
 from ulid import ULID
 
 
@@ -58,18 +58,16 @@ class CountingEmbedder(FakeEmbedder):
 
 
 def test_init_creates_file_idempotently(tmp_path):
-    db = tmp_path / "store.db"
-    _create_file(db, embedder=FakeEmbedder()).close()
-    _create_file(db, embedder=FakeEmbedder()).close()
-    assert db.exists()
+    Grimoire(mount=tmp_path, embedder=FakeEmbedder()).close()
+    Grimoire(mount=tmp_path, embedder=FakeEmbedder()).close()
+    assert (tmp_path / "grimoire.db").exists()
 
 
 def test_init_enables_wal_journal_mode(tmp_path):
-    db = tmp_path / "store.db"
-    _create_file(db, embedder=FakeEmbedder()).close()
+    Grimoire(mount=tmp_path, embedder=FakeEmbedder()).close()
     # Verify via a raw connection — the journal mode persists in the db
     # header, so any subsequent open inherits it.
-    raw = sqlite3.connect(db)
+    raw = sqlite3.connect(tmp_path / "grimoire.db")
     try:
         mode = raw.execute("PRAGMA journal_mode").fetchone()[0]
     finally:
@@ -78,21 +76,19 @@ def test_init_enables_wal_journal_mode(tmp_path):
 
 
 def test_embedder_model_mismatch_raises(tmp_path):
-    db = tmp_path / "store.db"
-    _create_file(db, embedder=FakeEmbedder(model="alpha")).close()
+    Grimoire(mount=tmp_path, embedder=FakeEmbedder(model="alpha")).close()
     with pytest.raises(GrimoireMismatch):
-        _open_file(db, embedder=FakeEmbedder(model="beta"))
+        Grimoire(mount=tmp_path, embedder=FakeEmbedder(model="beta"))
 
 
 def test_embedder_dimension_mismatch_raises(tmp_path):
-    db = tmp_path / "store.db"
-    _create_file(db, embedder=FakeEmbedder(dimension=8)).close()
+    Grimoire(mount=tmp_path, embedder=FakeEmbedder(dimension=8)).close()
     with pytest.raises(GrimoireMismatch):
-        _open_file(db, embedder=FakeEmbedder(dimension=16))
+        Grimoire(mount=tmp_path, embedder=FakeEmbedder(dimension=16))
 
 
 def test_add_returns_entry(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         entry = g.add(group_key="note", vector_text="the moon is full")
         assert isinstance(entry, Entry)
         assert entry.group_key == "note"
@@ -100,7 +96,7 @@ def test_add_returns_entry(tmp_path):
 
 
 def test_search_finds_exact_match_first(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_key="note", vector_text="the moon is full")
         g.add(group_key="note", vector_text="dragons fly at midnight")
         g.add(group_key="note", vector_text="potions bubble in the cauldron")
@@ -112,7 +108,7 @@ def test_search_finds_exact_match_first(tmp_path):
 
 
 def test_search_filters_by_group_key(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_key="spell", vector_text="lumos")
         g.add(group_key="potion", vector_text="lumos")
 
@@ -122,7 +118,7 @@ def test_search_filters_by_group_key(tmp_path):
 
 
 def test_dynamic_threshold_drops_low_match(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_key="note", vector_text="the moon is full", threshold=0.0)
         g.add(group_key="note", vector_text="dragons fly at midnight", threshold=0.0)
 
@@ -134,30 +130,27 @@ def test_dynamic_threshold_drops_low_match(tmp_path):
         assert gated[0].vector_text == "the moon is full"
 
 
-def test_two_files_are_independent(tmp_path):
-    a_path = tmp_path / "a.db"
-    b_path = tmp_path / "b.db"
-    with _create_file(a_path, embedder=FakeEmbedder()) as a:
+def test_two_dbs_are_independent(tmp_path):
+    with Grimoire("a", mount=tmp_path, embedder=FakeEmbedder()) as a:
         a.add(group_key="note", vector_text="alpha")
-    with _create_file(b_path, embedder=FakeEmbedder()) as b:
+    with Grimoire("b", mount=tmp_path, embedder=FakeEmbedder()) as b:
         b.add(group_key="note", vector_text="beta")
         results = b.vector_search("alpha", k=10)
         assert all(r.vector_text != "alpha" for r in results)
 
 
 def test_data_persists_across_reopens(tmp_path):
-    db = tmp_path / "store.db"
-    with _create_file(db, embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_key="note", vector_text="the moon is full")
 
-    with _open_file(db, embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         results = g.vector_search("the moon is full", k=1)
         assert len(results) == 1
         assert results[0].vector_text == "the moon is full"
 
 
 def test_get_returns_entry(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = g.add(group_key="note", vector_text="lumos")
         fetched = g.get(added.id)
         assert fetched is not None
@@ -166,12 +159,12 @@ def test_get_returns_entry(tmp_path):
 
 
 def test_get_returns_none_for_missing_id(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         assert g.get("01HXXXXXXXXXXXXXXXXXXXXXXX") is None
 
 
 def test_list_returns_all_entries_in_chronological_order(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         a = g.add(group_key="note", vector_text="first")
         b = g.add(group_key="note", vector_text="second")
         c = g.add(group_key="note", vector_text="third")
@@ -180,7 +173,7 @@ def test_list_returns_all_entries_in_chronological_order(tmp_path):
 
 
 def test_list_filters_by_group_key(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_key="spell", vector_text="lumos")
         g.add(group_key="potion", vector_text="felix felicis")
         g.add(group_key="spell", vector_text="alohomora")
@@ -191,7 +184,7 @@ def test_list_filters_by_group_key(tmp_path):
 
 
 def test_list_paginates_via_after_id(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = [g.add(group_key="note", vector_text=f"e{i}") for i in range(5)]
 
         page1 = g.list(limit=2)
@@ -208,14 +201,14 @@ def test_list_paginates_via_after_id(tmp_path):
 
 
 def test_list_respects_limit(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         for i in range(5):
             g.add(group_key="note", vector_text=f"e{i}")
         assert len(g.list(limit=3)) == 3
 
 
 def test_delete_removes_entry_and_vector(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = g.add(group_key="note", vector_text="ephemeral")
         assert g.delete(added.id) is True
         assert g.get(added.id) is None
@@ -226,7 +219,7 @@ def test_delete_removes_entry_and_vector(tmp_path):
 
 
 def test_delete_returns_false_for_missing_id(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         assert g.delete("01HXXXXXXXXXXXXXXXXXXXXXXX") is False
 
 
@@ -270,43 +263,43 @@ class _EmptyModelEmbedder:
 
 
 def test_embedder_with_non_int_dimension_rejected(tmp_path):
-    db = tmp_path / "store.db"
     with pytest.raises(InvalidEmbedder):
-        _create_file(db, embedder=_BadDimensionEmbedder())
+        Grimoire(mount=tmp_path, embedder=_BadDimensionEmbedder())
+    db = tmp_path / "grimoire.db"
     assert not db.exists() or db.stat().st_size == 0
 
 
 def test_embedder_with_zero_dimension_rejected(tmp_path):
     with pytest.raises(InvalidEmbedder):
-        _create_file(tmp_path / "store.db", embedder=_NonPositiveDimensionEmbedder())
+        Grimoire(mount=tmp_path, embedder=_NonPositiveDimensionEmbedder())
 
 
 def test_embedder_with_empty_model_rejected(tmp_path):
     with pytest.raises(InvalidEmbedder):
-        _create_file(tmp_path / "store.db", embedder=_EmptyModelEmbedder())
+        Grimoire(mount=tmp_path, embedder=_EmptyModelEmbedder())
 
 
-# ---------- init ----------
+# ---------- init / create branch ----------
 
 
 def test_init_exercises_embedder_exactly_once_on_create(tmp_path):
     e = CountingEmbedder()
-    _create_file(tmp_path / "store.db", embedder=e).close()
+    Grimoire(mount=tmp_path, embedder=e).close()
     assert e.embed_calls == 1
 
 
-def test_init_exercises_embedder_again_on_reinit(tmp_path):
-    db = tmp_path / "store.db"
+def test_init_does_not_reembed_on_reopen(tmp_path):
+    """Reopening an existing DB attaches without warming the embedder."""
+    Grimoire(mount=tmp_path, embedder=FakeEmbedder()).close()
     e = CountingEmbedder()
-    _create_file(db, embedder=e).close()
-    _create_file(db, embedder=e).close()
-    assert e.embed_calls == 2
+    Grimoire(mount=tmp_path, embedder=e).close()
+    assert e.embed_calls == 0
 
 
 def test_init_creates_parent_directories(tmp_path):
-    nested = tmp_path / "deep" / "nested" / "store.db"
-    _create_file(nested, embedder=FakeEmbedder()).close()
-    assert nested.exists()
+    nested = tmp_path / "deep" / "nested"
+    Grimoire(mount=nested, embedder=FakeEmbedder()).close()
+    assert (nested / "grimoire.db").exists()
 
 
 def test_init_propagates_embedder_errors(tmp_path):
@@ -315,73 +308,83 @@ def test_init_propagates_embedder_errors(tmp_path):
             raise RuntimeError("model fetch failed")
 
     with pytest.raises(RuntimeError, match="model fetch failed"):
-        _create_file(tmp_path / "store.db", embedder=BoomEmbedder())
+        Grimoire(mount=tmp_path, embedder=BoomEmbedder())
 
 
 def test_init_raises_mismatch_on_lock_conflict(tmp_path):
-    db = tmp_path / "store.db"
-    _create_file(db, embedder=FakeEmbedder(model="alpha")).close()
+    Grimoire(mount=tmp_path, embedder=FakeEmbedder(model="alpha")).close()
     with pytest.raises(GrimoireMismatch):
-        _create_file(db, embedder=FakeEmbedder(model="beta"))
+        Grimoire(mount=tmp_path, embedder=FakeEmbedder(model="beta"))
 
 
-# ---------- open ----------
+# ---------- attach branch ----------
 
 
-def test_open_raises_not_found_for_missing_path(tmp_path):
+def test_attach_raises_not_found_for_missing_path(tmp_path):
+    """No DB and no embedder consent — raise rather than create silently."""
     with pytest.raises(GrimoireNotFound):
-        _open_file(tmp_path / "nope.db", embedder=FakeEmbedder())
+        Grimoire(mount=tmp_path)
 
 
-def test_open_raises_not_found_for_non_grimoire_file(tmp_path):
-    db = tmp_path / "stranger.db"
+def test_attach_raises_not_found_for_non_grimoire_file(tmp_path):
+    """A stranger SQLite file at the default DB path is not a grimoire."""
+    db = tmp_path / "grimoire.db"
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE other (x INTEGER)")
     conn.commit()
     conn.close()
     with pytest.raises(GrimoireNotFound):
-        _open_file(db, embedder=FakeEmbedder())
+        Grimoire(mount=tmp_path, embedder=FakeEmbedder())
 
 
-def test_open_does_not_call_embed(tmp_path):
-    """Regression pin: open() must stay cheap — no embedder.embed() during setup."""
-    db = tmp_path / "store.db"
-    _create_file(db, embedder=FakeEmbedder()).close()
+def test_attach_does_not_call_embed(tmp_path):
+    """Regression pin: attach must stay cheap — no embedder.embed() during setup."""
+    Grimoire(mount=tmp_path, embedder=FakeEmbedder()).close()
     e = CountingEmbedder()
-    _open_file(db, embedder=e).close()
+    Grimoire(mount=tmp_path, embedder=e).close()
     assert e.embed_calls == 0
 
 
-# ---------- peek ----------
+# ---------- peek (via Mount) ----------
 
 
 def test_peek_returns_none_for_missing_file(tmp_path):
-    assert Grimoire.peek(tmp_path / "nope.db") is None
+    # Mount must exist for `Mount(...).peek()` to be callable.
+    Mount(tmp_path, create=True)
+    assert Mount(tmp_path).peek() is None
 
 
 def test_peek_returns_none_for_non_grimoire_file(tmp_path):
-    db = tmp_path / "stranger.db"
+    db = tmp_path / "grimoire.db"
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE other (x INTEGER)")
     conn.commit()
     conn.close()
-    assert Grimoire.peek(db) is None
+    assert Mount(tmp_path).peek() is None
 
 
 def test_peek_returns_stats_for_initialized_grimoire(tmp_path):
-    db = tmp_path / "store.db"
-    with _create_file(db, embedder=FakeEmbedder(model="m1", dimension=8)) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder(model="m1", dimension=8)) as g:
         g.add(group_key="note", vector_text="alpha")
         g.add(group_key="note", vector_text="beta")
         g.add(group_key="spell", vector_text="lumos")
 
-    stats = Grimoire.peek(db)
+    stats = Mount(tmp_path).peek()
     assert isinstance(stats, Stats)
     assert stats.model == "m1"
     assert stats.dimension == 8
     assert stats.schema_version == 2
     assert stats.entry_count == 3
     assert stats.groups == {"note": 2, "spell": 1}
+
+
+def test_peek_does_not_require_embedder_or_extension(tmp_path):
+    """peek must be safe on a freshly-created file from another process."""
+    Grimoire(mount=tmp_path, embedder=FakeEmbedder()).close()
+    stats = Mount(tmp_path).peek()
+    assert stats is not None
+    assert stats.entry_count == 0
+    assert stats.groups == {}
 
 
 # ---------- age-windowed reads ----------
@@ -395,7 +398,7 @@ def test_entry_created_at_round_trips_to_ulid_timestamp():
 
 
 def test_list_created_after_is_inclusive_lower_bound(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         a = g.add(group_key="note", vector_text="a")
         time.sleep(0.005)
         b = g.add(group_key="note", vector_text="b")
@@ -408,7 +411,7 @@ def test_list_created_after_is_inclusive_lower_bound(tmp_path):
 
 
 def test_list_created_before_is_exclusive_upper_bound(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         a = g.add(group_key="note", vector_text="a")
         time.sleep(0.005)
         b = g.add(group_key="note", vector_text="b")
@@ -420,7 +423,7 @@ def test_list_created_before_is_exclusive_upper_bound(tmp_path):
 
 
 def test_list_combines_both_bounds(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_key="note", vector_text="a")
         time.sleep(0.005)
         b = g.add(group_key="note", vector_text="b")
@@ -434,7 +437,7 @@ def test_list_combines_both_bounds(tmp_path):
 
 
 def test_search_honors_created_after(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         old = g.add(group_key="note", vector_text="lumos")
         time.sleep(0.005)
         new = g.add(group_key="note", vector_text="lumos")
@@ -446,7 +449,7 @@ def test_search_honors_created_after(tmp_path):
 
 
 def test_search_honors_created_before(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         old = g.add(group_key="note", vector_text="lumos")
         time.sleep(0.005)
         new = g.add(group_key="note", vector_text="lumos")
@@ -458,7 +461,7 @@ def test_search_honors_created_before(tmp_path):
 
 
 def test_list_window_excludes_everything_before_grimoire(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_key="note", vector_text="a")
         g.add(group_key="note", vector_text="b")
 
@@ -470,7 +473,7 @@ def test_list_window_excludes_everything_before_grimoire(tmp_path):
 
 
 def test_keyword_search_finds_exact_token(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_key="note", keyword_text="the moon is full")
         g.add(group_key="note", keyword_text="dragons fly at midnight")
         g.add(group_key="note", keyword_text="potions bubble in the cauldron")
@@ -481,14 +484,14 @@ def test_keyword_search_finds_exact_token(tmp_path):
 
 
 def test_keyword_search_populates_rank(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_key="note", keyword_text="the moon is full")
         results = g.keyword_search("moon")
         assert results[0].rank is not None
 
 
 def test_keyword_search_filters_by_group_key(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_key="spell", keyword_text="lumos lights the way")
         g.add(group_key="potion", keyword_text="lumos is also a potion")
 
@@ -498,20 +501,20 @@ def test_keyword_search_filters_by_group_key(tmp_path):
 
 
 def test_keyword_search_returns_empty_on_no_match(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_key="note", keyword_text="dragons fly at midnight")
         assert g.keyword_search("phoenix") == []
 
 
 def test_keyword_search_respects_k(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         for i in range(5):
             g.add(group_key="note", keyword_text=f"dragon {i}")
         assert len(g.keyword_search("dragon", k=2)) == 2
 
 
 def test_keyword_search_honors_created_after(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         old = g.add(group_key="note", keyword_text="dragon old")
         time.sleep(0.005)
         new = g.add(group_key="note", keyword_text="dragon new")
@@ -522,7 +525,7 @@ def test_keyword_search_honors_created_after(tmp_path):
 
 
 def test_keyword_search_honors_created_before(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         old = g.add(group_key="note", keyword_text="dragon old")
         time.sleep(0.005)
         new = g.add(group_key="note", keyword_text="dragon new")
@@ -533,28 +536,17 @@ def test_keyword_search_honors_created_before(tmp_path):
 
 
 def test_delete_removes_keyword_index_too(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = g.add(group_key="note", keyword_text="ephemeral phoenix")
         assert g.delete(added.id) is True
         assert g.keyword_search("phoenix") == []
-
-
-def test_peek_does_not_require_embedder_or_extension(tmp_path):
-    # peek must be safe on a freshly-created file from another process,
-    # without sqlite-vec or an embedder loaded.
-    db = tmp_path / "store.db"
-    _create_file(db, embedder=FakeEmbedder()).close()
-    stats = Grimoire.peek(db)
-    assert stats is not None
-    assert stats.entry_count == 0
-    assert stats.groups == {}
 
 
 # ---------- keyword_text ----------
 
 
 def test_add_round_trips_keywords(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = g.add(group_key="note", vector_text="hello", keyword_text="alpha beta")
         assert added.keyword_text == "alpha beta"
         fetched = g.get(added.id)
@@ -563,7 +555,7 @@ def test_add_round_trips_keywords(tmp_path):
 
 
 def test_add_keywords_default_to_none(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = g.add(group_key="note", vector_text="hello")
         assert added.keyword_text is None
         fetched = g.get(added.id)
@@ -574,7 +566,7 @@ def test_add_keywords_default_to_none(tmp_path):
 def test_add_empty_keyword_text_indexed_as_empty_string(tmp_path):
     # Empty string is distinct from None — preserve caller intent. An entry
     # with keyword_text="" lands in the FTS index but won't match any query.
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = g.add(group_key="note", vector_text="hello", keyword_text="")
         fetched = g.get(added.id)
         assert fetched is not None
@@ -582,8 +574,10 @@ def test_add_empty_keyword_text_indexed_as_empty_string(tmp_path):
 
 
 def test_keyword_search_finds_entry_by_keyword_text(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        g.add(group_key="note", vector_text="A bird sings at dawn", keyword_text="phoenix")
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
+        g.add(
+            group_key="note", vector_text="A bird sings at dawn", keyword_text="phoenix"
+        )
         g.add(group_key="note", vector_text="Dragons fly at midnight")
         results = g.keyword_search("phoenix")
         assert len(results) == 1
@@ -592,20 +586,22 @@ def test_keyword_search_finds_entry_by_keyword_text(tmp_path):
 
 def test_keyword_search_ignores_vector_text(tmp_path):
     """vector_text is NOT in the FTS index — only keyword_text is searchable."""
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_key="note", vector_text="phoenix soars at dawn")
         assert g.keyword_search("phoenix") == []
 
 
 def test_delete_removes_keyword_index_entry_too(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
-        added = g.add(group_key="note", vector_text="A bird sings", keyword_text="phoenix")
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
+        added = g.add(
+            group_key="note", vector_text="A bird sings", keyword_text="phoenix"
+        )
         assert g.delete(added.id) is True
         assert g.keyword_search("phoenix") == []
 
 
 def test_keywords_returned_by_list_and_search(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_key="note", vector_text="hello", keyword_text="alpha")
         listed = g.list()
         assert listed[0].keyword_text == "alpha"
@@ -621,7 +617,7 @@ def test_keywords_returned_by_list_and_search(tmp_path):
 
 
 def test_add_many_round_trips(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         records = [
             {"group_key": "note", "vector_text": "alpha"},
             {"group_key": "spell", "vector_text": "lumos"},
@@ -647,17 +643,16 @@ def test_add_many_round_trips(tmp_path):
 
 
 def test_add_many_returns_empty_list_on_empty_input(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         assert g.add_many([]) == []
         assert g.list() == []
 
 
 def test_add_many_calls_embed_many_once(tmp_path):
-    db = tmp_path / "store.db"
-    _create_file(db, embedder=CountingEmbedder()).close()
+    Grimoire(mount=tmp_path, embedder=CountingEmbedder()).close()
 
     e = CountingEmbedder()
-    with _open_file(db, embedder=e) as g:
+    with Grimoire(mount=tmp_path, embedder=e) as g:
         e.embed_calls = 0
         e.embed_many_calls = 0
         records = [{"group_key": "note", "vector_text": f"e{i}"} for i in range(5)]
@@ -674,11 +669,10 @@ def test_add_many_atomic_on_embed_failure(tmp_path):
         def embed_many(self, texts):
             raise RuntimeError("embed batch failed")
 
-    db = tmp_path / "store.db"
-    with _create_file(db, embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_key="note", vector_text="existing")
 
-    with _open_file(db, embedder=FailEmbedMany()) as g:
+    with Grimoire(mount=tmp_path, embedder=FailEmbedMany()) as g:
         with pytest.raises(RuntimeError, match="embed batch failed"):
             g.add_many([{"group_key": "note", "vector_text": "new"}])
         remaining = g.list()
@@ -687,7 +681,7 @@ def test_add_many_atomic_on_embed_failure(tmp_path):
 
 
 def test_add_many_results_are_searchable(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add_many(
             [
                 {"group_key": "note", "vector_text": "the moon is full"},
@@ -713,8 +707,7 @@ def test_init_default_is_thread_bound(tmp_path):
     Single-threaded scripts and the CLI rely on this safety rail. If the
     default ever flips, this test goes loud — making the change deliberate.
     """
-    db = tmp_path / "store.db"
-    with _create_file(db, embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         errors: list[Exception] = []
 
         def worker() -> None:
@@ -737,8 +730,9 @@ def test_init_check_same_thread_false_allows_worker_thread_use(tmp_path):
     Without this kwarg, the first call from a worker thread raises
     ProgrammingError before any work happens.
     """
-    db = tmp_path / "store.db"
-    with _create_file(db, embedder=FakeEmbedder(), check_same_thread=False) as g:
+    with Grimoire(
+        mount=tmp_path, embedder=FakeEmbedder(), check_same_thread=False
+    ) as g:
         added: list[str] = []
 
         def worker() -> None:
@@ -764,16 +758,19 @@ def test_init_check_same_thread_false_allows_worker_thread_use(tmp_path):
         assert len(kw) == 1
 
 
-def test_open_check_same_thread_false_threads_through(tmp_path):
-    """The kwarg must work on `open` too, not just `init`."""
-    db = tmp_path / "store.db"
-    _create_file(db, embedder=FakeEmbedder()).close()
+def test_attach_check_same_thread_false_threads_through(tmp_path):
+    """The kwarg must work on the attach codepath too, not just create."""
+    Grimoire(mount=tmp_path, embedder=FakeEmbedder()).close()
 
-    with _open_file(db, embedder=FakeEmbedder(), check_same_thread=False) as g:
+    with Grimoire(
+        mount=tmp_path, embedder=FakeEmbedder(), check_same_thread=False
+    ) as g:
         added: list[str] = []
 
         def worker() -> None:
-            added.append(g.add(group_key="note", vector_text="reopened cross-thread").id)
+            added.append(
+                g.add(group_key="note", vector_text="reopened cross-thread").id
+            )
 
         t = threading.Thread(target=worker)
         t.start()
@@ -786,12 +783,12 @@ def test_open_check_same_thread_false_threads_through(tmp_path):
 
 
 def test_delete_many_returns_empty_list_on_empty_input(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         assert g.delete_many([]) == []
 
 
 def test_delete_many_returns_bools_aligned_to_input(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         a = g.add(group_key="note", vector_text="a")
         b = g.add(group_key="note", vector_text="b")
         results = g.delete_many([a.id, "01HXXXXXXXXXXXXXXXXXXXXXXX", b.id])
@@ -801,7 +798,7 @@ def test_delete_many_returns_bools_aligned_to_input(tmp_path):
 
 
 def test_delete_many_cascades_to_vectors_and_fts(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         a = g.add(group_key="note", vector_text="ephemeral phoenix")
         b = g.add(group_key="note", vector_text="another phoenix")
         g.delete_many([a.id, b.id])
@@ -810,7 +807,7 @@ def test_delete_many_cascades_to_vectors_and_fts(tmp_path):
 
 
 def test_delete_many_duplicate_ids_get_same_answer(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         a = g.add(group_key="note", vector_text="hello")
         # Both occurrences should report True (existed at call time).
         results = g.delete_many([a.id, a.id])
@@ -819,7 +816,7 @@ def test_delete_many_duplicate_ids_get_same_answer(tmp_path):
 
 
 def test_delete_many_does_not_touch_unlisted_entries(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         keep = g.add(group_key="note", vector_text="survivor")
         gone = g.add(group_key="note", vector_text="doomed")
         g.delete_many([gone.id])
@@ -836,12 +833,12 @@ def test_delete_many_does_not_touch_unlisted_entries(tmp_path):
 
 
 def test_update_returns_none_for_missing_id(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         assert g.update("01HXXXXXXXXXXXXXXXXXXXXXXX", payload={"x": 1}) is None
 
 
 def test_update_no_args_returns_unchanged_entry(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = g.add(
             group_key="note",
             vector_text="hello",
@@ -859,7 +856,7 @@ def test_update_no_args_returns_unchanged_entry(tmp_path):
 
 def test_update_rejects_immutable_fields(tmp_path):
     """Passing an indexed/identity field is a TypeError — they're immutable."""
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = g.add(group_key="note", vector_text="hello")
         for kwarg in ("vector_text", "keyword_text", "group_key", "group_ref"):
             with pytest.raises(TypeError):
@@ -868,13 +865,10 @@ def test_update_rejects_immutable_fields(tmp_path):
 
 def test_update_does_not_reembed_or_touch_fts(tmp_path):
     """Pin: payload/threshold updates never call the embedder or rewrite FTS."""
-    db = tmp_path / "store.db"
-    _create_file(db, embedder=CountingEmbedder()).close()
+    Grimoire(mount=tmp_path, embedder=CountingEmbedder()).close()
     e = CountingEmbedder()
-    with _open_file(db, embedder=e) as g:
-        added = g.add(
-            group_key="note", vector_text="hello", keyword_text="phoenix"
-        )
+    with Grimoire(mount=tmp_path, embedder=e) as g:
+        added = g.add(group_key="note", vector_text="hello", keyword_text="phoenix")
         e.embed_calls = 0
         e.embed_many_calls = 0
         result = g.update(added.id, payload={"foo": "bar"}, threshold=0.5)
@@ -889,7 +883,7 @@ def test_update_does_not_reembed_or_touch_fts(tmp_path):
 
 
 def test_update_clears_payload_and_threshold_when_passed_none(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = g.add(
             group_key="note",
             vector_text="hello",
@@ -909,7 +903,7 @@ def test_update_clears_payload_and_threshold_when_passed_none(tmp_path):
 
 def test_update_omitted_field_is_preserved(tmp_path):
     """Pin: omitting a field must NOT clear it (the _UNSET sentinel job)."""
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = g.add(
             group_key="note",
             vector_text="hello",
@@ -924,12 +918,11 @@ def test_update_omitted_field_is_preserved(tmp_path):
 
 
 def test_update_persists_across_reopens(tmp_path):
-    db = tmp_path / "store.db"
-    with _create_file(db, embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = g.add(group_key="note", vector_text="hello")
         g.update(added.id, payload={"v": 1}, threshold=0.25)
 
-    with _open_file(db, embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         fetched = g.get(added.id)
         assert fetched is not None
         assert fetched.vector_text == "hello"
@@ -939,7 +932,7 @@ def test_update_persists_across_reopens(tmp_path):
 
 def test_update_preserves_id_and_created_at(tmp_path):
     """Updates must not reseat the entry's identity or its derived timestamp."""
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = g.add(group_key="note", vector_text="hello")
         before = added.created_at
         updated = g.update(added.id, payload={"v": 1})
@@ -949,7 +942,7 @@ def test_update_preserves_id_and_created_at(tmp_path):
 
 
 def test_add_many_assigns_distinct_ids_in_input_order(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = g.add_many(
             [{"group_key": "note", "vector_text": f"e{i}"} for i in range(10)]
         )
@@ -964,7 +957,7 @@ def test_add_many_assigns_distinct_ids_in_input_order(tmp_path):
 
 
 def test_add_persists_group_ref(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         entry = g.add(group_key="doc", group_ref="path/to/file.md", vector_text="hello")
         assert entry.group_ref == "path/to/file.md"
         fetched = g.get(entry.id)
@@ -972,14 +965,14 @@ def test_add_persists_group_ref(tmp_path):
 
 
 def test_group_ref_unique_within_group_key(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_key="doc", group_ref="r1", vector_text="a")
         with pytest.raises(sqlite3.IntegrityError):
             g.add(group_key="doc", group_ref="r1", vector_text="b")
 
 
 def test_group_ref_same_value_allowed_across_group_keys(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         a = g.add(group_key="doc", group_ref="r1", vector_text="a")
         b = g.add(group_key="page", group_ref="r1", vector_text="b")
         assert a.id != b.id
@@ -987,7 +980,7 @@ def test_group_ref_same_value_allowed_across_group_keys(tmp_path):
 
 def test_group_ref_unique_in_global_namespace(tmp_path):
     """group_key=None still enforces uniqueness on group_ref alone."""
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         g.add(group_ref="g1", vector_text="a")
         with pytest.raises(sqlite3.IntegrityError):
             g.add(group_ref="g1", vector_text="b")
@@ -995,7 +988,7 @@ def test_group_ref_unique_in_global_namespace(tmp_path):
 
 def test_group_ref_nulls_allowed_repeatedly(tmp_path):
     """SQLite treats NULLs as distinct; multiple entries without group_ref OK."""
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         a = g.add(group_key="doc", vector_text="a")
         b = g.add(group_key="doc", vector_text="b")
         assert a.id != b.id
@@ -1003,7 +996,7 @@ def test_group_ref_nulls_allowed_repeatedly(tmp_path):
 
 
 def test_get_by_group_ref_within_group(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = g.add(group_key="doc", group_ref="r1", vector_text="hello")
         g.add(group_key="page", group_ref="r1", vector_text="other")
         found = g.get_by_group_ref(group_key="doc", group_ref="r1")
@@ -1011,7 +1004,7 @@ def test_get_by_group_ref_within_group(tmp_path):
 
 
 def test_get_by_group_ref_in_global_namespace(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         added = g.add(group_ref="g1", vector_text="hello")
         g.add(group_key="doc", group_ref="g1", vector_text="other")
         found = g.get_by_group_ref(group_key=None, group_ref="g1")
@@ -1019,12 +1012,12 @@ def test_get_by_group_ref_in_global_namespace(tmp_path):
 
 
 def test_get_by_group_ref_returns_none_for_unknown(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         assert g.get_by_group_ref(group_key="doc", group_ref="missing") is None
 
 
 def test_nullable_group_key_in_add_and_search(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         ungrouped = g.add(vector_text="lumos")
         grouped = g.add(group_key="spell", vector_text="lumos")
         assert ungrouped.group_key is None
@@ -1038,7 +1031,7 @@ def test_nullable_group_key_in_add_and_search(tmp_path):
 
 
 def test_list_filters_by_group_ref(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         a = g.add(group_key="doc", group_ref="r1", vector_text="a")
         g.add(group_key="doc", group_ref="r2", vector_text="b")
         b = g.add(group_key="page", group_ref="r1", vector_text="c")
@@ -1047,7 +1040,7 @@ def test_list_filters_by_group_ref(tmp_path):
 
 
 def test_list_filters_by_group_key_and_group_ref(tmp_path):
-    with _create_file(tmp_path / "store.db", embedder=FakeEmbedder()) as g:
+    with Grimoire(mount=tmp_path, embedder=FakeEmbedder()) as g:
         a = g.add(group_key="doc", group_ref="r1", vector_text="a")
         g.add(group_key="doc", group_ref="r2", vector_text="b")
         g.add(group_key="page", group_ref="r1", vector_text="c")

@@ -769,7 +769,8 @@ def test_import_collision_aborts(tmp_path, _shared_models_cache):
     )
     data = tmp_path / "data.jsonl"
     data.write_text(
-        json.dumps({"vector_text": "x", "group_key": "doc", "group_ref": "shared"}) + "\n"
+        json.dumps({"vector_text": "x", "group_key": "doc", "group_ref": "shared"})
+        + "\n"
     )
     result = runner.invoke(app, ["--mount", str(mount), "entry", "import", str(data)])
     assert result.exit_code != 0
@@ -783,9 +784,7 @@ def test_import_accepts_record_without_vector_or_keyword_text(
     mount = _new_mount(tmp_path, _shared_models_cache)
     _mount(mount)
     data = tmp_path / "data.jsonl"
-    data.write_text(
-        json.dumps({"group_key": "note", "payload": {"k": "v"}}) + "\n"
-    )
+    data.write_text(json.dumps({"group_key": "note", "payload": {"k": "v"}}) + "\n")
     result = runner.invoke(app, ["--mount", str(mount), "entry", "import", str(data)])
     assert result.exit_code == 0, result.output
     listing = _json_lines(runner.invoke(app, ["--mount", str(mount), "query"]).output)

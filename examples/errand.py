@@ -2,15 +2,17 @@
 
 A best-practice walkthrough of the library API in one runnable file:
 
-* Mount-aware lifecycle: `Grimoire.mount` → `mount.has(name)` → `Grimoire.create`
-  on first run, then `Grimoire.open` for every subsequent invocation.
+* Mount-aware lifecycle: `Mount(path, create=True)` to materialize the mount
+  and `Grimoire(name, mount=mount, embedder=...)` to create-or-attach a
+  database — idempotent, no `has`-check or branching needed.
 * Bulk import on a fresh database via `add_many`, gated by a cheap presence
   check so re-running the example never re-imports.
 * Reads use the right tool for each job: `list(group_key=...)` for partitioned
   browsing, `get_by_group_ref` for stable named lookups (places, the goal),
   and `vector_search` for the player's free-form action against their kit.
-* No private imports, no manual cache plumbing — `Grimoire.open` auto-loads
-  fastembed from the file's lock row using the shared `<mount>/models/` cache.
+* No private imports, no manual cache plumbing — `Grimoire(name, mount=...)`
+  with no embedder auto-loads fastembed from the file's lock row using the
+  shared `<mount>/models/` cache (`mount.models_path`).
 
 The game: a wizard sets out to retrieve the elder wand from the drowned
 cathedral. Pick a random kit (three spells, three items) from the bestiary;
@@ -34,7 +36,7 @@ import json
 import random
 from pathlib import Path
 
-from grimoire import Entry, Grimoire
+from grimoire import Entry, Grimoire, Mount
 from grimoire.embedders import FastembedEmbedder
 
 SCRIPT_DIR = Path(__file__).parent
@@ -195,22 +197,21 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Resolve and prepare the mount. This creates `LOCAL/` and `LOCAL/models/`
-    # if they don't exist; it does NOT create any database. Manifest writes
-    # are lazy — they happen on the first named-DB create.
-    mount = Grimoire.mount(LOCAL)
+    # Materialize the mount: creates `LOCAL/` and `LOCAL/models/` if they
+    # don't exist; idempotent if they do. Does NOT create any database —
+    # manifest writes happen lazily on the first named-DB create.
+    mount = Mount(LOCAL, create=True)
 
     if args.reset:
         # Idempotent: missing files and manifest entries are tolerated.
-        Grimoire.destroy(NAME, mount=LOCAL)
+        mount.drop(NAME)
 
     try:
-        if not mount.has(NAME):
-            # Only the create path needs to instantiate fastembed; subsequent
-            # runs auto-load it inside `Grimoire.open` from the lock row.
-            embedder = FastembedEmbedder(cache_folder=LOCAL / "models")
-            Grimoire.create(NAME, embedder=embedder, mount=LOCAL).close()
-        with Grimoire.open(NAME, mount=LOCAL) as g:
+        # Idempotent create-or-attach: passing `embedder=` opts into creating
+        # the DB if it's missing; if it already exists, the embedder is
+        # validated against the lock row and the existing DB is attached.
+        embedder = FastembedEmbedder(cache_folder=mount.models_path)
+        with Grimoire(NAME, mount=mount, embedder=embedder) as g:
             imported = load_fixture_if_empty(g)
             if imported:
                 print(f"Imported {imported} records from {FIXTURE.name}.")
@@ -219,9 +220,9 @@ def main() -> None:
             except KeyboardInterrupt:
                 print("\nThe wizard slips away.")
     except ImportError as exc:
-        # The fastembed extra is optional; if it's missing, both `create`
-        # and `open` raise ImportError with a helpful install hint. Wrap
-        # here so a missing extra prints cleanly instead of as a traceback.
+        # The fastembed extra is optional; the constructor raises ImportError
+        # with a helpful install hint when missing. Wrap here so a missing
+        # extra prints cleanly instead of as a traceback.
         raise SystemExit(f"Error: {exc}") from exc
 
 

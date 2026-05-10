@@ -13,13 +13,14 @@ import sqlite_vec
 from ulid import ULID
 
 from grimoire.embedder import Embedder
-from grimoire.errors import DatabaseExists, GrimoireNotFound
-from grimoire.models import Entry, Stats
+from grimoire.errors import GrimoireDestroyed, GrimoireNotFound
+from grimoire.models import Entry
 from grimoire.mount import (
     MODELS_DIRNAME,
     Mount,
     _db_path,
     _ensure_mount_dirs,
+    _peek_file,
     _register,
     _resolve_mount,
     _unregister,
@@ -53,183 +54,120 @@ _UNSET: _Unset = _Unset()
 
 
 class Grimoire:
-    """A semantically-indexed datastore backed by one SQLite file."""
+    """A semantically-indexed datastore backed by one SQLite file.
 
-    def __init__(self, *, conn: sqlite3.Connection, embedder: Embedder) -> None:
-        self._conn = conn
-        self._embedder = embedder
+    `Grimoire(name)` attaches to an existing database — auto-loading the
+    embedder from the file's lock row via FastembedEmbedder, sharing the
+    mount's `models/` cache. Raises `GrimoireNotFound` if the database is
+    missing.
 
-    @classmethod
-    def mount(cls, path: str | Path | None = None) -> Mount:
-        """Resolve and prepare a mount, returning a handle for mount-level ops.
+    `Grimoire(name, embedder=...)` attaches if the database exists
+    (validating the embedder against the lock row, raising `GrimoireMismatch`
+    on conflict) or creates a fresh database with that embedder if missing.
+    The `embedder=` argument is the consent signal for creation: pass one to
+    opt into materializing a new database, omit it to require an existing one.
 
-        Resolution order: explicit `path` arg > `GRIMOIRE_MOUNT` env var >
-        `~/.grimoire`. Creates the mount directory and the shared `models/`
-        cache if missing. The manifest TOML is written lazily — on the first
-        named-DB create — so a brand-new mount with only a default DB
-        carries no manifest file.
-        """
-        mount_path = _resolve_mount(path)
-        _ensure_mount_dirs(mount_path)
-        return Mount(mount_path)
+    `name=None` targets the default DB at `<mount>/grimoire.db`. A name
+    targets `<mount>/<name>/grimoire.db` and registers it in the manifest
+    on creation (`description=` is stamped at creation only; it is silently
+    ignored when attaching to an existing DB).
+    """
 
-    @classmethod
-    def create(
-        cls,
+    def __init__(
+        self,
         name: str | None = None,
         *,
-        embedder: Embedder,
-        mount: str | Path | None = None,
+        mount: str | Path | Mount | None = None,
+        embedder: Embedder | None = None,
         description: str | None = None,
         check_same_thread: bool = True,
-    ) -> Self:
-        """Create a database in the mount and return an open Grimoire.
-
-        `name=None` creates the default at `<mount>/grimoire.db`. A name
-        creates `<mount>/<name>/grimoire.db` and registers it in the manifest.
-        Raises `DatabaseExists` if a database with this name is already
-        present in the mount; use `Grimoire.open` to attach to an existing one.
-        """
+    ) -> None:
         if name is not None:
             _validate_name(name)
         mount_path = _resolve_mount(mount)
-        _ensure_mount_dirs(mount_path)
-
         db = _db_path(mount_path, name)
-        if db.exists():
+
+        existed_before = db.exists()
+        if not existed_before and embedder is None:
             label = "default database" if name is None else f"database {name!r}"
-            raise DatabaseExists(f"{label} already exists at {db}")
+            raise GrimoireNotFound(f"No {label} at {db}")
 
-        # Track the named subdir we create so a failed init leaves nothing
-        # behind. The default DB writes directly into the mount root, so
-        # there's no per-DB subdir to clean up.
+        # Track the per-name subdir we materialize so a failed init leaves
+        # nothing behind. The default DB writes directly into the mount
+        # root, so there's no per-DB subdir to clean up.
         created_subdir: Path | None = None
-        if name is not None:
-            subdir = mount_path / name
-            created_subdir = subdir if not subdir.exists() else None
-            subdir.mkdir(parents=True, exist_ok=True)
+        if not existed_before:
+            _ensure_mount_dirs(mount_path)
+            if name is not None:
+                subdir = mount_path / name
+                created_subdir = subdir if not subdir.exists() else None
+                subdir.mkdir(parents=True, exist_ok=True)
 
+        if embedder is None:
+            embedder = _autoload_embedder(db, mount_path)
+
+        conn = _open_conn(str(db), check_same_thread=check_same_thread)
+        we_created_db = False
         try:
-            grimoire = _create_file(
-                db, embedder=embedder, check_same_thread=check_same_thread
-            )
+            if existed_before:
+                # Attach branch: a file we didn't materialize must already be
+                # a grimoire — never overwrite a stranger file's schema.
+                validate(conn, embedder)
+            else:
+                # Create branch with race protection: another caller may have
+                # raced us between our existence check and `_open_conn` and
+                # already written the schema. If so, validate-and-attach
+                # instead of clobbering.
+                try:
+                    existing = conn.execute(
+                        "SELECT 1 FROM grimoire WHERE id = 1"
+                    ).fetchone()
+                except sqlite3.OperationalError:
+                    existing = None
+                if existing is None:
+                    create(conn, embedder)
+                    # Warm the embedder before handing control back so callers
+                    # don't pay for a model fetch on their first add().
+                    embedder.embed(_WARMUP_PROBE)
+                    we_created_db = True
+                else:
+                    validate(conn, embedder)
         except BaseException:
-            if created_subdir is not None:
-                shutil.rmtree(created_subdir, ignore_errors=True)
+            conn.close()
+            # Only delete a file we materialized ourselves — never delete a
+            # file that was already there when we arrived (race winner's data).
+            if not existed_before:
+                _unlink_db_files(db)
+                if created_subdir is not None:
+                    shutil.rmtree(created_subdir, ignore_errors=True)
             raise
 
-        if name is not None:
+        if we_created_db and name is not None:
             try:
                 _register(
                     mount_path, name, model=embedder.model, description=description
                 )
             except BaseException:
-                grimoire.close()
+                conn.close()
+                _unlink_db_files(db)
                 if created_subdir is not None:
                     shutil.rmtree(created_subdir, ignore_errors=True)
                 raise
-        return grimoire
 
-    @classmethod
-    def open(
-        cls,
-        name: str | None = None,
-        *,
-        mount: str | Path | None = None,
-        check_same_thread: bool = True,
-    ) -> Self:
-        """Open an existing database in the mount.
+        self._conn = conn
+        self._embedder = embedder
+        self._mount_path = mount_path
+        self._name = name
+        self._destroyed = False
 
-        `name=None` opens the default at `<mount>/grimoire.db`; a name opens
-        `<mount>/<name>/grimoire.db`. The embedder is reconstructed from the
-        file's lock row using `FastembedEmbedder` and the shared `<mount>/models/`
-        cache — requires the `fastembed` extra. Mount-aware DBs are therefore
-        fastembed-bound by contract; custom-embedder workflows must operate
-        below this API.
-        """
-        if name is not None:
-            _validate_name(name)
-        mount_path = _resolve_mount(mount)
-        db = _db_path(mount_path, name)
-        if not db.exists():
-            label = "default database" if name is None else f"database {name!r}"
-            raise GrimoireNotFound(f"No {label} at {db}")
-        embedder = _autoload_embedder(db, mount_path)
-        return _open_file(db, embedder=embedder, check_same_thread=check_same_thread)
-
-    @classmethod
-    def destroy(
-        cls,
-        name: str | None = None,
-        *,
-        mount: str | Path | None = None,
-    ) -> None:
-        """Delete a database from the mount.
-
-        `name=None` removes the default DB; a name removes the named DB and
-        its subdirectory and drops the manifest entry. Idempotent: missing
-        files or manifest entries are silently tolerated, since the goal
-        state is "gone."
-        """
-        if name is not None:
-            _validate_name(name)
-        mount_path = _resolve_mount(mount)
-        db = _db_path(mount_path, name)
-
-        # Unlink the SQLite file plus its WAL/SHM siblings, in case the file
-        # was open elsewhere and the journal hasn't been folded back in.
-        for sibling in (
-            db,
-            db.parent / (db.name + "-wal"),
-            db.parent / (db.name + "-shm"),
-            db.parent / (db.name + "-journal"),
-        ):
-            sibling.unlink(missing_ok=True)
-
-        if name is not None:
-            subdir = mount_path / name
-            # Best-effort: remove the now-empty subdir. Leave it alone if the
-            # caller has put other files in there.
-            if subdir.exists() and not any(subdir.iterdir()):
-                subdir.rmdir()
-            _unregister(mount_path, name)
-
-    @classmethod
-    def peek(cls, path: str | Path) -> Stats | None:
-        """Read metadata and counts from a grimoire file without opening it for use.
-
-        Returns None if the file does not exist or is not a grimoire database.
-        Does not load sqlite-vec or require an embedder, so it is safe for
-        inspection (CLI `info`, model auto-detect) before deciding how to open.
-        """
-        path = Path(path)
-        if not path.exists():
-            return None
-        try:
-            conn = sqlite3.connect(path)
-            try:
-                row = conn.execute(
-                    "SELECT model, dimension FROM grimoire WHERE id = 1"
-                ).fetchone()
-                if row is None:
-                    return None
-                version = conn.execute("PRAGMA user_version").fetchone()[0]
-                count = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
-                group_key_rows = conn.execute(
-                    "SELECT group_key, COUNT(*) FROM entries "
-                    "GROUP BY group_key ORDER BY group_key"
-                ).fetchall()
-            finally:
-                conn.close()
-        except sqlite3.Error:
-            return None
-        return Stats(
-            model=row[0],
-            dimension=row[1],
-            schema_version=version,
-            entry_count=count,
-            groups=dict(group_key_rows),
-        )
+    def _check_alive(self) -> None:
+        if self._destroyed:
+            label = (
+                "default database" if self._name is None else f"database {self._name!r}"
+            )
+            raise GrimoireDestroyed(
+                f"{label} at {self._mount_path} has been destroyed; handle is unusable"
+            )
 
     def add(
         self,
@@ -249,6 +187,7 @@ class Grimoire:
         both, or neither (a payload-only record retrievable by id /
         group_ref / list).
         """
+        self._check_alive()
         entry_id = str(ULID())
         payload_json = json.dumps(payload) if payload is not None else None
 
@@ -279,8 +218,7 @@ class Grimoire:
                 )
             if keyword_text is not None:
                 self._conn.execute(
-                    "INSERT INTO entries_fts (keyword_text, entry_id) "
-                    "VALUES (?, ?)",
+                    "INSERT INTO entries_fts (keyword_text, entry_id) VALUES (?, ?)",
                     (keyword_text, entry_id),
                 )
 
@@ -309,6 +247,7 @@ class Grimoire:
         Atomic: if embedding or any insert fails, nothing is committed —
         unlike a loop over `add`, which would leave partial state behind.
         """
+        self._check_alive()
         records = list(records)
         if not records:
             return []
@@ -318,9 +257,7 @@ class Grimoire:
             i for i, r in enumerate(records) if r.get("vector_text") is not None
         ]
         embed_texts = [records[i]["vector_text"] for i in embed_indices]
-        embedded = (
-            self._embedder.embed_many(embed_texts) if embed_texts else []
-        )
+        embedded = self._embedder.embed_many(embed_texts) if embed_texts else []
         blob_by_index = {
             idx: _pack(vec) for idx, vec in zip(embed_indices, embedded, strict=True)
         }
@@ -385,14 +322,14 @@ class Grimoire:
                 )
             if fts_rows:
                 self._conn.executemany(
-                    "INSERT INTO entries_fts (keyword_text, entry_id) "
-                    "VALUES (?, ?)",
+                    "INSERT INTO entries_fts (keyword_text, entry_id) VALUES (?, ?)",
                     fts_rows,
                 )
 
         return entries
 
     def get(self, entry_id: str) -> Entry | None:
+        self._check_alive()
         row = self._conn.execute(
             "SELECT id, group_key, group_ref, vector_text, keyword_text, "
             "payload, threshold "
@@ -411,6 +348,7 @@ class Grimoire:
         can be reused across groups (and within the ungrouped namespace,
         where `group_key` is NULL). Returns None if no match.
         """
+        self._check_alive()
         if group_key is None:
             row = self._conn.execute(
                 "SELECT id, group_key, group_ref, vector_text, keyword_text, "
@@ -437,6 +375,7 @@ class Grimoire:
         created_after: datetime | None = None,
         created_before: datetime | None = None,
     ) -> list[Entry]:
+        self._check_alive()
         sql = (
             "SELECT id, group_key, group_ref, vector_text, keyword_text, "
             "payload, threshold "
@@ -487,6 +426,7 @@ class Grimoire:
         value to replace it. Returns the updated entry, or `None` if the
         id is unknown.
         """
+        self._check_alive()
         if isinstance(payload, _Unset) and isinstance(threshold, _Unset):
             return self.get(entry_id)
 
@@ -517,6 +457,7 @@ class Grimoire:
         )
 
     def delete(self, entry_id: str) -> bool:
+        self._check_alive()
         with self._conn:
             cursor = self._conn.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
             if cursor.rowcount == 0:
@@ -535,6 +476,7 @@ class Grimoire:
         receive the same answer (their pre-call existence). Atomic: all
         successful deletes apply or none do.
         """
+        self._check_alive()
         ids = list(ids)
         if not ids:
             return []
@@ -587,6 +529,7 @@ class Grimoire:
           results — even when many qualifying entries exist further down
           the similarity ranking. Raise `k` to compensate.
         """
+        self._check_alive()
         vector = self._embedder.embed(query)
 
         sql = (
@@ -636,6 +579,7 @@ class Grimoire:
         created_after: datetime | None = None,
         created_before: datetime | None = None,
     ) -> list[Entry]:
+        self._check_alive()
         sql = (
             "SELECT e.id, e.group_key, e.group_ref, e.vector_text, "
             "e.keyword_text, e.payload, e.threshold, "
@@ -672,7 +616,27 @@ class Grimoire:
         ]
 
     def close(self) -> None:
+        """Release the underlying connection. The handle is no longer usable for I/O."""
         self._conn.close()
+
+    def destroy(self) -> None:
+        """Close the connection, delete the file from disk, and invalidate this handle.
+
+        Removes the SQLite file plus its WAL/SHM siblings, drops the
+        manifest entry for named DBs, and best-effort removes the per-name
+        subdirectory if it's empty. Idempotent on a half-deleted state. After
+        this call, every other method on the handle raises `GrimoireDestroyed`.
+        """
+        self._check_alive()
+        self._conn.close()
+        db = _db_path(self._mount_path, self._name)
+        _unlink_db_files(db)
+        if self._name is not None:
+            subdir = self._mount_path / self._name
+            if subdir.exists() and not any(subdir.iterdir()):
+                subdir.rmdir()
+            _unregister(self._mount_path, self._name)
+        self._destroyed = True
 
     def __enter__(self) -> Self:
         return self
@@ -681,73 +645,14 @@ class Grimoire:
         self.close()
 
 
-def _create_file(
-    path: Path,
-    *,
-    embedder: Embedder,
-    check_same_thread: bool = True,
-) -> Grimoire:
-    """Create a fresh grimoire file and warm its embedder.
-
-    Module-level rather than a classmethod because `Grimoire.create` is now
-    the mount-aware entry point — this is the file-level primitive it
-    composes with. Not part of the stable public API; kept reachable so
-    tests and advanced callers can build on it.
-    """
-    is_new = not path.exists()
-    if is_new:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    conn = _open_conn(str(path), check_same_thread=check_same_thread)
-    try:
-        if is_new:
-            create(conn, embedder)
-        else:
-            validate(conn, embedder)
-        embedder.embed(_WARMUP_PROBE)
-        return Grimoire(conn=conn, embedder=embedder)
-    except BaseException:
-        conn.close()
-        # WAL mode writes header bytes during `_open_conn`, so a failed
-        # init on a brand-new file leaves a non-empty (and useless)
-        # SQLite file behind. Clean up the file and its WAL siblings
-        # to preserve the "failed init leaves no garbage" invariant.
-        if is_new:
-            for sibling in (
-                path,
-                path.parent / (path.name + "-wal"),
-                path.parent / (path.name + "-shm"),
-                path.parent / (path.name + "-journal"),
-            ):
-                sibling.unlink(missing_ok=True)
-        raise
-
-
-def _open_file(
-    path: Path,
-    *,
-    embedder: Embedder,
-    check_same_thread: bool = True,
-) -> Grimoire:
-    """Open an existing grimoire file and validate the embedder against it."""
-    if not path.exists():
-        raise GrimoireNotFound(f"No grimoire at {path}")
-    conn = _open_conn(str(path), check_same_thread=check_same_thread)
-    try:
-        validate(conn, embedder)
-        return Grimoire(conn=conn, embedder=embedder)
-    except BaseException:
-        conn.close()
-        raise
-
-
 def _autoload_embedder(db: Path, mount: Path) -> Embedder:
     """Reconstruct the embedder a file was created with from its lock row.
 
     Limited to fastembed-bundled models: given the model name, FastembedEmbedder
     can rebuild the embedder. Custom embedders that don't round-trip through a
-    string name should be passed explicitly via `Grimoire.open(..., embedder=)`.
+    string name should be passed explicitly via `Grimoire(..., embedder=...)`.
     """
-    stats = Grimoire.peek(db)
+    stats = _peek_file(db)
     if stats is None:
         raise GrimoireNotFound(f"Not a grimoire file: {db}")
     try:
@@ -756,7 +661,7 @@ def _autoload_embedder(db: Path, mount: Path) -> Embedder:
         raise ImportError(
             "Auto-loading an embedder requires the `fastembed` extra. "
             "Install with: pip install grimoire[fastembed], "
-            "or pass embedder= explicitly to Grimoire.open."
+            "or pass embedder= explicitly to Grimoire."
         ) from exc
     return FastembedEmbedder(stats.model, cache_folder=mount / MODELS_DIRNAME)
 
@@ -775,6 +680,17 @@ def _open_conn(path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 5000")
     return conn
+
+
+def _unlink_db_files(db: Path) -> None:
+    """Remove the SQLite file plus its WAL/SHM/journal siblings."""
+    for sibling in (
+        db,
+        db.parent / (db.name + "-wal"),
+        db.parent / (db.name + "-shm"),
+        db.parent / (db.name + "-journal"),
+    ):
+        sibling.unlink(missing_ok=True)
 
 
 def _pack(vector: list[float]) -> bytes:
