@@ -123,6 +123,56 @@ def add(
     return [_row_to_entry(r) for r in rows]
 
 
+def update(
+    conn: sqlite3.Connection,
+    entries: list[Entry],
+) -> list[Entry]:
+    if not entries:
+        return []
+
+    batch = json.dumps(
+        [
+            {
+                "id": e.id,
+                "group_ref": e.group_ref,
+                "payload": e.payload,
+                "context": e.context,
+                "threshold_rank": e.threshold_rank,
+                "threshold_distance": e.threshold_distance,
+            }
+            for e in entries
+        ]
+    )
+
+    cur = conn.execute(
+        """
+        UPDATE entry
+        SET group_ref          = src.group_ref,
+            payload            = src.payload,
+            context            = src.context,
+            threshold_rank     = src.threshold_rank,
+            threshold_distance = src.threshold_distance
+        FROM (
+            SELECT
+                value->>'id'                 AS id,
+                value->>'group_ref'          AS group_ref,
+                value->>'payload'            AS payload,
+                value->>'context'            AS context,
+                value->>'threshold_rank'     AS threshold_rank,
+                value->>'threshold_distance' AS threshold_distance
+            FROM json_each(?)
+        ) AS src
+        WHERE entry.id = src.id
+        RETURNING
+            id, group_key, group_ref, payload, context,
+            keyword_text, semantic_text, threshold_rank, threshold_distance
+        """,
+        (batch,),
+    )
+
+    return [_row_to_entry(r) for r in cur]
+
+
 def remove(conn: sqlite3.Connection, ids: list[str]) -> list[str]:
     if not ids:
         return []

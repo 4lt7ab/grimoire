@@ -42,6 +42,9 @@ class Grimoire:
     def add(self, entries: list[Entry]) -> list[Entry]:
         return entry.add(self._conn, _index(entries, self.embedder))
 
+    def update(self, entries: list[Entry]) -> list[Entry]:
+        return entry.update(self._conn, entries)
+
     def remove(self, ids: list[str]) -> list[str]:
         return entry.remove(self._conn, ids)
 
