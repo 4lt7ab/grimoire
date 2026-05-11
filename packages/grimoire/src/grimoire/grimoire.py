@@ -1,5 +1,4 @@
 import sqlite3
-from collections.abc import Sequence
 from pathlib import Path
 
 import sqlite_vec
@@ -21,14 +20,14 @@ def _index(entries: list[Entry], embedder: Embedder) -> list[_IndexedEntry]:
     to_embed = [text for text in texts if text is not None]
     vec_iter = iter(embedder.embed_many(to_embed)) if to_embed else iter(())
     return [
-        _IndexedEntry(e, next(vec_iter) if t is not None else None)
-        for e, t in zip(entries, texts, strict=True)
+        _IndexedEntry(entry, next(vec_iter) if text is not None else None)
+        for entry, text in zip(entries, texts, strict=True)
     ]
 
 
 class Grimoire:
     def __init__(self, conn: sqlite3.Connection, embedder: Embedder) -> None:
-        self.conn = conn
+        self._conn = conn
         self.embedder = embedder
 
     def __enter__(self) -> "Grimoire":
@@ -36,18 +35,18 @@ class Grimoire:
 
     def __exit__(self, exc_type, *_) -> None:
         if exc_type is None:
-            self.conn.commit()
+            self._conn.commit()
         else:
-            self.conn.rollback()
+            self._conn.rollback()
 
     def add(self, entries: list[Entry]) -> list[Entry]:
-        return entry.add(self.conn, _index(entries, self.embedder))
+        return entry.add(self._conn, _index(entries, self.embedder))
 
     def remove(self, ids: list[str]) -> list[str]:
-        return entry.remove(self.conn, ids)
+        return entry.remove(self._conn, ids)
 
     def fetch(self, filters: Filters | None = None) -> list[Entry]:
-        return entry.fetch(self.conn, filters)
+        return entry.fetch(self._conn, filters)
 
     def keyword_search(
         self,
@@ -55,15 +54,20 @@ class Grimoire:
         filters: Filters | None = None,
         limit: int | None = None,
     ) -> list[KeywordHit]:
-        return entry.keyword_search(self.conn, query, filters, limit)
+        return entry.keyword_search(self._conn, query, filters, limit)
 
     def semantic_search(
         self,
-        embedding: Sequence[float],
+        query: str,
         group_key: str | None,
         limit: int = 10,
     ) -> list[SemanticHit]:
-        return entry.semantic_search(self.conn, embedding, group_key, limit)
+        return entry.semantic_search(
+            self._conn,
+            self.embedder.embed(query),
+            group_key,
+            limit,
+        )
 
 
 def open(path: str | Path, *, embedder: Embedder) -> Grimoire:
