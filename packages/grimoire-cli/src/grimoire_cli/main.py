@@ -15,7 +15,7 @@ from grimoire.errors import GrimoireError
 from grimoire.grimoire import open as open_grimoire
 from grimoire.grimoire import peek
 
-from grimoire_cli import manifest
+from grimoire_cli import __version__, manifest, output
 from grimoire_cli.resolve import (
     Kind,
     Mount,
@@ -61,6 +61,7 @@ app.add_typer(entry_app)
 class Settings:
     mount: Mount
     db: str | None
+    raw: bool
 
 
 MountOpt = Annotated[
@@ -105,14 +106,53 @@ YesOpt = Annotated[
 ]
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
 @app.callback(invoke_without_command=True)
 @_catches
 def _root(
     ctx: typer.Context,
     mount: MountOpt = None,
     db: DbOpt = None,
+    raw: Annotated[
+        bool,
+        typer.Option(
+            "--raw",
+            help="Always emit JSONL, even when stdout is a TTY.",
+        ),
+    ] = False,
+    _version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            callback=_version_callback,
+            is_eager=True,
+            help="Print the CLI version and exit.",
+        ),
+    ] = False,
 ) -> None:
-    ctx.obj = Settings(mount=resolve_mount(mount), db=db)
+    """grimoire — manage a SQLite + sqlite-vec semantic datastore.
+
+    A mount directory holds one or more grimoires plus a shared embedder
+    cache. Pick the mount with --mount or GRIMOIRE_MOUNT (default:
+    ~/.grimoire). The anonymous default DB at <mount>/grimoire.db is used
+    when --db / GRIMOIRE_DB is unset; otherwise the named DB at
+    <mount>/<name>/grimoire.db.
+
+    Mount lifecycle:   `mount`, `mount destroy`
+    Database lifecycle: `create`, `destroy <name>`, `ls`
+    Records:            `entry add|update|delete|get`, `query`, `search`
+    Bulk transfer:      `import`, `export`
+    """
+    ctx.obj = Settings(
+        mount=resolve_mount(mount),
+        db=db,
+        raw=raw or not output.is_tty(),
+    )
     if ctx.invoked_subcommand is None:
         _bare(ctx.obj)
 
@@ -121,23 +161,49 @@ def _bare(settings: Settings) -> None:
     require_mount(settings.mount)
     path = settings.mount.db_path(settings.db)
     info = peek(path)
-    typer.echo(
-        json.dumps(
-            {
-                "mount": str(settings.mount.path),
-                "db": settings.db,
-                "path": str(path),
-                "model": info.model,
-                "dimension": info.dimension,
-                "schema_version": info.schema_version,
-                "entry_count": info.entry_count,
-                "group_counts": {
-                    (k if k is not None else ""): v
-                    for k, v in info.group_counts.items()
-                },
-            }
+    group_counts = {
+        (k if k is not None else ""): v for k, v in info.group_counts.items()
+    }
+    if settings.raw:
+        typer.echo(
+            json.dumps(
+                {
+                    "mount": str(settings.mount.path),
+                    "db": settings.db,
+                    "path": str(path),
+                    "model": info.model,
+                    "dimension": info.dimension,
+                    "schema_version": info.schema_version,
+                    "entry_count": info.entry_count,
+                    "group_counts": group_counts,
+                }
+            )
         )
+        return
+    output.emit_kv(
+        [
+            ("mount", settings.mount.path),
+            ("db", settings.db or "(default)"),
+            ("path", path),
+            ("model", info.model),
+            ("dimension", info.dimension),
+            ("schema_version", info.schema_version),
+            ("entries", info.entry_count),
+            (
+                "groups",
+                ", ".join(
+                    f"{k or '(none)'}={v}"
+                    for k, v in sorted(info.group_counts.items(), key=_group_sort)
+                )
+                or "(empty)",
+            ),
+        ]
     )
+
+
+def _group_sort(item: tuple[str | None, int]) -> tuple[int, str]:
+    key, _ = item
+    return (1 if key is None else 0, key or "")
 
 
 @mount_app.callback(invoke_without_command=True)
@@ -247,7 +313,8 @@ def destroy(
 @app.command("ls")
 @_catches
 def ls(ctx: typer.Context) -> None:
-    mount: Mount = ctx.obj.mount
+    settings: Settings = ctx.obj
+    mount: Mount = settings.mount
     require_mount(mount)
 
     rows: list[dict[str, object]] = []
@@ -262,8 +329,22 @@ def ls(ctx: typer.Context) -> None:
         info = peek(path) if path.exists() else None
         rows.append(_db_row(name=name, path=path, info=info, manifest_record=rec))
 
-    for row in rows:
-        typer.echo(json.dumps(row))
+    if settings.raw:
+        for row in rows:
+            typer.echo(json.dumps(row))
+        return
+    output.emit_table(
+        ["name", "model", "entries", "description"],
+        [
+            [
+                str(r.get("name") or "(default)"),
+                str(r.get("model", "")),
+                str(r.get("entry_count", "")),
+                str(r.get("description", "")),
+            ]
+            for r in rows
+        ],
+    )
 
 
 def _db_row(
