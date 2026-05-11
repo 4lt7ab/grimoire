@@ -2,17 +2,18 @@
 
 A best-practice walkthrough of the library API in one runnable file:
 
-* Mount-aware lifecycle: `Mount(path, create=True)` to materialize the mount
-  and `Grimoire(name, mount=mount, embedder=...)` to create-or-attach a
-  database — idempotent, no `has`-check or branching needed.
-* Bulk import on a fresh database via `add_many`, gated by a cheap presence
-  check so re-running the example never re-imports.
+* Three composable lifecycles: `Mount(path, create=True)` to materialize the
+  mount, `FastembedEmbedder(mount=mount)` to load the model, and
+  `Grimoire(name, mount=mount, create=True, embedder=...)` to attach the
+  embedder to the database. With the embedder stashed, vector ops accept
+  text directly: `g.add(vector_text=...)`, `g.vector_search("query")`.
+* Bulk import on a fresh database via `add_many` — records with `vector_text`
+  but no `vector` are batch-embedded in one `embed_many` call by the library.
 * Reads use the right tool for each job: `list(group_key=...)` for partitioned
   browsing, `get_by_group_ref` for stable named lookups (places, the goal),
   and `vector_search` for the player's free-form action against their kit.
-* No private imports, no manual cache plumbing — `Grimoire(name, mount=...)`
-  with no embedder auto-loads fastembed from the file's lock row using the
-  shared `<mount>/models/` cache (`mount.models_path`).
+* Pre-computed vectors are also supported: pass `vector=` directly to skip
+  the embedder. Useful for offline pipelines and tests.
 
 The game: a wizard sets out to retrieve the elder wand from the drowned
 cathedral. Pick a random kit (three spells, three items) from the bestiary;
@@ -36,8 +37,7 @@ import json
 import random
 from pathlib import Path
 
-from grimoire import Entry, Grimoire, Mount
-from grimoire.embedders import FastembedEmbedder
+from grimoire import Entry, FastembedEmbedder, Grimoire, Mount
 
 SCRIPT_DIR = Path(__file__).parent
 LOCAL = SCRIPT_DIR / ".local"  # this example's mount
@@ -66,17 +66,21 @@ def load_fixture_if_empty(g: Grimoire) -> int:
     """Bulk-import `sample_grimoire.jsonl` into a fresh database.
 
     Idempotency is the cheap kind: peek for any entry; if one exists, the
-    database is already populated and this is a no-op. The fixture is
-    additive otherwise, but for example runs we want exactly one import.
+    database is already populated and this is a no-op. The fixture's
+    `content` field is mapped to `vector_text`; with an embedder stashed
+    on the Grimoire, `add_many` batch-embeds every record in one call.
     """
     if g.list(limit=1):
         return 0
-    records: list[dict] = []
     with FIXTURE.open(encoding="utf-8") as f:
-        for raw in f:
-            line = raw.strip()
-            if line:
-                records.append(json.loads(line))
+        records = [
+            {
+                "group_key": r["group_key"],
+                "group_ref": r["group_ref"],
+                "vector_text": r["content"],
+            }
+            for r in (json.loads(line) for line in f if line.strip())
+        ]
     g.add_many(records)
     return len(records)
 
@@ -99,7 +103,9 @@ def show_kit(kit: list[Entry]) -> None:
     print("\n  Your kit:")
     for entry in kit:
         kind = (entry.group_key or "?").ljust(5)
-        print(f"    {kind}  {entry.group_ref}: {_first_clause(entry.content)}")
+        print(
+            f"    {kind}  {entry.group_ref}: {_first_clause(entry.vector_text or '')}"
+        )
 
 
 def _first_clause(s: str, limit: int = 80) -> str:
@@ -117,9 +123,9 @@ def encounter(g: Grimoire, place_ref: str, kit_ids: set[str]) -> bool:
     """Run one encounter at a place. Returns True if the player advances.
 
     The action-resolution mechanic is a vector search: the player types
-    free-form intent, the grimoire ranks every entry by similarity, we
-    keep the kit-only matches, and the closest one decides the outcome
-    (provided it clears `ACTION_THRESHOLD`).
+    free-form intent, the grimoire (with its stashed embedder) ranks every
+    entry by similarity, we keep the kit-only matches, and the closest one
+    decides the outcome (provided it clears `ACTION_THRESHOLD`).
     """
     place = g.get_by_group_ref(group_key="place", group_ref=place_ref)
     if place is None:
@@ -129,9 +135,9 @@ def encounter(g: Grimoire, place_ref: str, kit_ids: set[str]) -> bool:
 
     beast = random_beast(g)
     print(f"\n--- {place.group_ref} ---")
-    print(f"  {place.content}")
+    print(f"  {place.vector_text}")
     print(f"\n  A {beast.group_ref} stands in your path.")
-    print(f"  {beast.content}")
+    print(f"  {beast.vector_text}")
 
     for _ in range(3):
         try:
@@ -157,7 +163,7 @@ def encounter(g: Grimoire, place_ref: str, kit_ids: set[str]) -> bool:
             print(f"  You consider {best.group_ref}, but it doesn't quite fit.")
             continue
 
-        print(f"  You wield {best.group_ref}: {_first_clause(best.content)}")
+        print(f"  You wield {best.group_ref}: {_first_clause(best.vector_text or '')}")
         print(f"  The {beast.group_ref} falls back. You press on.")
         return True
 
@@ -169,7 +175,7 @@ def victory(g: Grimoire) -> None:
     """Final step: fetch the goal item by its stable group_ref and reveal it."""
     goal = g.get_by_group_ref(group_key=GOAL_GROUP, group_ref=GOAL_REF)
     if goal is not None:
-        print(f"\n  You take it from the cathedral altar: {goal.content}")
+        print(f"\n  You take it from the cathedral altar: {goal.vector_text}")
     print("\nThe errand is complete.")
 
 
@@ -207,11 +213,14 @@ def main() -> None:
         mount.drop(NAME)
 
     try:
-        # Idempotent create-or-attach: passing `embedder=` opts into creating
-        # the DB if it's missing; if it already exists, the embedder is
-        # validated against the lock row and the existing DB is attached.
-        embedder = FastembedEmbedder(cache_folder=mount.models_path)
-        with Grimoire(NAME, mount=mount, embedder=embedder) as g:
+        # Load the embedder up front (only step that touches the network on
+        # first run), then attach it to a create-or-attach Grimoire. The
+        # embedder's dimension and model are recorded into the lock row on
+        # creation; subsequent attaches validate against it.
+        with (
+            FastembedEmbedder(mount=mount) as embedder,
+            Grimoire(NAME, mount=mount, create=True, embedder=embedder) as g,
+        ):
             imported = load_fixture_if_empty(g)
             if imported:
                 print(f"Imported {imported} records from {FIXTURE.name}.")
