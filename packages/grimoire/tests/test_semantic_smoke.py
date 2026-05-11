@@ -10,15 +10,15 @@ def _vec(values: list[float]) -> bytes:
     return struct.pack(f"<{len(values)}f", *values)
 
 
-def test_semantic_search_returns_empty(tmp_path):
+def test_semantic_search_returns_empty(tmp_path, fake_embedder):
     db = tmp_path / "g.db"
-    g = open_grimoire(db)
+    g = open_grimoire(db, embedder=fake_embedder)
     assert g.semantic_search([0.0] * 384, group_key="anything") == []
 
 
-def test_partition_null_insert(tmp_path):
+def test_partition_null_insert(tmp_path, fake_embedder):
     db = tmp_path / "g.db"
-    g = open_grimoire(db)
+    g = open_grimoire(db, embedder=fake_embedder)
     g.conn.execute(
         "INSERT INTO entry_vec (rowid, group_key, embedding) VALUES (?, ?, ?)",
         (1, None, _vec([0.1] * 384)),
@@ -29,9 +29,9 @@ def test_partition_null_insert(tmp_path):
     assert [tuple(r) for r in rows] == [(1, None)]
 
 
-def test_partition_null_query(tmp_path):
+def test_partition_null_query(tmp_path, fake_embedder):
     db = tmp_path / "g.db"
-    g = open_grimoire(db)
+    g = open_grimoire(db, embedder=fake_embedder)
     try:
         g.conn.execute(
             "INSERT INTO entry_vec (rowid, group_key, embedding) VALUES (?, ?, ?)",
@@ -59,9 +59,9 @@ def test_partition_null_query(tmp_path):
     )
 
 
-def test_semantic_search_null_partition(tmp_path):
+def test_semantic_search_null_partition(tmp_path, fake_embedder):
     db = tmp_path / "g.db"
-    g = open_grimoire(db)
+    g = open_grimoire(db, embedder=fake_embedder)
     g.conn.execute(
         "INSERT INTO entry (rowid, id) VALUES (?, ?)",
         (1, "01NULLPART"),
@@ -77,9 +77,9 @@ def test_semantic_search_null_partition(tmp_path):
     assert hits[0].entry.group_key is None
 
 
-def test_partition_isolation(tmp_path):
+def test_partition_isolation(tmp_path, fake_embedder):
     db = tmp_path / "g.db"
-    g = open_grimoire(db)
+    g = open_grimoire(db, embedder=fake_embedder)
     g.conn.execute(
         "INSERT INTO entry_vec (rowid, group_key, embedding) VALUES (?, ?, ?)",
         (1, "alpha", _vec([1.0] + [0.0] * 383)),

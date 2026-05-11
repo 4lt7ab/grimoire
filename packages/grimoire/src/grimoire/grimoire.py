@@ -4,13 +4,16 @@ from pathlib import Path
 
 import sqlite_vec
 
-from grimoire.data import entry, schema
+from grimoire.data import entry, meta, schema
 from grimoire.data.entry import Entry, Filters, KeywordHit, SemanticHit
+from grimoire.embed import Embedder
+from grimoire.errors import GrimoireMismatch
 
 
 class Grimoire:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, embedder: Embedder) -> None:
         self.conn = conn
+        self.embedder = embedder
 
     def __enter__(self) -> "Grimoire":
         return self
@@ -47,7 +50,7 @@ class Grimoire:
         return entry.semantic_search(self.conn, embedding, group_key, limit)
 
 
-def open(path: str | Path) -> Grimoire:
+def open(path: str | Path, *, embedder: Embedder) -> Grimoire:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
 
@@ -56,8 +59,15 @@ def open(path: str | Path) -> Grimoire:
     conn.enable_load_extension(False)
 
     if schema.read_version(conn) == 0:
-        schema.create(conn)
+        schema.create(conn, model=embedder.model, dimension=embedder.dimension)
     else:
         schema.validate(conn)
+        stored_model = meta.fetch(conn, "model")
+        stored_dimension = int(meta.fetch(conn, "dimension"))
+        if stored_model != embedder.model or stored_dimension != embedder.dimension:
+            raise GrimoireMismatch(
+                f"Embedder reports model={embedder.model!r} dimension={embedder.dimension}, "
+                f"file locked to model={stored_model!r} dimension={stored_dimension}."
+            )
 
-    return Grimoire(conn)
+    return Grimoire(conn, embedder=embedder)

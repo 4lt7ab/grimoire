@@ -8,7 +8,3 @@ class SchemaVersionError(GrimoireError):
 
 class GrimoireMismatch(GrimoireError):
     """The supplied embedder's model or dimension disagrees with the file's lock."""
-
-
-class EmbedderRequired(GrimoireError):
-    """An operation needed an embedder, but the Grimoire was opened without one."""

@@ -1,16 +1,17 @@
 import sqlite3
 
+from grimoire.data import meta
 from grimoire.errors import SchemaVersionError
 
 SCHEMA_VERSION = 1
 
-_DDL = """
+
+def _ddl(dimension: int) -> str:
+    return f"""
 CREATE TABLE meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-
-INSERT INTO meta (key, value) VALUES ('dimension', '384');
 
 CREATE TABLE entry (
     id                 TEXT PRIMARY KEY,
@@ -47,14 +48,16 @@ END;
 
 CREATE VIRTUAL TABLE entry_vec USING vec0(
     group_key TEXT PARTITION KEY,
-    embedding float[384]
+    embedding float[{dimension}]
 );
 """
 
 
-def create(conn: sqlite3.Connection) -> None:
-    conn.executescript(_DDL)
+def create(conn: sqlite3.Connection, *, model: str, dimension: int) -> None:
+    conn.executescript(_ddl(dimension))
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    meta.add(conn, "model", model)
+    meta.add(conn, "dimension", str(dimension))
     conn.commit()
 
 
