@@ -20,13 +20,13 @@ def test_partition_null_insert(tmp_path, fake_embedder):
     db = tmp_path / "g.db"
     g = open_grimoire(db, embedder=fake_embedder)
     g.conn.execute(
-        "INSERT INTO entry_vec (rowid, group_key, embedding) VALUES (?, ?, ?)",
-        (1, None, _vec([0.1] * 384)),
+        "INSERT INTO entry_vec (id, group_key, embedding) VALUES (?, ?, ?)",
+        ("01NULLINS", None, _vec([0.1] * 384)),
     )
     rows = g.conn.execute(
-        "SELECT rowid, group_key FROM entry_vec"
+        "SELECT id, group_key FROM entry_vec"
     ).fetchall()
-    assert [tuple(r) for r in rows] == [(1, None)]
+    assert [tuple(r) for r in rows] == [("01NULLINS", None)]
 
 
 def test_partition_null_query(tmp_path, fake_embedder):
@@ -34,8 +34,8 @@ def test_partition_null_query(tmp_path, fake_embedder):
     g = open_grimoire(db, embedder=fake_embedder)
     try:
         g.conn.execute(
-            "INSERT INTO entry_vec (rowid, group_key, embedding) VALUES (?, ?, ?)",
-            (1, None, _vec([1.0] + [0.0] * 383)),
+            "INSERT INTO entry_vec (id, group_key, embedding) VALUES (?, ?, ?)",
+            ("01NULLQRY", None, _vec([1.0] + [0.0] * 383)),
         )
     except sqlite3.OperationalError as e:
         pytest.skip(f"NULL partition rejected at insert: {e}")
@@ -43,18 +43,18 @@ def test_partition_null_query(tmp_path, fake_embedder):
     query = _vec([1.0] + [0.0] * 383)
 
     eq_null = g.conn.execute(
-        "SELECT rowid FROM entry_vec "
+        "SELECT id FROM entry_vec "
         "WHERE embedding MATCH ? AND group_key = NULL AND k = 5",
         (query,),
     ).fetchall()
     assert eq_null == [], "`= NULL` must always be false (SQLite 3VL)"
 
     is_null = g.conn.execute(
-        "SELECT rowid FROM entry_vec "
+        "SELECT id FROM entry_vec "
         "WHERE embedding MATCH ? AND group_key IS NULL AND k = 5",
         (query,),
     ).fetchall()
-    assert [tuple(r) for r in is_null] == [(1,)], (
+    assert [tuple(r) for r in is_null] == [("01NULLQRY",)], (
         f"expected `IS NULL` to retrieve the NULL-partition row, got {is_null}"
     )
 
@@ -63,12 +63,12 @@ def test_semantic_search_null_partition(tmp_path, fake_embedder):
     db = tmp_path / "g.db"
     g = open_grimoire(db, embedder=fake_embedder)
     g.conn.execute(
-        "INSERT INTO entry (rowid, id) VALUES (?, ?)",
-        (1, "01NULLPART"),
+        "INSERT INTO entry (id) VALUES (?)",
+        ("01NULLPART",),
     )
     g.conn.execute(
-        "INSERT INTO entry_vec (rowid, group_key, embedding) VALUES (?, ?, ?)",
-        (1, None, _vec([1.0] + [0.0] * 383)),
+        "INSERT INTO entry_vec (id, group_key, embedding) VALUES (?, ?, ?)",
+        ("01NULLPART", None, _vec([1.0] + [0.0] * 383)),
     )
 
     hits = g.semantic_search([1.0] + [0.0] * 383, group_key=None)
@@ -81,25 +81,25 @@ def test_partition_isolation(tmp_path, fake_embedder):
     db = tmp_path / "g.db"
     g = open_grimoire(db, embedder=fake_embedder)
     g.conn.execute(
-        "INSERT INTO entry_vec (rowid, group_key, embedding) VALUES (?, ?, ?)",
-        (1, "alpha", _vec([1.0] + [0.0] * 383)),
+        "INSERT INTO entry_vec (id, group_key, embedding) VALUES (?, ?, ?)",
+        ("01ALPHA", "alpha", _vec([1.0] + [0.0] * 383)),
     )
     g.conn.execute(
-        "INSERT INTO entry_vec (rowid, group_key, embedding) VALUES (?, ?, ?)",
-        (2, "beta", _vec([0.0, 1.0] + [0.0] * 382)),
+        "INSERT INTO entry_vec (id, group_key, embedding) VALUES (?, ?, ?)",
+        ("01BETA", "beta", _vec([0.0, 1.0] + [0.0] * 382)),
     )
     query = _vec([0.5, 0.5] + [0.0] * 382)
 
     alpha = g.conn.execute(
-        "SELECT rowid FROM entry_vec "
+        "SELECT id FROM entry_vec "
         "WHERE embedding MATCH ? AND group_key = ? AND k = 5",
         (query, "alpha"),
     ).fetchall()
     beta = g.conn.execute(
-        "SELECT rowid FROM entry_vec "
+        "SELECT id FROM entry_vec "
         "WHERE embedding MATCH ? AND group_key = ? AND k = 5",
         (query, "beta"),
     ).fetchall()
 
-    assert [r[0] for r in alpha] == [1]
-    assert [r[0] for r in beta] == [2]
+    assert [r[0] for r in alpha] == ["01ALPHA"]
+    assert [r[0] for r in beta] == ["01BETA"]

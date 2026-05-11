@@ -11,6 +11,8 @@ class _FakeEmbedder:
     def __init__(self, *, model: str = "fake", dimension: int = 384) -> None:
         self._model = model
         self._dimension = dimension
+        self.embed_calls = 0
+        self.embed_many_calls = 0
 
     @property
     def model(self) -> str:
@@ -21,9 +23,11 @@ class _FakeEmbedder:
         return self._dimension
 
     def embed(self, text: str) -> list[float]:
+        self.embed_calls += 1
         return [0.0] * self._dimension
 
     def embed_many(self, texts: list[str]) -> list[list[float]]:
+        self.embed_many_calls += 1
         return [[0.0] * self._dimension for _ in texts]
 
 

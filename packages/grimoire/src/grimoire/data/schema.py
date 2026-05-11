@@ -47,6 +47,7 @@ CREATE TRIGGER entry_au AFTER UPDATE ON entry BEGIN
 END;
 
 CREATE VIRTUAL TABLE entry_vec USING vec0(
+    id TEXT PRIMARY KEY,
     group_key TEXT PARTITION KEY,
     embedding float[{dimension}]
 );

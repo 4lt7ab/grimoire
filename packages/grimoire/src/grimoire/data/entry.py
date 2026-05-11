@@ -33,6 +33,12 @@ class SemanticHit:
     distance: float
 
 
+@dataclass(frozen=True, slots=True)
+class _IndexedEntry:
+    entry: Entry
+    embedding: Sequence[float] | None
+
+
 def _row_to_entry(r: sqlite3.Row) -> Entry:
     return Entry(
         id=r["id"],
@@ -53,25 +59,27 @@ def _serialize_vec(v: Sequence[float]) -> bytes:
 
 def add(
     conn: sqlite3.Connection,
-    entries: list[Entry],
+    indexed: list[_IndexedEntry],
 ) -> list[Entry]:
-    if not entries:
+    if not indexed:
         return []
+
+    ids = [str(ULID()) for _ in indexed]
 
     batch = json.dumps(
         [
             {
-                "id": str(ULID()),
-                "group_key": e.group_key,
-                "group_ref": e.group_ref,
-                "payload": e.payload,
-                "context": e.context,
-                "keyword_text": e.keyword_text,
-                "semantic_text": e.semantic_text,
-                "threshold_rank": e.threshold_rank,
-                "threshold_distance": e.threshold_distance,
+                "id": id_,
+                "group_key": i.entry.group_key,
+                "group_ref": i.entry.group_ref,
+                "payload": i.entry.payload,
+                "context": i.entry.context,
+                "keyword_text": i.entry.keyword_text,
+                "semantic_text": i.entry.semantic_text,
+                "threshold_rank": i.entry.threshold_rank,
+                "threshold_distance": i.entry.threshold_distance,
             }
-            for e in entries
+            for id_, i in zip(ids, indexed, strict=True)
         ]
     )
 
@@ -99,7 +107,20 @@ def add(
         (batch,),
     )
 
-    return [_row_to_entry(r) for r in cur]
+    rows = list(cur)
+
+    vec_rows = [
+        (ids[idx], i.entry.group_key, _serialize_vec(i.embedding))
+        for idx, i in enumerate(indexed)
+        if i.embedding is not None
+    ]
+    if vec_rows:
+        conn.executemany(
+            "INSERT INTO entry_vec(id, group_key, embedding) VALUES (?, ?, ?)",
+            vec_rows,
+        )
+
+    return [_row_to_entry(r) for r in rows]
 
 
 def remove(conn: sqlite3.Connection, ids: list[str]) -> list[str]:
@@ -195,7 +216,7 @@ SELECT e.id, e.group_key, e.group_ref, e.payload, e.context,
        e.keyword_text, e.semantic_text, e.threshold_rank, e.threshold_distance,
        v.distance AS distance
 FROM entry_vec v
-JOIN entry e ON e.rowid = v.rowid
+JOIN entry e ON e.id = v.id
 WHERE v.embedding MATCH :query
   AND v.group_key = :group_key
   AND k = :k
@@ -207,7 +228,7 @@ SELECT e.id, e.group_key, e.group_ref, e.payload, e.context,
        e.keyword_text, e.semantic_text, e.threshold_rank, e.threshold_distance,
        v.distance AS distance
 FROM entry_vec v
-JOIN entry e ON e.rowid = v.rowid
+JOIN entry e ON e.id = v.id
 WHERE v.embedding MATCH :query
   AND v.group_key IS NULL
   AND k = :k

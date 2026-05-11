@@ -5,9 +5,25 @@ from pathlib import Path
 import sqlite_vec
 
 from grimoire.data import entry, meta, schema
-from grimoire.data.entry import Entry, Filters, KeywordHit, SemanticHit
+from grimoire.data.entry import (
+    Entry,
+    Filters,
+    KeywordHit,
+    SemanticHit,
+    _IndexedEntry,
+)
 from grimoire.embed import Embedder
 from grimoire.errors import GrimoireMismatch
+
+
+def _index(entries: list[Entry], embedder: Embedder) -> list[_IndexedEntry]:
+    texts = [entry.semantic_text for entry in entries]
+    to_embed = [text for text in texts if text is not None]
+    vec_iter = iter(embedder.embed_many(to_embed)) if to_embed else iter(())
+    return [
+        _IndexedEntry(e, next(vec_iter) if t is not None else None)
+        for e, t in zip(entries, texts, strict=True)
+    ]
 
 
 class Grimoire:
@@ -25,7 +41,7 @@ class Grimoire:
             self.conn.rollback()
 
     def add(self, entries: list[Entry]) -> list[Entry]:
-        return entry.add(self.conn, entries)
+        return entry.add(self.conn, _index(entries, self.embedder))
 
     def remove(self, ids: list[str]) -> list[str]:
         return entry.remove(self.conn, ids)
