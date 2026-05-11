@@ -19,6 +19,7 @@ from grimoire_cli import manifest
 from grimoire_cli.resolve import (
     Kind,
     Mount,
+    SearchMode,
     make_embedder_for_create,
     open_db,
     require_mount,
@@ -323,14 +324,24 @@ def entry_remove(
         typer.echo(r)
 
 
-@entry_app.command("fetch")
+@entry_app.command("get")
 @_catches
-def entry_fetch(
+def entry_get(
     ctx: typer.Context,
-    id: Annotated[
-        list[str] | None,
-        typer.Option("--id", help="Filter to these IDs (repeatable)."),
-    ] = None,
+    id: Annotated[str, typer.Argument(help="Entry ID.")],
+) -> None:
+    settings: Settings = ctx.obj
+    with open_db(settings.mount, settings.db) as g:
+        rows = g.fetch(Filters(id=[id]))
+    if not rows:
+        raise GrimoireError(f"No entry {id!r}.")
+    typer.echo(json.dumps(_entry_to_dict(rows[0])))
+
+
+@app.command("query")
+@_catches
+def query(
+    ctx: typer.Context,
     group_key: Annotated[
         list[str] | None,
         typer.Option("--group-key", help="Filter to these group_keys (repeatable)."),
@@ -339,13 +350,62 @@ def entry_fetch(
         list[str] | None,
         typer.Option("--group-ref", help="Filter to these group_refs (repeatable)."),
     ] = None,
+    cursor: Annotated[
+        str | None,
+        typer.Option("--cursor", help="Resume after this entry id."),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", help="Maximum rows to emit."),
+    ] = 50,
 ) -> None:
     settings: Settings = ctx.obj
-    filters = Filters(id=id, group_key=group_key, group_ref=group_ref)
+    filters = Filters(group_key=group_key, group_ref=group_ref)
     with open_db(settings.mount, settings.db) as g:
-        entries = g.fetch(filters)
-    for e in entries:
+        rows = g.fetch(filters)
+    rows.sort(key=lambda e: e.id or "")
+    if cursor is not None:
+        rows = [e for e in rows if (e.id or "") > cursor]
+    for e in rows[:limit]:
         typer.echo(json.dumps(_entry_to_dict(e)))
+
+
+@app.command("search")
+@_catches
+def search(
+    ctx: typer.Context,
+    query_text: Annotated[str, typer.Argument(help="Query string.")],
+    mode: Annotated[
+        SearchMode, typer.Option("--mode", help="Index to query.")
+    ] = SearchMode.vector,
+    group_key: Annotated[
+        str | None,
+        typer.Option(
+            "--group-key",
+            help=(
+                "Vector: partition to search (default NULL). "
+                "Keyword: optional filter on group_key."
+            ),
+        ),
+    ] = None,
+    k: Annotated[
+        int,
+        typer.Option("-k", "--limit", help="Maximum hits to return."),
+    ] = 10,
+) -> None:
+    settings: Settings = ctx.obj
+    with open_db(settings.mount, settings.db) as g:
+        if mode is SearchMode.vector:
+            hits = g.semantic_search(query_text, group_key=group_key, limit=k)
+            for h in hits:
+                typer.echo(
+                    json.dumps({**_entry_to_dict(h.entry), "distance": h.distance})
+                )
+        else:
+            filters = Filters(group_key=[group_key] if group_key else None)
+            keyword_hits = g.keyword_search(query_text, filters=filters, limit=k)
+            for h in keyword_hits:
+                typer.echo(json.dumps({**_entry_to_dict(h.entry), "score": h.score}))
 
 
 def _entry_to_dict(e: Entry) -> dict:

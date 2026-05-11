@@ -47,6 +47,13 @@ class Kind(StrEnum):
     fastembed = "fastembed"
 
 
+class SearchMode(StrEnum):
+    """Which index `grimoire search` should hit."""
+
+    vector = "vector"
+    keyword = "keyword"
+
+
 @dataclass(frozen=True, slots=True)
 class Mount:
     path: Path
