@@ -404,6 +404,133 @@ def _patch_json(current, raw: str | None, clear: bool):
     return current
 
 
+_JSONL_FIELDS = (
+    "group_key",
+    "group_ref",
+    "payload",
+    "context",
+    "keyword_text",
+    "semantic_text",
+    "threshold_rank",
+    "threshold_distance",
+)
+
+
+def _entry_to_jsonl(e: Entry) -> dict:
+    out: dict[str, object] = {"id": e.id}
+    for field in _JSONL_FIELDS:
+        value = getattr(e, field)
+        if value is not None:
+            out[field] = value
+    return out
+
+
+def _jsonl_to_entry(obj: dict) -> Entry:
+    """Hydrate an Entry from a JSONL record. `id` is dropped — it is
+    reassigned on import."""
+    return Entry(
+        id=None,
+        group_key=obj.get("group_key"),
+        group_ref=obj.get("group_ref"),
+        payload=obj.get("payload"),
+        context=obj.get("context"),
+        keyword_text=obj.get("keyword_text"),
+        semantic_text=obj.get("semantic_text"),
+        threshold_rank=obj.get("threshold_rank"),
+        threshold_distance=obj.get("threshold_distance"),
+    )
+
+
+@app.command("export")
+@_catches
+def export_cmd(
+    ctx: typer.Context,
+    output: Annotated[
+        Path | None,
+        typer.Option(
+            "-o",
+            "--output",
+            help="Write JSONL here. Default: stdout. Use - to force stdout.",
+        ),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option("--force", help="Overwrite an existing output file."),
+    ] = False,
+) -> None:
+    settings: Settings = ctx.obj
+    with open_db(settings.mount, settings.db) as g:
+        entries = g.fetch()
+    entries.sort(key=lambda e: e.id or "")
+    lines = [json.dumps(_entry_to_jsonl(e)) for e in entries]
+
+    if output is None or str(output) == "-":
+        for line in lines:
+            typer.echo(line)
+        return
+
+    if output.exists() and not force:
+        raise GrimoireError(f"{output} exists. Pass --force to overwrite.")
+    output.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
+    typer.echo(f"Exported {len(entries)} entries to {output}", err=True)
+
+
+@app.command("import")
+@_catches
+def import_cmd(
+    ctx: typer.Context,
+    source: Annotated[Path, typer.Argument(help="JSONL file to import.")],
+) -> None:
+    if not source.exists():
+        raise GrimoireError(f"No file at {source}")
+    entries: list[Entry] = []
+    for line_no, raw in enumerate(
+        source.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if not raw.strip():
+            continue
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise GrimoireError(f"Line {line_no}: {exc.msg}") from exc
+        entries.append(_jsonl_to_entry(obj))
+
+    settings: Settings = ctx.obj
+    with open_db(settings.mount, settings.db) as g:
+        _reject_collisions(g, entries)
+        saved = g.add(entries)
+    typer.echo(f"Imported {len(saved)} entries", err=True)
+
+
+def _reject_collisions(g, new: list[Entry]) -> None:
+    """Refuse the import if any (group_key, group_ref) collision exists,
+    either within the batch or against entries already in the DB."""
+    incoming = [(e.group_key, e.group_ref) for e in new if e.group_ref is not None]
+    seen: set[tuple[str | None, str]] = set()
+    dupes: set[tuple[str | None, str]] = set()
+    for pair in incoming:
+        if pair in seen:
+            dupes.add(pair)
+        seen.add(pair)
+    if dupes:
+        sample = sorted(repr(d) for d in dupes)[:3]
+        raise GrimoireError(
+            f"Import has duplicate (group_key, group_ref): {', '.join(sample)}"
+        )
+
+    if not incoming:
+        return
+    existing = {
+        (e.group_key, e.group_ref) for e in g.fetch() if e.group_ref is not None
+    }
+    clashes = sorted({pair for pair in incoming if pair in existing})
+    if clashes:
+        sample = [repr(c) for c in clashes[:3]]
+        raise GrimoireError(
+            f"(group_key, group_ref) already present: {', '.join(sample)}"
+        )
+
+
 @entry_app.command("get")
 @_catches
 def entry_get(
