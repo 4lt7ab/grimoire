@@ -4,6 +4,7 @@ import functools
 import json
 import shutil
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -22,6 +23,7 @@ from grimoire_cli.resolve import (
     open_db,
     require_mount,
     resolve_mount,
+    validate_db_name,
 )
 
 
@@ -176,6 +178,118 @@ def mount_destroy(ctx: typer.Context, yes: YesOpt = False) -> None:
         return
     shutil.rmtree(mount.path)
     typer.echo(f"Destroyed {mount.path}")
+
+
+@app.command("create")
+@_catches
+def create(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="Name of the new database.")],
+    description: Annotated[
+        str | None,
+        typer.Option("--description", help="Optional description for the manifest."),
+    ] = None,
+    embedder: EmbedderOpt = Kind.noop,
+    model: ModelOpt = None,
+) -> None:
+    validate_db_name(name)
+    mount: Mount = ctx.obj.mount
+    require_mount(mount)
+
+    db_dir = mount.path / name
+    if db_dir.exists() or name in manifest.read(mount.path):
+        raise GrimoireError(f"DB {name!r} already exists.")
+
+    db_dir.mkdir(parents=True)
+    em = make_embedder_for_create(embedder, model, mount)
+    g = open_grimoire(db_dir / "grimoire.db", embedder=em)
+    em.embed(" ")
+    g._conn.commit()
+    g._conn.close()
+
+    manifest.add(
+        mount.path,
+        manifest.DbRecord(
+            name=name,
+            model=em.model,
+            created_at=_now_iso(),
+            description=description,
+        ),
+    )
+    typer.echo(f"Created {db_dir / 'grimoire.db'}")
+
+
+@app.command("destroy")
+@_catches
+def destroy(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="Name of the database to remove.")],
+    yes: YesOpt = False,
+) -> None:
+    validate_db_name(name)
+    if not yes:
+        raise GrimoireError(f"Pass --yes to confirm destroying DB {name!r}.")
+    mount: Mount = ctx.obj.mount
+    require_mount(mount)
+
+    db_dir = mount.path / name
+    records = manifest.read(mount.path)
+    if not db_dir.exists() and name not in records:
+        raise GrimoireError(f"No DB {name!r} at {mount.path}.")
+
+    if db_dir.exists():
+        shutil.rmtree(db_dir)
+    manifest.remove(mount.path, name)
+    typer.echo(f"Destroyed DB {name!r}")
+
+
+@app.command("ls")
+@_catches
+def ls(ctx: typer.Context) -> None:
+    mount: Mount = ctx.obj.mount
+    require_mount(mount)
+
+    rows: list[dict[str, object]] = []
+    if mount.default_db.exists():
+        info = peek(mount.default_db)
+        rows.append(_db_row(name=None, path=mount.default_db, info=info))
+
+    records = manifest.read(mount.path)
+    for name in sorted(records):
+        rec = records[name]
+        path = mount.path / name / "grimoire.db"
+        info = peek(path) if path.exists() else None
+        rows.append(_db_row(name=name, path=path, info=info, manifest_record=rec))
+
+    for row in rows:
+        typer.echo(json.dumps(row))
+
+
+def _db_row(
+    *,
+    name: str | None,
+    path: Path,
+    info,
+    manifest_record: manifest.DbRecord | None = None,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "name": name,
+        "default": name is None,
+        "path": str(path),
+    }
+    if info is not None:
+        row["model"] = info.model
+        row["dimension"] = info.dimension
+        row["entry_count"] = info.entry_count
+    if manifest_record is not None:
+        row["created_at"] = manifest_record.created_at
+        if manifest_record.description is not None:
+            row["description"] = manifest_record.description
+    return row
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 @entry_app.command("add")

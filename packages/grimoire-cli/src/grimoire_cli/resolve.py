@@ -19,8 +19,25 @@ from grimoire.grimoire import open as open_grimoire
 DEFAULT_MOUNT = Path("~/.grimoire")
 DEFAULT_DB_FILE = "grimoire.db"
 MODELS_DIR = "models"
+MANIFEST_FILE = "grimoire.toml"
 NOOP_MODEL = "noop"
 DEFAULT_FASTEMBED_MODEL = "BAAI/bge-small-en-v1.5"
+
+_RESERVED_NAMES = frozenset({DEFAULT_DB_FILE, MODELS_DIR, MANIFEST_FILE})
+
+
+def validate_db_name(name: str) -> None:
+    """Reject names that would clash with mount-level filenames or paths."""
+    if not name:
+        raise GrimoireError("DB name cannot be empty.")
+    if "/" in name or "\\" in name:
+        raise GrimoireError(f"DB name {name!r} cannot contain path separators.")
+    if name.startswith("."):
+        raise GrimoireError(f"DB name {name!r} cannot start with a dot.")
+    if name in _RESERVED_NAMES:
+        raise GrimoireError(f"DB name {name!r} is reserved.")
+    if len(name) > 64:
+        raise GrimoireError(f"DB name {name!r} exceeds 64 characters.")
 
 
 class Kind(StrEnum):
