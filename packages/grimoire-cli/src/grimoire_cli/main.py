@@ -303,17 +303,76 @@ def entry_add(
         str | None,
         typer.Option("--payload", help="JSON object."),
     ] = None,
+    keyword_text: Annotated[
+        str | None,
+        typer.Option("--keyword-text", help="Indexed text for FTS5 keyword search."),
+    ] = None,
+    semantic_text: Annotated[
+        str | None,
+        typer.Option("--semantic-text", help="Text to embed for vector search."),
+    ] = None,
+    context: Annotated[
+        str | None,
+        typer.Option("--context", help="Free-form context stored alongside the entry."),
+    ] = None,
 ) -> None:
     settings: Settings = ctx.obj
     payload_obj = json.loads(payload) if payload is not None else None
+    entry = Entry(
+        id=None,
+        group_key=group_key,
+        group_ref=group_ref,
+        payload=payload_obj,
+        context=context,
+        keyword_text=keyword_text,
+        semantic_text=semantic_text,
+    )
     with open_db(settings.mount, settings.db) as g:
-        [saved] = g.add([Entry(None, group_key, group_ref, payload_obj)])
+        [saved] = g.add([entry])
     typer.echo(json.dumps(_entry_to_dict(saved)))
 
 
-@entry_app.command("remove")
+@entry_app.command("update")
 @_catches
-def entry_remove(
+def entry_update(
+    ctx: typer.Context,
+    id: Annotated[str, typer.Argument(help="Entry ID.")],
+    payload: Annotated[
+        str | None, typer.Option("--payload", help="JSON object.")
+    ] = None,
+    clear_payload: Annotated[bool, typer.Option("--clear-payload")] = False,
+    group_ref: Annotated[str | None, typer.Option("--group-ref")] = None,
+    clear_group_ref: Annotated[bool, typer.Option("--clear-group-ref")] = False,
+    context: Annotated[str | None, typer.Option("--context")] = None,
+    clear_context: Annotated[bool, typer.Option("--clear-context")] = False,
+) -> None:
+    _reject_double(payload, clear_payload, "payload")
+    _reject_double(group_ref, clear_group_ref, "group-ref")
+    _reject_double(context, clear_context, "context")
+
+    settings: Settings = ctx.obj
+    with open_db(settings.mount, settings.db) as g:
+        [current] = g.fetch(Filters(id=[id])) or [None]
+        if current is None:
+            raise GrimoireError(f"No entry {id!r}.")
+        patched = Entry(
+            id=current.id,
+            group_key=current.group_key,
+            group_ref=_patch(current.group_ref, group_ref, clear_group_ref),
+            payload=_patch_json(current.payload, payload, clear_payload),
+            context=_patch(current.context, context, clear_context),
+            keyword_text=current.keyword_text,
+            semantic_text=current.semantic_text,
+            threshold_rank=current.threshold_rank,
+            threshold_distance=current.threshold_distance,
+        )
+        [updated] = g.update([patched])
+    typer.echo(json.dumps(_entry_to_dict(updated)))
+
+
+@entry_app.command("delete")
+@_catches
+def entry_delete(
     ctx: typer.Context,
     ids: Annotated[list[str], typer.Argument(help="One or more entry IDs.")],
 ) -> None:
@@ -322,6 +381,27 @@ def entry_remove(
         removed = g.remove(ids)
     for r in removed:
         typer.echo(r)
+
+
+def _reject_double(value, clear: bool, name: str) -> None:
+    if value is not None and clear:
+        raise GrimoireError(f"--{name} and --clear-{name} are mutually exclusive.")
+
+
+def _patch(current, new, clear: bool):
+    if clear:
+        return None
+    if new is not None:
+        return new
+    return current
+
+
+def _patch_json(current, raw: str | None, clear: bool):
+    if clear:
+        return None
+    if raw is not None:
+        return json.loads(raw)
+    return current
 
 
 @entry_app.command("get")
