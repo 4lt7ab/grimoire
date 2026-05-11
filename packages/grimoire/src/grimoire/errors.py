@@ -8,3 +8,7 @@ class SchemaVersionError(GrimoireError):
 
 class GrimoireMismatch(GrimoireError):
     """The supplied embedder's model or dimension disagrees with the file's lock."""
+
+
+class GrimoireNotFound(GrimoireError):
+    """The path does not exist or is not an initialized grimoire."""

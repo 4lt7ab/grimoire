@@ -1,4 +1,5 @@
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 import sqlite_vec
@@ -12,7 +13,16 @@ from grimoire.data.entry import (
     _IndexedEntry,
 )
 from grimoire.embed import Embedder
-from grimoire.errors import GrimoireMismatch
+from grimoire.errors import GrimoireMismatch, GrimoireNotFound
+
+
+@dataclass(frozen=True, slots=True)
+class Peek:
+    model: str
+    dimension: int
+    schema_version: int
+    entry_count: int
+    group_counts: dict[str | None, int]
 
 
 def _index(entries: list[Entry], embedder: Embedder) -> list[_IndexedEntry]:
@@ -71,6 +81,43 @@ class Grimoire:
             group_key,
             limit,
         )
+
+
+def peek(path: str | Path) -> Peek:
+    """Inspect a grimoire file without loading an embedder or sqlite-vec.
+
+    Returns model, dimension, schema version, total entry count, and
+    per-group counts. Raises `GrimoireNotFound` if the file does not exist
+    or has not been initialized.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise GrimoireNotFound(f"No grimoire at {p}")
+
+    conn = sqlite3.connect(p)
+    conn.row_factory = sqlite3.Row
+    try:
+        if schema.read_version(conn) == 0:
+            raise GrimoireNotFound(f"{p} is not an initialized grimoire")
+        schema.validate(conn)
+        model = meta.fetch(conn, "model")
+        dimension_str = meta.fetch(conn, "dimension")
+        if model is None or dimension_str is None:
+            raise GrimoireNotFound(f"{p} is missing its embedder lock")
+        entry_count = conn.execute("SELECT COUNT(*) FROM entry").fetchone()[0]
+        rows = conn.execute(
+            "SELECT group_key, COUNT(*) AS n FROM entry GROUP BY group_key "
+            "ORDER BY group_key IS NULL, group_key"
+        ).fetchall()
+        return Peek(
+            model=model,
+            dimension=int(dimension_str),
+            schema_version=schema.read_version(conn),
+            entry_count=entry_count,
+            group_counts={r["group_key"]: r["n"] for r in rows},
+        )
+    finally:
+        conn.close()
 
 
 def open(path: str | Path, *, embedder: Embedder) -> Grimoire:
