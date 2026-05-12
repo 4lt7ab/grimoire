@@ -125,6 +125,116 @@ def test_entry_add_fails_for_unknown_named_db(mounted):
     assert "nonesuch" in result.output
 
 
+def test_entry_update_changes_only_specified_fields(mounted):
+    add = runner.invoke(
+        app,
+        [
+            "entry", "add", "the moon",
+            "--keyword-text", "moon",
+            "--group-key", "tale",
+            "--group-ref", "ref-1",
+            "--context", "ch.3",
+            "--payload", json.dumps({"author": "merlin"}),
+            "--threshold-rank", "0.5",
+            "--threshold-distance", "0.8",
+        ],
+    )
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(
+        app,
+        ["entry", "update", entry_id, "--payload", json.dumps({"author": "morgana"})],
+    )
+    assert result.exit_code == 0, result.output
+
+    out = json.loads(result.output)
+    assert out["payload"] == {"author": "morgana"}
+    # unchanged
+    assert out["group_key"] == "tale"
+    assert out["group_ref"] == "ref-1"
+    assert out["context"] == "ch.3"
+    assert out["keyword_text"] == "moon"
+    assert out["semantic_text"] == "the moon"
+    assert out["threshold_rank"] == 0.5
+    assert out["threshold_distance"] == 0.8
+
+
+def test_entry_update_sets_thresholds_preserving_payload(mounted):
+    add = runner.invoke(
+        app,
+        ["entry", "add", "anything", "--payload", json.dumps({"k": "v"})],
+    )
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(
+        app,
+        [
+            "entry", "update", entry_id,
+            "--threshold-rank", "0.25",
+            "--threshold-distance", "0.75",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    out = json.loads(result.output)
+    assert out["threshold_rank"] == 0.25
+    assert out["threshold_distance"] == 0.75
+    assert out["payload"] == {"k": "v"}
+
+
+def test_entry_update_sets_context(mounted):
+    add = runner.invoke(app, ["entry", "add", "anything", "--context", "first"])
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(
+        app,
+        ["entry", "update", entry_id, "--context", "second"],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["context"] == "second"
+
+
+def test_entry_update_fails_for_unknown_id(mounted):
+    result = runner.invoke(
+        app,
+        ["entry", "update", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--payload", "{}"],
+    )
+    assert result.exit_code != 0
+    assert "No entry" in result.output
+
+
+def test_entry_update_targets_named_db(mounted):
+    runner.invoke(app, ["mount", "add", "spellbook"])
+    add = runner.invoke(app, ["entry", "add", "hello", "-n", "spellbook"])
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(
+        app,
+        ["entry", "update", entry_id, "-n", "spellbook", "--payload", json.dumps({"x": 1})],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["payload"] == {"x": 1}
+
+
+def test_entry_update_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedder):
+    monkeypatch.setenv(ENV_VAR, str(tmp_path))
+    result = runner.invoke(
+        app,
+        ["entry", "update", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--payload", "{}"],
+    )
+    assert result.exit_code != 0
+    assert "Mount does not exist" in result.output
+
+
+def test_entry_update_fails_for_unknown_named_db(mounted):
+    result = runner.invoke(
+        app,
+        ["entry", "update", "01HXXXXXXXXXXXXXXXXXXXXXXX", "-n", "nonesuch", "--payload", "{}"],
+    )
+    assert result.exit_code != 0
+    assert "nonesuch" in result.output
+
+
 def test_fetch_no_filters_returns_all(mounted):
     runner.invoke(app, ["entry", "add", "first"])
     runner.invoke(app, ["entry", "add", "second"])

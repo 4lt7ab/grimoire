@@ -1,6 +1,6 @@
 import json
 import re
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Annotated
 
 from grimoire.data.entry import Entry, Filters
@@ -201,6 +201,65 @@ def entry_add_cmd(
         )])
 
     typer.echo(json.dumps(asdict(created), indent=2, default=str))
+
+
+@entry_app.command(name="update")
+def entry_update_cmd(
+    entry_id: Annotated[
+        str,
+        typer.Argument(help="Id of the entry to update."),
+    ],
+    name: Annotated[
+        str | None,
+        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+    ] = None,
+    payload: Annotated[
+        str | None,
+        typer.Option("--payload", help="JSON payload object."),
+    ] = None,
+    context: Annotated[
+        str | None,
+        typer.Option("--context", help="Unindexed contextual text."),
+    ] = None,
+    threshold_rank: Annotated[
+        float | None,
+        typer.Option("--threshold-rank", help="Minimum BM25 rank score for keyword hits."),
+    ] = None,
+    threshold_distance: Annotated[
+        float | None,
+        typer.Option("--threshold-distance", help="Maximum vector distance for semantic hits."),
+    ] = None,
+) -> None:
+    """Update payload, context, and thresholds on an entry. Unspecified fields are preserved."""
+    mnt = mount.resolve()
+    if not mnt.exists():
+        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+
+    db_path = mnt.db_path(name)
+    if not db_path.exists():
+        target = f"database {name!r}" if name else "default database"
+        raise typer.BadParameter(f"No {target} in the mount.")
+
+    payload_provided = payload is not None
+    payload_value = json.loads(payload) if payload_provided else None
+
+    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+        existing = g.fetch(Filters(id=[entry_id]), limit=1)
+        if not existing:
+            raise typer.BadParameter(f"No entry with id {entry_id!r}.")
+        current = existing[0]
+
+        merged = replace(
+            current,
+            payload=payload_value if payload_provided else current.payload,
+            context=current.context if context is None else context,
+            threshold_rank=current.threshold_rank if threshold_rank is None else threshold_rank,
+            threshold_distance=current.threshold_distance if threshold_distance is None else threshold_distance,
+        )
+
+        [returned] = g.update([merged])
+
+    typer.echo(json.dumps(asdict(returned), indent=2, default=str))
 
 
 def _human_size(n: int) -> str:
