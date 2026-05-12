@@ -32,21 +32,13 @@ entry_app = typer.Typer(
 )
 app.add_typer(entry_app)
 
-keyword_app = typer.Typer(
-    name="keyword",
+index_app = typer.Typer(
+    name="index",
     no_args_is_help=True,
     add_completion=False,
-    help="Index or de-index entries' keyword text in FTS5.",
+    help="Index, re-index, or remove an entry's keyword (FTS5) or semantic (vec) row.",
 )
-app.add_typer(keyword_app)
-
-embed_app = typer.Typer(
-    name="embed",
-    no_args_is_help=True,
-    add_completion=False,
-    help="Embed or de-embed entries in the vec index.",
-)
-app.add_typer(embed_app)
+app.add_typer(index_app)
 
 
 @mount_app.command(name="create")
@@ -93,13 +85,18 @@ def mount_add_cmd(
     if not mnt.exists():
         raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
 
-    db_path = mnt.db_path(name)
+    try:
+        db_path = mnt.db_path(name)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
     db_path.parent.mkdir(exist_ok=True)
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)):
         pass
 
-    typer.echo(json.dumps({"name": name, "path": str(db_path)}, indent=2))
+    typer.echo(
+        json.dumps({"name": db_path.parent.name, "path": str(db_path)}, indent=2)
+    )
 
 
 @mount_app.command(name="ls")
@@ -139,7 +136,10 @@ def mount_remove_cmd(
     if not mnt.exists():
         raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
 
-    db_path = mnt.db_path(name)
+    try:
+        db_path = mnt.db_path(name)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
         raise typer.BadParameter(f"No database named {name!r}.")
 
@@ -149,7 +149,9 @@ def mount_remove_cmd(
     except OSError:
         pass
 
-    typer.echo(json.dumps({"name": name, "removed": True}, indent=2))
+    typer.echo(
+        json.dumps({"name": db_path.parent.name, "removed": True}, indent=2)
+    )
 
 
 @entry_app.command(name="add")
@@ -180,12 +182,18 @@ def entry_add_cmd(
     if not mnt.exists():
         raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
 
-    db_path = mnt.db_path(name)
+    try:
+        db_path = mnt.db_path(name)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
         target = f"database {name!r}" if name else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
-    payload_data = json.loads(payload) if payload is not None else None
+    try:
+        payload_data = json.loads(payload) if payload is not None else None
+    except json.JSONDecodeError as e:
+        raise typer.BadParameter(f"Invalid JSON payload: {e.msg}") from e
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
         [created] = g.add([Entry(
@@ -235,13 +243,19 @@ def entry_update_cmd(
     if not mnt.exists():
         raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
 
-    db_path = mnt.db_path(name)
+    try:
+        db_path = mnt.db_path(name)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
         target = f"database {name!r}" if name else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
     payload_provided = payload is not None
-    payload_value = json.loads(payload) if payload_provided else None
+    try:
+        payload_value = json.loads(payload) if payload_provided else None
+    except json.JSONDecodeError as e:
+        raise typer.BadParameter(f"Invalid JSON payload: {e.msg}") from e
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
         existing = g.fetch(Filters(id=[entry_id]), limit=1)
@@ -287,7 +301,10 @@ def info_cmd(
     if not mnt.exists():
         raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
 
-    db_path = mnt.db_path(name)
+    try:
+        db_path = mnt.db_path(name)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
         target = f"database {name!r}" if name else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
@@ -332,7 +349,10 @@ def fetch_cmd(
     if not mnt.exists():
         raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
 
-    db_path = mnt.db_path(name)
+    try:
+        db_path = mnt.db_path(name)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
         target = f"database {name!r}" if name else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
@@ -349,94 +369,80 @@ def fetch_cmd(
     typer.echo(json.dumps([asdict(e) for e in entries], indent=2, default=str))
 
 
-@keyword_app.command(name="set")
-def keyword_set_cmd(
+@index_app.command(name="keyword")
+def index_keyword_cmd(
     entry_id: Annotated[
         str,
         typer.Argument(help="Id of the entry to index."),
     ],
-    text: Annotated[
-        str,
-        typer.Option("--text", help="Keyword text to index in FTS5 for this entry."),
-    ],
     name: Annotated[
         str | None,
         typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+    ] = None,
+    text: Annotated[
+        str | None,
+        typer.Option("--text", help="Keyword text to index in FTS5 for this entry."),
     ] = None,
     threshold_rank: Annotated[
         float | None,
         typer.Option("--threshold-rank", help="Minimum BM25 rank score for keyword hits."),
     ] = None,
+    delete: Annotated[
+        bool,
+        typer.Option(
+            "--delete", help="Remove the entry's FTS5 row instead of indexing it."
+        ),
+    ] = False,
 ) -> None:
-    """Index (or re-index) an entry's keyword text in FTS5.
+    """Index, re-index, or remove an entry's keyword text in FTS5.
 
-    Existing fts rows for this id are replaced.
+    Pass --text to (re-)index, or --delete to remove. The entry itself is not
+    affected by --delete; only the FTS5 row is dropped.
     """
+    if delete and (text is not None or threshold_rank is not None):
+        raise typer.BadParameter(
+            "--delete cannot be combined with --text or --threshold-rank."
+        )
+    if not delete and text is None:
+        raise typer.BadParameter("Provide --text to index, or --delete to remove.")
+
     mnt = mount.resolve()
     if not mnt.exists():
         raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
 
-    db_path = mnt.db_path(name)
+    try:
+        db_path = mnt.db_path(name)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
         target = f"database {name!r}" if name else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
-        [indexed] = g.keyword([(entry_id, text)], threshold_rank=threshold_rank)
+        if delete:
+            removed = g.keyword_remove([entry_id])
+            typer.echo(json.dumps({"id": entry_id, "deleted": bool(removed)}, indent=2))
+        else:
+            try:
+                [indexed] = g.keyword([(entry_id, text)], threshold_rank=threshold_rank)
+            except ValueError as e:
+                raise typer.BadParameter(str(e)) from e
+            typer.echo(json.dumps(asdict(indexed), indent=2, default=str))
 
-    typer.echo(json.dumps(asdict(indexed), indent=2, default=str))
 
-
-@keyword_app.command(name="delete")
-def keyword_delete_cmd(
+@index_app.command(name="semantic")
+def index_semantic_cmd(
     entry_id: Annotated[
         str,
-        typer.Argument(help="Id of the entry to de-index."),
+        typer.Argument(help="Id of the entry to embed."),
     ],
     name: Annotated[
         str | None,
         typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
     ] = None,
-    yes: Annotated[
-        bool,
-        typer.Option("--yes", help="Confirm deletion."),
-    ] = False,
-) -> None:
-    """Delete the entry_fts row for this id. The entry itself is not affected.
-
-    Idempotent — missing fts rows return deleted=false.
-    """
-    if not yes:
-        raise typer.BadParameter("Pass --yes to confirm deletion.")
-
-    mnt = mount.resolve()
-    if not mnt.exists():
-        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
-
-    db_path = mnt.db_path(name)
-    if not db_path.exists():
-        target = f"database {name!r}" if name else "default database"
-        raise typer.BadParameter(f"No {target} in the mount.")
-
-    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
-        removed = g.keyword_remove([entry_id])
-
-    typer.echo(json.dumps({"id": entry_id, "deleted": bool(removed)}, indent=2))
-
-
-@embed_app.command(name="set")
-def embed_set_cmd(
-    entry_id: Annotated[
-        str,
-        typer.Argument(help="Id of the entry to embed."),
-    ],
     text: Annotated[
-        str,
-        typer.Option("--text", help="Semantic text to embed and store on the vec row."),
-    ],
-    name: Annotated[
         str | None,
-        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+        typer.Option("--text", help="Semantic text to embed and store on the vec row."),
     ] = None,
     partition: Annotated[
         str | None,
@@ -446,65 +452,54 @@ def embed_set_cmd(
         float | None,
         typer.Option("--threshold-distance", help="Maximum vector distance for semantic hits."),
     ] = None,
-) -> None:
-    """Embed (or re-embed) an entry by id with the given semantic text.
-
-    Existing vec rows for this id are replaced.
-    """
-    mnt = mount.resolve()
-    if not mnt.exists():
-        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
-
-    db_path = mnt.db_path(name)
-    if not db_path.exists():
-        target = f"database {name!r}" if name else "default database"
-        raise typer.BadParameter(f"No {target} in the mount.")
-
-    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
-        [embedded] = g.embed(
-            [(entry_id, text)],
-            partition=partition,
-            threshold_distance=threshold_distance,
-        )
-
-    typer.echo(json.dumps(asdict(embedded), indent=2, default=str))
-
-
-@embed_app.command(name="delete")
-def embed_delete_cmd(
-    entry_id: Annotated[
-        str,
-        typer.Argument(help="Id of the entry to de-embed."),
-    ],
-    name: Annotated[
-        str | None,
-        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
-    ] = None,
-    yes: Annotated[
+    delete: Annotated[
         bool,
-        typer.Option("--yes", help="Confirm deletion."),
+        typer.Option(
+            "--delete", help="Remove the entry's vec row instead of embedding it."
+        ),
     ] = False,
 ) -> None:
-    """Delete the entry_vec row for this id. The entry itself is not affected.
+    """Embed, re-embed, or remove an entry's semantic vector.
 
-    Idempotent — missing vec rows return deleted=false.
+    Pass --text to (re-)embed, or --delete to remove. The entry itself is not
+    affected by --delete; only the vec row is dropped.
     """
-    if not yes:
-        raise typer.BadParameter("Pass --yes to confirm deletion.")
+    if delete and (
+        text is not None or partition is not None or threshold_distance is not None
+    ):
+        raise typer.BadParameter(
+            "--delete cannot be combined with --text, --partition, "
+            "or --threshold-distance."
+        )
+    if not delete and text is None:
+        raise typer.BadParameter("Provide --text to embed, or --delete to remove.")
 
     mnt = mount.resolve()
     if not mnt.exists():
         raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
 
-    db_path = mnt.db_path(name)
+    try:
+        db_path = mnt.db_path(name)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
         target = f"database {name!r}" if name else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
-        removed = g.embed_remove([entry_id])
-
-    typer.echo(json.dumps({"id": entry_id, "deleted": bool(removed)}, indent=2))
+        if delete:
+            removed = g.embed_remove([entry_id])
+            typer.echo(json.dumps({"id": entry_id, "deleted": bool(removed)}, indent=2))
+        else:
+            try:
+                [embedded] = g.embed(
+                    [(entry_id, text)],
+                    partition=partition,
+                    threshold_distance=threshold_distance,
+                )
+            except ValueError as e:
+                raise typer.BadParameter(str(e)) from e
+            typer.echo(json.dumps(asdict(embedded), indent=2, default=str))
 
 
 @app.command(name="search")
@@ -540,7 +535,10 @@ def search_cmd(
     if not mnt.exists():
         raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
 
-    db_path = mnt.db_path(name)
+    try:
+        db_path = mnt.db_path(name)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
         target = f"database {name!r}" if name else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
@@ -602,7 +600,10 @@ def entry_delete_cmd(
     if not mnt.exists():
         raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
 
-    db_path = mnt.db_path(name)
+    try:
+        db_path = mnt.db_path(name)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
         target = f"database {name!r}" if name else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
