@@ -15,8 +15,10 @@ members = [
 
 [manifest.dependency-groups]
 dev = [
+    { name = "fastembed", specifier = ">=0.4" },
     { name = "pytest", specifier = ">=8" },
     { name = "ruff", specifier = ">=0.8" },
+    { name = "socksio", specifier = ">=1.0" },
 ]
 
 [[package]]

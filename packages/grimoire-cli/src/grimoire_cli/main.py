@@ -1,6 +1,8 @@
+from grimoire_cli.cli import app
+
+
 def main() -> None:
-    """grimoire CLI entrypoint. To be implemented."""
-    raise SystemExit("grimoire CLI not yet implemented.")
+    app()
 
 
 if __name__ == "__main__":

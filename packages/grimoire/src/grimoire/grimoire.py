@@ -58,8 +58,12 @@ class Grimoire:
     def remove(self, ids: list[str]) -> list[str]:
         return entry.remove(self._conn, ids)
 
-    def fetch(self, filters: Filters | None = None) -> list[Entry]:
-        return entry.fetch(self._conn, filters)
+    def fetch(
+        self,
+        filters: Filters | None = None,
+        limit: int = 100,
+    ) -> list[Entry]:
+        return entry.fetch(self._conn, filters, limit)
 
     def keyword_search(
         self,
@@ -96,19 +100,24 @@ def peek(path: str | Path) -> Peek:
 
     conn = sqlite3.connect(p)
     conn.row_factory = sqlite3.Row
+
     try:
         if schema.read_version(conn) == 0:
             raise GrimoireNotFound(f"{p} is not an initialized grimoire")
+        
         schema.validate(conn)
         model = meta.fetch(conn, "model")
         dimension_str = meta.fetch(conn, "dimension")
+
         if model is None or dimension_str is None:
             raise GrimoireNotFound(f"{p} is missing its embedder lock")
+        
         entry_count = conn.execute("SELECT COUNT(*) FROM entry").fetchone()[0]
         rows = conn.execute(
             "SELECT group_key, COUNT(*) AS n FROM entry GROUP BY group_key "
             "ORDER BY group_key IS NULL, group_key"
         ).fetchall()
+
         return Peek(
             model=model,
             dimension=int(dimension_str),

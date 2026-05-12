@@ -203,20 +203,23 @@ FROM entry
 WHERE (:ids IS NULL OR id IN (SELECT value FROM json_each(:ids)))
   AND (:group_keys IS NULL OR group_key IN (SELECT value FROM json_each(:group_keys)))
   AND (:group_refs IS NULL OR group_ref IN (SELECT value FROM json_each(:group_refs)))
+ORDER BY id
 """
 
 
 def fetch(
     conn: sqlite3.Connection,
     filters: Filters | None = None,
+    limit: int = 100,
 ) -> list[Entry]:
     f = filters or Filters()
     cur = conn.execute(
-        _FETCH_SQL,
+        _FETCH_SQL + "\nLIMIT :limit",
         {
             "ids": json.dumps(f.id) if f.id else None,
             "group_keys": json.dumps(f.group_key) if f.group_key else None,
             "group_refs": json.dumps(f.group_ref) if f.group_ref else None,
+            "limit": limit,
         },
     )
     return [_row_to_entry(r) for r in cur]
