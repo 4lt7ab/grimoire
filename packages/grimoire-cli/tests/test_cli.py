@@ -174,6 +174,12 @@ def test_mount_add_rejects_slash_in_name(mounted):
     assert "Invalid database name" in result.output
 
 
+def test_mount_add_rejects_dunder_prefixed_name(mounted):
+    result = runner.invoke(app, ["mount", "add", "__models__"])
+    assert result.exit_code != 0
+    assert "reserved" in result.output
+
+
 def test_named_db_lookup_is_case_insensitive(mounted):
     runner.invoke(app, ["mount", "add", "spellbook"])
     result = runner.invoke(app, ["entry", "add", "-n", "SPELLBOOK"])

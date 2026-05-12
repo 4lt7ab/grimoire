@@ -31,6 +31,6 @@ def test_module_constants_match_documented_layout():
     # Guardrail: the CLAUDE.md mount layout depends on these names.
     assert mount_mod.DB_FILENAME == "grimoire.db"
     assert mount_mod.REGISTRY_FILENAME == "grimoire.toml"
-    assert mount_mod.MODELS_DIRNAME == "models"
+    assert mount_mod.MODELS_DIRNAME == "__models__"
     assert mount_mod.ENV_VAR == "GRIMOIRE_MOUNT"
     assert mount_mod.DEFAULT_MOUNT == Path.home() / ".grimoire"

@@ -5,7 +5,7 @@ from pathlib import Path
 
 DB_FILENAME = "grimoire.db"
 REGISTRY_FILENAME = "grimoire.toml"
-MODELS_DIRNAME = "models"
+MODELS_DIRNAME = "__models__"
 DEFAULT_MOUNT = Path.home() / ".grimoire"
 
 _NAME_PATTERN = re.compile(r"^[a-z0-9_-]+$")
@@ -18,6 +18,10 @@ def _normalize_name(name: str) -> str:
             f"Invalid database name {name!r}: names must be non-empty and "
             "contain only alphanumerics, hyphens, and underscores."
         )
+    if lowered.startswith("__"):
+        raise ValueError(
+            f"Invalid database name {name!r}: names starting with '__' are reserved."
+        )
     return lowered
 
 
@@ -28,8 +32,10 @@ class Mount:
     Layout:
         <path>/grimoire.db          -- the default DB
         <path>/<name>/grimoire.db   -- a named DB
-        <path>/models/              -- shared embedder model cache
+        <path>/__models__/          -- shared embedder model cache
         <path>/grimoire.toml        -- registry file (reserved; currently inert)
+
+    Names starting with '__' are reserved for grimoire's own use.
 
     The library publishes the convention; consumers (CLI, services, scripts)
     decide where the mount lives on disk and which embedder to pair with it.
