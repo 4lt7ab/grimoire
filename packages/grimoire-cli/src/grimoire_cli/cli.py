@@ -1,6 +1,7 @@
 import json
 import re
 from dataclasses import asdict, replace
+from pathlib import Path
 from typing import Annotated
 
 from grimoire.data.entry import Entry, Filters
@@ -41,10 +42,31 @@ index_app = typer.Typer(
 app.add_typer(index_app)
 
 
+@app.callback()
+def main(
+    ctx: typer.Context,
+    mount_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--mount",
+            help="Path to the grimoire mount (overrides $GRIMOIRE_MOUNT; default ~/.grimoire).",
+        ),
+    ] = None,
+) -> None:
+    ctx.obj = mount.resolve(mount_path)
+
+
+def _existing_mount(ctx: typer.Context) -> mount.Mount:
+    mnt: mount.Mount = ctx.obj
+    if not mnt.exists():
+        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+    return mnt
+
+
 @mount_app.command(name="create")
-def mount_create_cmd() -> None:
+def mount_create_cmd(ctx: typer.Context) -> None:
     """Create the mount + default DB. Idempotent."""
-    mnt = mount.resolve()
+    mnt: mount.Mount = ctx.obj
     mount.create(mnt)
 
     with grimoire.open(mnt.default_db, embedder=embed.build_embedder(mnt.models_dir)):
@@ -55,6 +77,7 @@ def mount_create_cmd() -> None:
 
 @mount_app.command(name="destroy")
 def mount_destroy_cmd(
+    ctx: typer.Context,
     yes: Annotated[
         bool,
         typer.Option("--yes", help="Confirm destruction of the entire mount."),
@@ -64,7 +87,7 @@ def mount_destroy_cmd(
     if not yes:
         raise typer.BadParameter("Pass --yes to confirm destruction of the mount.")
 
-    mnt = mount.resolve()
+    mnt: mount.Mount = ctx.obj
     if not mnt.exists():
         raise typer.BadParameter("No mount to destroy.")
 
@@ -75,15 +98,14 @@ def mount_destroy_cmd(
 
 @mount_app.command(name="add")
 def mount_add_cmd(
+    ctx: typer.Context,
     name: Annotated[
         str,
         typer.Argument(help="Name of the database to add."),
     ],
 ) -> None:
     """Add a named grimoire database to the mount."""
-    mnt = mount.resolve()
-    if not mnt.exists():
-        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+    mnt = _existing_mount(ctx)
 
     try:
         db_path = mnt.db_path(name)
@@ -100,11 +122,9 @@ def mount_add_cmd(
 
 
 @mount_app.command(name="ls")
-def mount_ls_cmd() -> None:
+def mount_ls_cmd(ctx: typer.Context) -> None:
     """List databases in the mount."""
-    mnt = mount.resolve()
-    if not mnt.exists():
-        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+    mnt = _existing_mount(ctx)
 
     dbs: list[dict[str, str | None]] = [{"name": None, "path": str(mnt.default_db)}]
     for sub in sorted(mnt.path.iterdir()):
@@ -119,6 +139,7 @@ def mount_ls_cmd() -> None:
 
 @mount_app.command(name="remove")
 def mount_remove_cmd(
+    ctx: typer.Context,
     name: Annotated[
         str,
         typer.Argument(help="Name of the database to remove."),
@@ -132,9 +153,7 @@ def mount_remove_cmd(
     if not yes:
         raise typer.BadParameter("Pass --yes to confirm deletion.")
 
-    mnt = mount.resolve()
-    if not mnt.exists():
-        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+    mnt = _existing_mount(ctx)
 
     try:
         db_path = mnt.db_path(name)
@@ -156,6 +175,7 @@ def mount_remove_cmd(
 
 @entry_app.command(name="add")
 def entry_add_cmd(
+    ctx: typer.Context,
     name: Annotated[
         str | None,
         typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
@@ -178,9 +198,7 @@ def entry_add_cmd(
     ] = None,
 ) -> None:
     """Create a Grimoire entry. Add searchable text via `grimoire embed` or `grimoire keyword`."""
-    mnt = mount.resolve()
-    if not mnt.exists():
-        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+    mnt = _existing_mount(ctx)
 
     try:
         db_path = mnt.db_path(name)
@@ -212,6 +230,7 @@ def entry_add_cmd(
 
 @entry_app.command(name="update")
 def entry_update_cmd(
+    ctx: typer.Context,
     entry_id: Annotated[
         str,
         typer.Argument(help="Id of the entry to update."),
@@ -242,9 +261,7 @@ def entry_update_cmd(
     To change keyword thresholds or semantic thresholds, re-run `grimoire keyword`
     or `grimoire embed` with the new threshold value.
     """
-    mnt = mount.resolve()
-    if not mnt.exists():
-        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+    mnt = _existing_mount(ctx)
 
     try:
         db_path = mnt.db_path(name)
@@ -297,15 +314,14 @@ def _human_size(n: int) -> str:
 
 @app.command(name="info")
 def info_cmd(
+    ctx: typer.Context,
     name: Annotated[
         str | None,
         typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
     ] = None,
 ) -> None:
     """Show metadata for a grimoire database: embedder lock, schema version, counts, file size."""
-    mnt = mount.resolve()
-    if not mnt.exists():
-        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+    mnt = _existing_mount(ctx)
 
     try:
         db_path = mnt.db_path(name)
@@ -329,6 +345,7 @@ def info_cmd(
 
 @app.command(name="fetch")
 def fetch_cmd(
+    ctx: typer.Context,
     name: Annotated[
         str | None,
         typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
@@ -351,9 +368,7 @@ def fetch_cmd(
     ] = 100,
 ) -> None:
     """Fetch Grimoire entries matching the given filters."""
-    mnt = mount.resolve()
-    if not mnt.exists():
-        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+    mnt = _existing_mount(ctx)
 
     try:
         db_path = mnt.db_path(name)
@@ -377,6 +392,7 @@ def fetch_cmd(
 
 @index_app.command(name="keyword")
 def index_keyword_cmd(
+    ctx: typer.Context,
     entry_id: Annotated[
         str,
         typer.Argument(help="Id of the entry to index."),
@@ -412,9 +428,7 @@ def index_keyword_cmd(
     if not delete and text is None:
         raise typer.BadParameter("Provide --text to index, or --delete to remove.")
 
-    mnt = mount.resolve()
-    if not mnt.exists():
-        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+    mnt = _existing_mount(ctx)
 
     try:
         db_path = mnt.db_path(name)
@@ -438,6 +452,7 @@ def index_keyword_cmd(
 
 @index_app.command(name="semantic")
 def index_semantic_cmd(
+    ctx: typer.Context,
     entry_id: Annotated[
         str,
         typer.Argument(help="Id of the entry to embed."),
@@ -480,9 +495,7 @@ def index_semantic_cmd(
     if not delete and text is None:
         raise typer.BadParameter("Provide --text to embed, or --delete to remove.")
 
-    mnt = mount.resolve()
-    if not mnt.exists():
-        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+    mnt = _existing_mount(ctx)
 
     try:
         db_path = mnt.db_path(name)
@@ -510,6 +523,7 @@ def index_semantic_cmd(
 
 @app.command(name="search")
 def search_cmd(
+    ctx: typer.Context,
     query: Annotated[
         str,
         typer.Argument(help="Search query — embedded for semantic, parsed as FTS5 for keyword."),
@@ -537,9 +551,7 @@ def search_cmd(
     the raw vector distance. The query is treated as natural language —
     punctuation and FTS5 operators are stripped from the keyword pass.
     """
-    mnt = mount.resolve()
-    if not mnt.exists():
-        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+    mnt = _existing_mount(ctx)
 
     try:
         db_path = mnt.db_path(name)
@@ -585,6 +597,7 @@ def search_cmd(
 
 @entry_app.command(name="delete")
 def entry_delete_cmd(
+    ctx: typer.Context,
     entry_id: Annotated[
         str,
         typer.Argument(help="Id of the entry to delete."),
@@ -602,9 +615,7 @@ def entry_delete_cmd(
     if not yes:
         raise typer.BadParameter("Pass --yes to confirm deletion.")
 
-    mnt = mount.resolve()
-    if not mnt.exists():
-        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+    mnt = _existing_mount(ctx)
 
     try:
         db_path = mnt.db_path(name)

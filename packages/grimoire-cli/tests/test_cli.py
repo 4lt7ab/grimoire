@@ -51,6 +51,18 @@ def test_mount_create_initializes_layout(tmp_path, monkeypatch, patched_embedder
     assert (tmp_path / DB_FILENAME).is_file()
 
 
+def test_mount_flag_overrides_env(tmp_path, monkeypatch, patched_embedder):
+    # Set the env to one path, point --mount at another; --mount wins.
+    decoy = tmp_path / "decoy"
+    target = tmp_path / "target"
+    monkeypatch.setenv(ENV_VAR, str(decoy))
+    result = runner.invoke(app, ["--mount", str(target), "mount", "create"])
+    assert result.exit_code == 0, result.output
+    assert (target / MODELS_DIRNAME).is_dir()
+    assert (target / DB_FILENAME).is_file()
+    assert not decoy.exists()
+
+
 def test_mount_create_prints_resolved_path(tmp_path, monkeypatch, patched_embedder):
     monkeypatch.setenv(ENV_VAR, str(tmp_path))
     result = runner.invoke(app, ["mount", "create"])
