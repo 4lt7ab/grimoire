@@ -248,6 +248,48 @@ def entry_fetch_cmd(
     typer.echo(json.dumps([asdict(e) for e in entries], indent=2, default=str))
 
 
+def _human_size(n: int) -> str:
+    if n < 1024:
+        return f"{n} B"
+    size = float(n)
+    for unit in ("KB", "MB", "GB", "TB"):
+        size /= 1024
+        if size < 1024:
+            break
+    if size == int(size):
+        return f"{int(size)} {unit}"
+    return f"{size:.1f} {unit}"
+
+
+@app.command(name="info")
+def info_cmd(
+    name: Annotated[
+        str | None,
+        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+    ] = None,
+) -> None:
+    """Show metadata for a grimoire database: embedder lock, schema version, counts, file size."""
+    mnt = mount.resolve()
+    if not mnt.exists():
+        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+
+    db_path = mnt.db_path(name)
+    if not db_path.exists():
+        target = f"database {name!r}" if name else "default database"
+        raise typer.BadParameter(f"No {target} in the mount.")
+
+    peeked = grimoire.peek(db_path)
+    size_bytes = db_path.stat().st_size
+    result = {
+        "name": name,
+        "path": str(db_path),
+        "size_bytes": size_bytes,
+        "size": _human_size(size_bytes),
+        **asdict(peeked),
+    }
+    typer.echo(json.dumps(result, indent=2, default=str))
+
+
 @app.command(name="search")
 def search_cmd(
     query: Annotated[

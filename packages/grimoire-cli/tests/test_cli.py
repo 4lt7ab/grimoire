@@ -321,6 +321,62 @@ def test_mount_destroy_wipes_mount(mounted):
     assert not mounted.exists()
 
 
+def test_info_reports_empty_default_db(mounted):
+    result = runner.invoke(app, ["info"])
+    assert result.exit_code == 0, result.output
+
+    info = json.loads(result.output)
+    assert info["name"] is None
+    assert info["path"] == str(mounted / DB_FILENAME)
+    assert info["size_bytes"] > 0
+    assert info["size"].endswith(("B", "KB", "MB", "GB", "TB"))
+    assert info["model"] == "noop"
+    assert info["dimension"] == 1
+    assert info["schema_version"] == 1
+    assert info["entry_count"] == 0
+    assert info["group_counts"] == {}
+
+
+def test_info_counts_entries_and_groups(mounted):
+    runner.invoke(app, ["entry", "add", "a", "--group-key", "tale"])
+    runner.invoke(app, ["entry", "add", "b", "--group-key", "tale"])
+    runner.invoke(app, ["entry", "add", "c", "--group-key", "note"])
+    runner.invoke(app, ["entry", "add", "d"])
+
+    result = runner.invoke(app, ["info"])
+    assert result.exit_code == 0, result.output
+
+    info = json.loads(result.output)
+    assert info["entry_count"] == 4
+    assert info["group_counts"] == {"tale": 2, "note": 1, "null": 1}
+
+
+def test_info_targets_named_db(mounted):
+    runner.invoke(app, ["mount", "add", "spellbook"])
+    runner.invoke(app, ["entry", "add", "named", "-n", "spellbook"])
+
+    result = runner.invoke(app, ["info", "-n", "spellbook"])
+    assert result.exit_code == 0, result.output
+
+    info = json.loads(result.output)
+    assert info["name"] == "spellbook"
+    assert info["path"] == str(mounted / "spellbook" / DB_FILENAME)
+    assert info["entry_count"] == 1
+
+
+def test_info_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedder):
+    monkeypatch.setenv(ENV_VAR, str(tmp_path))
+    result = runner.invoke(app, ["info"])
+    assert result.exit_code != 0
+    assert "Mount does not exist" in result.output
+
+
+def test_info_fails_for_unknown_named_db(mounted):
+    result = runner.invoke(app, ["info", "-n", "nonesuch"])
+    assert result.exit_code != 0
+    assert "nonesuch" in result.output
+
+
 def test_search_runs_both_modes(mounted):
     runner.invoke(app, ["entry", "add", "the moon glows", "--keyword-text", "moon glow"])
 
