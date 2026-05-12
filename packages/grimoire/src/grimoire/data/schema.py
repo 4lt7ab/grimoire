@@ -23,6 +23,9 @@ CREATE TABLE entry (
 
 CREATE INDEX entry_group_key ON entry(group_key);
 
+CREATE UNIQUE INDEX entry_group_ref_unique ON entry(group_key, group_ref)
+    WHERE group_key IS NOT NULL AND group_ref IS NOT NULL;
+
 CREATE VIRTUAL TABLE entry_fts USING fts5(
     entry_id UNINDEXED,
     keyword_text,

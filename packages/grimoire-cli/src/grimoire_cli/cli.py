@@ -196,13 +196,16 @@ def entry_add_cmd(
         raise typer.BadParameter(f"Invalid JSON payload: {e.msg}") from e
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
-        [created] = g.add([Entry(
-            id=None,
-            group_key=group_key,
-            group_ref=group_ref,
-            payload=payload_data,
-            context=context,
-        )])
+        try:
+            [created] = g.add([Entry(
+                id=None,
+                group_key=group_key,
+                group_ref=group_ref,
+                payload=payload_data,
+                context=context,
+            )])
+        except ValueError as e:
+            raise typer.BadParameter(str(e)) from e
 
     typer.echo(json.dumps(asdict(created), indent=2, default=str))
 
@@ -271,7 +274,10 @@ def entry_update_cmd(
             context=current.context if context is None else context,
         )
 
-        [returned] = g.update([merged])
+        try:
+            [returned] = g.update([merged])
+        except ValueError as e:
+            raise typer.BadParameter(str(e)) from e
 
     typer.echo(json.dumps(asdict(returned), indent=2, default=str))
 

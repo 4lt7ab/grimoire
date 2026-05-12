@@ -139,6 +139,22 @@ def test_entry_add_rejects_invalid_payload_json(mounted):
     assert "Invalid JSON payload" in result.output
 
 
+def test_entry_add_rejects_duplicate_group_key_and_ref(mounted):
+    first = runner.invoke(
+        app, ["entry", "add", "--group-key", "wizard", "--group-ref", "gandalf"]
+    )
+    assert first.exit_code == 0, first.output
+
+    second = runner.invoke(
+        app, ["entry", "add", "--group-key", "wizard", "--group-ref", "gandalf"]
+    )
+    assert second.exit_code != 0
+    assert "group_key, group_ref" in second.output
+
+    listed = runner.invoke(app, ["fetch", "--group-ref", "gandalf"])
+    assert len(json.loads(listed.output)) == 1
+
+
 def test_mount_add_lowercases_name(mounted):
     result = runner.invoke(app, ["mount", "add", "Spellbook"])
     assert result.exit_code == 0, result.output
@@ -272,6 +288,23 @@ def test_entry_update_fails_for_unknown_id(mounted):
     )
     assert result.exit_code != 0
     assert "No entry" in result.output
+
+
+def test_entry_update_rejects_collision_with_existing_pair(mounted):
+    runner.invoke(
+        app, ["entry", "add", "--group-key", "wizard", "--group-ref", "gandalf"]
+    )
+    other = runner.invoke(
+        app, ["entry", "add", "--group-key", "wizard", "--group-ref", "saruman"]
+    )
+    other_id = json.loads(other.output)["id"]
+
+    result = runner.invoke(
+        app,
+        ["entry", "update", other_id, "--group-ref", "gandalf"],
+    )
+    assert result.exit_code != 0
+    assert "group_key, group_ref" in result.output
 
 
 def test_entry_update_targets_named_db(mounted):

@@ -64,20 +64,25 @@ def add(
         )
         for e in entries
     ]
-    conn.executemany(
-        "INSERT INTO entry (id, group_key, group_ref, payload, context) "
-        "VALUES (?, ?, ?, ?, ?)",
-        [
-            (
-                e.id,
-                e.group_key,
-                e.group_ref,
-                json.dumps(e.payload) if e.payload is not None else None,
-                e.context,
-            )
-            for e in saved
-        ],
-    )
+    try:
+        conn.executemany(
+            "INSERT INTO entry (id, group_key, group_ref, payload, context) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [
+                (
+                    e.id,
+                    e.group_key,
+                    e.group_ref,
+                    json.dumps(e.payload) if e.payload is not None else None,
+                    e.context,
+                )
+                for e in saved
+            ],
+        )
+    except sqlite3.IntegrityError as exc:
+        raise ValueError(
+            "duplicate (group_key, group_ref); each (key, ref) pair must be unique"
+        ) from exc
     return saved
 
 
@@ -211,12 +216,17 @@ def update(
     saved: list[Entry] = []
     for e in entries:
         payload_text = json.dumps(e.payload) if e.payload is not None else None
-        cur = conn.execute(
-            "UPDATE entry "
-            "SET group_key = ?, group_ref = ?, payload = ?, context = ? "
-            "WHERE id = ?",
-            (e.group_key, e.group_ref, payload_text, e.context, e.id),
-        )
+        try:
+            cur = conn.execute(
+                "UPDATE entry "
+                "SET group_key = ?, group_ref = ?, payload = ?, context = ? "
+                "WHERE id = ?",
+                (e.group_key, e.group_ref, payload_text, e.context, e.id),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(
+                "duplicate (group_key, group_ref); each (key, ref) pair must be unique"
+            ) from exc
         if cur.rowcount > 0:
             saved.append(e)
     return saved

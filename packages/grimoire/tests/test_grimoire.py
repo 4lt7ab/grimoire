@@ -71,6 +71,48 @@ def test_add_round_trips_any_json_payload(tmp_path, fake_embedder, payload):
     assert fetched.payload == payload
 
 
+def test_add_rejects_duplicate_group_key_and_ref(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g.add([Entry(None, "wizard", "gandalf", None)])
+    with pytest.raises(ValueError, match="group_key, group_ref"):
+        g.add([Entry(None, "wizard", "gandalf", None)])
+
+
+def test_add_allows_same_ref_across_different_keys(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g.add([Entry(None, "wizard", "gandalf", None)])
+    g.add([Entry(None, "spell", "gandalf", None)])
+    assert len(g.fetch()) == 2
+
+
+def test_add_allows_null_group_ref_duplicates(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g.add([Entry(None, "wizard", None, None)])
+    g.add([Entry(None, "wizard", None, None)])
+    g.add([Entry(None, None, "gandalf", None)])
+    g.add([Entry(None, None, "gandalf", None)])
+    assert len(g.fetch()) == 4
+
+
+def test_add_rejects_self_colliding_batch(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    with pytest.raises(ValueError, match="group_key, group_ref"):
+        g.add(
+            [
+                Entry(None, "wizard", "gandalf", None),
+                Entry(None, "wizard", "gandalf", None),
+            ]
+        )
+
+
+def test_update_rejects_collision_with_existing_row(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g.add([Entry(None, "wizard", "gandalf", None)])
+    [other] = g.add([Entry(None, "wizard", "saruman", None)])
+    with pytest.raises(ValueError, match="group_key, group_ref"):
+        g.update([Entry(other.id, "wizard", "gandalf", None)])
+
+
 def test_embed_empty_is_noop(tmp_path, fake_embedder):
     g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
     assert g.embed([]) == []
