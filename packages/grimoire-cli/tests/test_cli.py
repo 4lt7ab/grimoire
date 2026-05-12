@@ -325,6 +325,36 @@ def test_entry_update_rejects_collision_with_existing_pair(mounted):
     assert "group_key, group_ref" in result.output
 
 
+def test_entry_get_returns_entry(mounted):
+    add = runner.invoke(
+        app,
+        [
+            "entry",
+            "add",
+            "--group-key",
+            "wizard",
+            "--group-ref",
+            "gandalf",
+            "--payload",
+            '{"order":"Istari"}',
+        ],
+    )
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(app, ["entry", "get", entry_id])
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.output)
+    assert out["id"] == entry_id
+    assert out["group_ref"] == "gandalf"
+    assert out["payload"] == {"order": "Istari"}
+
+
+def test_entry_get_unknown_id_errors(mounted):
+    result = runner.invoke(app, ["entry", "get", "01HZZZZZZZZZZZZZZZZZZZZZZZ"])
+    assert result.exit_code != 0
+    assert "No entry" in result.output
+
+
 def test_entry_update_targets_named_db(mounted):
     runner.invoke(app, ["mount", "add", "spellbook"])
     add = runner.invoke(app, ["entry", "add", "-n", "spellbook"])

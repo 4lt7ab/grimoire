@@ -299,6 +299,37 @@ def entry_update_cmd(
     typer.echo(json.dumps(asdict(returned), indent=2, default=str))
 
 
+@entry_app.command(name="get")
+def entry_get_cmd(
+    ctx: typer.Context,
+    entry_id: Annotated[
+        str,
+        typer.Argument(help="Id of the entry to fetch."),
+    ],
+    name: Annotated[
+        str | None,
+        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+    ] = None,
+) -> None:
+    """Fetch a single Grimoire entry by id."""
+    mnt = _existing_mount(ctx)
+
+    try:
+        db_path = mnt.db_path(name)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
+    if not db_path.exists():
+        target = f"database {name!r}" if name else "default database"
+        raise typer.BadParameter(f"No {target} in the mount.")
+
+    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+        entries = g.fetch(Filters(id=[entry_id]), limit=1)
+    if not entries:
+        raise typer.BadParameter(f"No entry with id {entry_id!r}.")
+
+    typer.echo(json.dumps(asdict(entries[0]), indent=2, default=str))
+
+
 def _human_size(n: int) -> str:
     if n < 1024:
         return f"{n} B"
