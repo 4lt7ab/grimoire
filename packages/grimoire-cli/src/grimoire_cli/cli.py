@@ -138,21 +138,13 @@ def mount_remove_cmd(
 
 @entry_app.command(name="add")
 def entry_add_cmd(
-    semantic_text: Annotated[
-        str | None,
-        typer.Argument(help="Text embedded for semantic search."),
-    ] = None,
     name: Annotated[
         str | None,
         typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
     ] = None,
-    keyword_text: Annotated[
-        str | None,
-        typer.Option("--keyword-text", "-k", help="Text indexed for FTS5 keyword search."),
-    ] = None,
     group_key: Annotated[
         str | None,
-        typer.Option("--group-key", help="Group key partition for this entry."),
+        typer.Option("--group-key", help="Group key metadata for this entry."),
     ] = None,
     group_ref: Annotated[
         str | None,
@@ -166,16 +158,8 @@ def entry_add_cmd(
         str | None,
         typer.Option("--payload", help="JSON payload object."),
     ] = None,
-    threshold_rank: Annotated[
-        float | None,
-        typer.Option("--threshold-rank", help="Minimum BM25 rank score for keyword hits."),
-    ] = None,
-    threshold_distance: Annotated[
-        float | None,
-        typer.Option("--threshold-distance", help="Maximum vector distance for semantic hits."),
-    ] = None,
 ) -> None:
-    """Create a Grimoire entry."""
+    """Create a Grimoire entry. Add searchable text via `grimoire embed` or `grimoire keyword`."""
     mnt = mount.resolve()
     if not mnt.exists():
         raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
@@ -194,10 +178,6 @@ def entry_add_cmd(
             group_ref=group_ref,
             payload=payload_data,
             context=context,
-            keyword_text=keyword_text,
-            semantic_text=semantic_text,
-            threshold_rank=threshold_rank,
-            threshold_distance=threshold_distance,
         )])
 
     typer.echo(json.dumps(asdict(created), indent=2, default=str))
@@ -221,16 +201,12 @@ def entry_update_cmd(
         str | None,
         typer.Option("--context", help="Unindexed contextual text."),
     ] = None,
-    threshold_rank: Annotated[
-        float | None,
-        typer.Option("--threshold-rank", help="Minimum BM25 rank score for keyword hits."),
-    ] = None,
-    threshold_distance: Annotated[
-        float | None,
-        typer.Option("--threshold-distance", help="Maximum vector distance for semantic hits."),
-    ] = None,
 ) -> None:
-    """Update payload, context, and thresholds on an entry. Unspecified fields are preserved."""
+    """Update payload and context on an entry. Unspecified fields are preserved.
+
+    To change keyword thresholds or semantic thresholds, re-run `grimoire keyword`
+    or `grimoire embed` with the new threshold value.
+    """
     mnt = mount.resolve()
     if not mnt.exists():
         raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
@@ -253,8 +229,6 @@ def entry_update_cmd(
             current,
             payload=payload_value if payload_provided else current.payload,
             context=current.context if context is None else context,
-            threshold_rank=current.threshold_rank if threshold_rank is None else threshold_rank,
-            threshold_distance=current.threshold_distance if threshold_distance is None else threshold_distance,
         )
 
         [returned] = g.update([merged])
@@ -349,6 +323,90 @@ def fetch_cmd(
     typer.echo(json.dumps([asdict(e) for e in entries], indent=2, default=str))
 
 
+@app.command(name="keyword")
+def keyword_cmd(
+    entry_id: Annotated[
+        str,
+        typer.Argument(help="Id of the entry to index."),
+    ],
+    text: Annotated[
+        str,
+        typer.Option("--text", help="Keyword text to index in FTS5 for this entry."),
+    ],
+    name: Annotated[
+        str | None,
+        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+    ] = None,
+    threshold_rank: Annotated[
+        float | None,
+        typer.Option("--threshold-rank", help="Minimum BM25 rank score for keyword hits."),
+    ] = None,
+) -> None:
+    """Index (or re-index) an entry's keyword text in FTS5.
+
+    Existing fts rows for this id are replaced.
+    """
+    mnt = mount.resolve()
+    if not mnt.exists():
+        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+
+    db_path = mnt.db_path(name)
+    if not db_path.exists():
+        target = f"database {name!r}" if name else "default database"
+        raise typer.BadParameter(f"No {target} in the mount.")
+
+    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+        [indexed] = g.keyword([(entry_id, text)], threshold_rank=threshold_rank)
+
+    typer.echo(json.dumps(asdict(indexed), indent=2, default=str))
+
+
+@app.command(name="embed")
+def embed_cmd(
+    entry_id: Annotated[
+        str,
+        typer.Argument(help="Id of the entry to embed."),
+    ],
+    text: Annotated[
+        str,
+        typer.Option("--text", help="Semantic text to embed and store on the vec row."),
+    ],
+    name: Annotated[
+        str | None,
+        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+    ] = None,
+    partition: Annotated[
+        str | None,
+        typer.Option("--partition", help="Vec partition to write into. Omit for the NULL partition."),
+    ] = None,
+    threshold_distance: Annotated[
+        float | None,
+        typer.Option("--threshold-distance", help="Maximum vector distance for semantic hits."),
+    ] = None,
+) -> None:
+    """Embed (or re-embed) an entry by id with the given semantic text.
+
+    Existing vec rows for this id are replaced.
+    """
+    mnt = mount.resolve()
+    if not mnt.exists():
+        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+
+    db_path = mnt.db_path(name)
+    if not db_path.exists():
+        target = f"database {name!r}" if name else "default database"
+        raise typer.BadParameter(f"No {target} in the mount.")
+
+    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+        [embedded] = g.embed(
+            [(entry_id, text)],
+            partition=partition,
+            threshold_distance=threshold_distance,
+        )
+
+    typer.echo(json.dumps(asdict(embedded), indent=2, default=str))
+
+
 @app.command(name="search")
 def search_cmd(
     query: Annotated[
@@ -361,7 +419,11 @@ def search_cmd(
     ] = None,
     group_key: Annotated[
         str | None,
-        typer.Option("--group-key", help="Restrict to this group_key partition. Omit for the NULL partition."),
+        typer.Option("--group-key", help="Filter keyword hits by this group_key metadata value."),
+    ] = None,
+    partition: Annotated[
+        str | None,
+        typer.Option("--partition", help="Restrict semantic hits to this vec partition. Omit for the NULL partition."),
     ] = None,
     limit: Annotated[
         int,
@@ -392,11 +454,27 @@ def search_cmd(
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
         kw_hits = g.keyword_search(fts_query, filters=filters, limit=limit) if fts_query else []
-        sem_hits = g.semantic_search(query, group_key=group_key, limit=limit)
+        sem_hits = g.semantic_search(query, partition=partition, limit=limit)
 
     result = {
-        "keyword": [{"entry": asdict(h.entry), "rank": -h.score} for h in kw_hits],
-        "semantic": [{"entry": asdict(h.entry), "distance": h.distance} for h in sem_hits],
+        "keyword": [
+            {
+                "entry": asdict(h.entry),
+                "keyword_text": h.keyword_text,
+                "threshold_rank": h.threshold_rank,
+                "rank": -h.score,
+            }
+            for h in kw_hits
+        ],
+        "semantic": [
+            {
+                "entry": asdict(h.entry),
+                "semantic_text": h.semantic_text,
+                "threshold_distance": h.threshold_distance,
+                "distance": h.distance,
+            }
+            for h in sem_hits
+        ],
     }
     typer.echo(json.dumps(result, indent=2, default=str))
 

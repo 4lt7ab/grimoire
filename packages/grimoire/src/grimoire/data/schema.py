@@ -14,41 +14,26 @@ CREATE TABLE meta (
 );
 
 CREATE TABLE entry (
-    id                 TEXT PRIMARY KEY,
-    group_key          TEXT,
-    group_ref          TEXT,
-    payload            TEXT,
-    context            TEXT,
-    keyword_text       TEXT,
-    semantic_text      TEXT,
-    threshold_rank     REAL,
-    threshold_distance REAL
+    id        TEXT PRIMARY KEY,
+    group_key TEXT,
+    group_ref TEXT,
+    payload   TEXT,
+    context   TEXT
 );
 
 CREATE INDEX entry_group_key ON entry(group_key);
 
 CREATE VIRTUAL TABLE entry_fts USING fts5(
+    entry_id UNINDEXED,
     keyword_text,
-    content='entry',
-    content_rowid='rowid'
+    threshold_rank UNINDEXED
 );
-
-CREATE TRIGGER entry_ai AFTER INSERT ON entry BEGIN
-    INSERT INTO entry_fts(rowid, keyword_text) VALUES (new.rowid, new.keyword_text);
-END;
-
-CREATE TRIGGER entry_ad AFTER DELETE ON entry BEGIN
-    INSERT INTO entry_fts(entry_fts, rowid, keyword_text) VALUES ('delete', old.rowid, old.keyword_text);
-END;
-
-CREATE TRIGGER entry_au AFTER UPDATE ON entry BEGIN
-    INSERT INTO entry_fts(entry_fts, rowid, keyword_text) VALUES ('delete', old.rowid, old.keyword_text);
-    INSERT INTO entry_fts(rowid, keyword_text) VALUES (new.rowid, new.keyword_text);
-END;
 
 CREATE VIRTUAL TABLE entry_vec USING vec0(
     id TEXT PRIMARY KEY,
-    group_key TEXT PARTITION KEY,
+    partition TEXT PARTITION KEY,
+    +semantic_text TEXT,
+    +threshold_distance FLOAT,
     embedding float[{dimension}]
 );
 """

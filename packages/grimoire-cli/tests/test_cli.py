@@ -16,6 +16,30 @@ def mounted(tmp_path, monkeypatch, patched_embedder):
     return tmp_path
 
 
+def _add(
+    *flags: str,
+    embed: str | None = None,
+    keyword: str | None = None,
+    partition: str | None = None,
+    name: str | None = None,
+) -> str:
+    """Add an entry; optionally embed it and/or index its keyword text.
+
+    `name` selects the DB for every sub-call (entry add, embed, keyword).
+    """
+    name_flag = ["-n", name] if name else []
+    add_result = runner.invoke(app, ["entry", "add", *name_flag, *flags])
+    entry_id = json.loads(add_result.output)["id"]
+    if embed is not None:
+        cmd = ["embed", entry_id, *name_flag, "--text", embed]
+        if partition is not None:
+            cmd += ["--partition", partition]
+        runner.invoke(app, cmd)
+    if keyword is not None:
+        runner.invoke(app, ["keyword", entry_id, *name_flag, "--text", keyword])
+    return entry_id
+
+
 def test_mount_create_initializes_layout(tmp_path, monkeypatch, patched_embedder):
     monkeypatch.setenv(ENV_VAR, str(tmp_path))
     result = runner.invoke(app, ["mount", "create"])
@@ -54,58 +78,40 @@ def test_entry_add_populates_every_field(mounted):
         app,
         [
             "entry", "add",
-            "the wizard's spellbook hums in the dark",
-            "--keyword-text", "spellbook wizard humming",
             "--group-key", "notes",
             "--group-ref", "note-001",
             "--context", "from chapter 3",
             "--payload", json.dumps(payload),
-            "--threshold-rank", "0.5",
-            "--threshold-distance", "0.8",
         ],
     )
     assert result.exit_code == 0, result.output
 
     entry = json.loads(result.output)
     assert entry["id"] is not None
-    assert entry["semantic_text"] == "the wizard's spellbook hums in the dark"
-    assert entry["keyword_text"] == "spellbook wizard humming"
     assert entry["group_key"] == "notes"
     assert entry["group_ref"] == "note-001"
     assert entry["context"] == "from chapter 3"
     assert entry["payload"] == payload
-    assert entry["threshold_rank"] == 0.5
-    assert entry["threshold_distance"] == 0.8
 
 
-def test_entry_add_with_no_flags_is_a_payload_less_entry(mounted):
+def test_entry_add_with_no_flags_is_a_metadata_only_entry(mounted):
     result = runner.invoke(app, ["entry", "add"])
     assert result.exit_code == 0, result.output
 
     entry = json.loads(result.output)
     assert entry["id"] is not None
     for field in (
-        "semantic_text",
-        "keyword_text",
         "group_key",
         "group_ref",
         "context",
         "payload",
-        "threshold_rank",
-        "threshold_distance",
     ):
         assert entry[field] is None, field
 
 
-def test_entry_add_short_flag_for_keyword_text(mounted):
-    result = runner.invoke(app, ["entry", "add", "-k", "shorthand"])
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["keyword_text"] == "shorthand"
-
-
 def test_entry_add_fails_when_mount_does_not_exist(tmp_path, monkeypatch, patched_embedder):
     monkeypatch.setenv(ENV_VAR, str(tmp_path))
-    result = runner.invoke(app, ["entry", "add", "anything"])
+    result = runner.invoke(app, ["entry", "add"])
     assert result.exit_code != 0
     assert "Mount does not exist" in result.output
 
@@ -114,13 +120,13 @@ def test_entry_add_targets_named_db(mounted):
     create = runner.invoke(app, ["mount", "add", "spellbook"])
     assert create.exit_code == 0, create.output
 
-    result = runner.invoke(app, ["entry", "add", "hello", "-n", "spellbook"])
+    result = runner.invoke(app, ["entry", "add", "--group-ref", "ref-1", "-n", "spellbook"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["semantic_text"] == "hello"
+    assert json.loads(result.output)["group_ref"] == "ref-1"
 
 
 def test_entry_add_fails_for_unknown_named_db(mounted):
-    result = runner.invoke(app, ["entry", "add", "hello", "-n", "nonesuch"])
+    result = runner.invoke(app, ["entry", "add", "-n", "nonesuch"])
     assert result.exit_code != 0
     assert "nonesuch" in result.output
 
@@ -129,14 +135,11 @@ def test_entry_update_changes_only_specified_fields(mounted):
     add = runner.invoke(
         app,
         [
-            "entry", "add", "the moon",
-            "--keyword-text", "moon",
+            "entry", "add",
             "--group-key", "tale",
             "--group-ref", "ref-1",
             "--context", "ch.3",
             "--payload", json.dumps({"author": "merlin"}),
-            "--threshold-rank", "0.5",
-            "--threshold-distance", "0.8",
         ],
     )
     entry_id = json.loads(add.output)["id"]
@@ -153,37 +156,10 @@ def test_entry_update_changes_only_specified_fields(mounted):
     assert out["group_key"] == "tale"
     assert out["group_ref"] == "ref-1"
     assert out["context"] == "ch.3"
-    assert out["keyword_text"] == "moon"
-    assert out["semantic_text"] == "the moon"
-    assert out["threshold_rank"] == 0.5
-    assert out["threshold_distance"] == 0.8
-
-
-def test_entry_update_sets_thresholds_preserving_payload(mounted):
-    add = runner.invoke(
-        app,
-        ["entry", "add", "anything", "--payload", json.dumps({"k": "v"})],
-    )
-    entry_id = json.loads(add.output)["id"]
-
-    result = runner.invoke(
-        app,
-        [
-            "entry", "update", entry_id,
-            "--threshold-rank", "0.25",
-            "--threshold-distance", "0.75",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-
-    out = json.loads(result.output)
-    assert out["threshold_rank"] == 0.25
-    assert out["threshold_distance"] == 0.75
-    assert out["payload"] == {"k": "v"}
 
 
 def test_entry_update_sets_context(mounted):
-    add = runner.invoke(app, ["entry", "add", "anything", "--context", "first"])
+    add = runner.invoke(app, ["entry", "add", "--context", "first"])
     entry_id = json.loads(add.output)["id"]
 
     result = runner.invoke(
@@ -205,7 +181,7 @@ def test_entry_update_fails_for_unknown_id(mounted):
 
 def test_entry_update_targets_named_db(mounted):
     runner.invoke(app, ["mount", "add", "spellbook"])
-    add = runner.invoke(app, ["entry", "add", "hello", "-n", "spellbook"])
+    add = runner.invoke(app, ["entry", "add", "-n", "spellbook"])
     entry_id = json.loads(add.output)["id"]
 
     result = runner.invoke(
@@ -236,18 +212,18 @@ def test_entry_update_fails_for_unknown_named_db(mounted):
 
 
 def test_fetch_no_filters_returns_all(mounted):
-    runner.invoke(app, ["entry", "add", "first"])
-    runner.invoke(app, ["entry", "add", "second"])
+    runner.invoke(app, ["entry", "add", "--group-ref", "first"])
+    runner.invoke(app, ["entry", "add", "--group-ref", "second"])
 
     result = runner.invoke(app, ["fetch"])
     assert result.exit_code == 0, result.output
     entries = json.loads(result.output)
-    assert {e["semantic_text"] for e in entries} == {"first", "second"}
+    assert {e["group_ref"] for e in entries} == {"first", "second"}
 
 
 def test_fetch_filters_by_id(mounted):
-    a = json.loads(runner.invoke(app, ["entry", "add", "alpha"]).output)
-    runner.invoke(app, ["entry", "add", "beta"])
+    a = json.loads(runner.invoke(app, ["entry", "add"]).output)
+    runner.invoke(app, ["entry", "add"])
 
     result = runner.invoke(app, ["fetch", "--id", a["id"]])
     assert result.exit_code == 0, result.output
@@ -256,19 +232,19 @@ def test_fetch_filters_by_id(mounted):
 
 
 def test_fetch_filters_by_group_key(mounted):
-    runner.invoke(app, ["entry", "add", "tale-one", "--group-key", "tale"])
-    runner.invoke(app, ["entry", "add", "note-one", "--group-key", "note"])
+    runner.invoke(app, ["entry", "add", "--group-key", "tale", "--group-ref", "tale-one"])
+    runner.invoke(app, ["entry", "add", "--group-key", "note", "--group-ref", "note-one"])
 
     result = runner.invoke(app, ["fetch", "--group-key", "tale"])
     assert result.exit_code == 0, result.output
     entries = json.loads(result.output)
-    assert [e["semantic_text"] for e in entries] == ["tale-one"]
+    assert [e["group_ref"] for e in entries] == ["tale-one"]
 
 
 def test_fetch_repeatable_filter(mounted):
-    a = json.loads(runner.invoke(app, ["entry", "add", "alpha"]).output)
-    b = json.loads(runner.invoke(app, ["entry", "add", "beta"]).output)
-    runner.invoke(app, ["entry", "add", "gamma"])
+    a = json.loads(runner.invoke(app, ["entry", "add"]).output)
+    b = json.loads(runner.invoke(app, ["entry", "add"]).output)
+    runner.invoke(app, ["entry", "add"])
 
     result = runner.invoke(app, ["fetch", "--id", a["id"], "--id", b["id"]])
     assert result.exit_code == 0, result.output
@@ -277,8 +253,8 @@ def test_fetch_repeatable_filter(mounted):
 
 
 def test_fetch_respects_explicit_limit(mounted):
-    for word in ["one", "two", "three", "four", "five"]:
-        runner.invoke(app, ["entry", "add", word])
+    for _ in range(5):
+        runner.invoke(app, ["entry", "add"])
 
     result = runner.invoke(app, ["fetch", "--limit", "2"])
     assert result.exit_code == 0, result.output
@@ -286,8 +262,8 @@ def test_fetch_respects_explicit_limit(mounted):
 
 
 def test_fetch_default_limit_caps_at_100(mounted):
-    for i in range(101):
-        runner.invoke(app, ["entry", "add", f"entry-{i}"])
+    for _ in range(101):
+        runner.invoke(app, ["entry", "add"])
 
     result = runner.invoke(app, ["fetch"])
     assert result.exit_code == 0, result.output
@@ -295,7 +271,7 @@ def test_fetch_default_limit_caps_at_100(mounted):
 
 
 def test_fetch_empty_when_no_match(mounted):
-    runner.invoke(app, ["entry", "add", "hello"])
+    runner.invoke(app, ["entry", "add"])
 
     result = runner.invoke(app, ["fetch", "--id", "01HXXXXXXXXXXXXXXXXXXXXXXX"])
     assert result.exit_code == 0, result.output
@@ -306,12 +282,12 @@ def test_fetch_targets_named_db(mounted):
     create = runner.invoke(app, ["mount", "add", "spellbook"])
     assert create.exit_code == 0, create.output
 
-    runner.invoke(app, ["entry", "add", "named-hello", "-n", "spellbook"])
+    runner.invoke(app, ["entry", "add", "--group-ref", "named-hello", "-n", "spellbook"])
 
     result = runner.invoke(app, ["fetch", "-n", "spellbook"])
     assert result.exit_code == 0, result.output
     entries = json.loads(result.output)
-    assert [e["semantic_text"] for e in entries] == ["named-hello"]
+    assert [e["group_ref"] for e in entries] == ["named-hello"]
 
 
 def test_fetch_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedder):
@@ -328,7 +304,7 @@ def test_fetch_fails_for_unknown_named_db(mounted):
 
 
 def test_entry_delete_removes_existing(mounted):
-    add = runner.invoke(app, ["entry", "add", "ephemeral"])
+    add = runner.invoke(app, ["entry", "add"])
     entry_id = json.loads(add.output)["id"]
 
     result = runner.invoke(app, ["entry", "delete", entry_id, "--yes"])
@@ -346,7 +322,7 @@ def test_entry_delete_missing_id_is_soft(mounted):
 
 
 def test_entry_delete_requires_yes(mounted):
-    add = runner.invoke(app, ["entry", "add", "ephemeral"])
+    add = runner.invoke(app, ["entry", "add"])
     entry_id = json.loads(add.output)["id"]
 
     result = runner.invoke(app, ["entry", "delete", entry_id])
@@ -361,7 +337,7 @@ def test_entry_delete_targets_named_db(mounted):
     create = runner.invoke(app, ["mount", "add", "spellbook"])
     assert create.exit_code == 0, create.output
 
-    add = runner.invoke(app, ["entry", "add", "named", "-n", "spellbook"])
+    add = runner.invoke(app, ["entry", "add", "-n", "spellbook"])
     entry_id = json.loads(add.output)["id"]
 
     result = runner.invoke(app, ["entry", "delete", entry_id, "-n", "spellbook", "--yes"])
@@ -448,10 +424,10 @@ def test_info_reports_empty_default_db(mounted):
 
 
 def test_info_counts_entries_and_groups(mounted):
-    runner.invoke(app, ["entry", "add", "a", "--group-key", "tale"])
-    runner.invoke(app, ["entry", "add", "b", "--group-key", "tale"])
-    runner.invoke(app, ["entry", "add", "c", "--group-key", "note"])
-    runner.invoke(app, ["entry", "add", "d"])
+    runner.invoke(app, ["entry", "add", "--group-key", "tale"])
+    runner.invoke(app, ["entry", "add", "--group-key", "tale"])
+    runner.invoke(app, ["entry", "add", "--group-key", "note"])
+    runner.invoke(app, ["entry", "add"])
 
     result = runner.invoke(app, ["info"])
     assert result.exit_code == 0, result.output
@@ -463,7 +439,7 @@ def test_info_counts_entries_and_groups(mounted):
 
 def test_info_targets_named_db(mounted):
     runner.invoke(app, ["mount", "add", "spellbook"])
-    runner.invoke(app, ["entry", "add", "named", "-n", "spellbook"])
+    runner.invoke(app, ["entry", "add", "-n", "spellbook"])
 
     result = runner.invoke(app, ["info", "-n", "spellbook"])
     assert result.exit_code == 0, result.output
@@ -487,21 +463,156 @@ def test_info_fails_for_unknown_named_db(mounted):
     assert "nonesuch" in result.output
 
 
+def test_embed_writes_vec_row(mounted):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(app, ["embed", entry_id, "--text", "hello"])
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.output)
+    assert out["id"] == entry_id
+
+    sem = runner.invoke(app, ["search", "hello"])
+    sem_hits = json.loads(sem.output)["semantic"]
+    assert any(h["entry"]["id"] == entry_id for h in sem_hits)
+    assert any(h["semantic_text"] == "hello" for h in sem_hits)
+
+
+def test_embed_into_named_partition(mounted):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(
+        app,
+        ["embed", entry_id, "--text", "hello", "--partition", "alpha"],
+    )
+    assert result.exit_code == 0, result.output
+
+    in_partition = runner.invoke(app, ["search", "hello", "--partition", "alpha"])
+    out = json.loads(in_partition.output)
+    assert [h["entry"]["id"] for h in out["semantic"]] == [entry_id]
+
+    in_null = runner.invoke(app, ["search", "hello"])
+    out_null = json.loads(in_null.output)
+    assert out_null["semantic"] == []
+
+
+def test_embed_replaces_existing_vec_row(mounted):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+
+    runner.invoke(app, ["embed", entry_id, "--text", "first"])
+    runner.invoke(app, ["embed", entry_id, "--text", "second"])
+
+    sem = runner.invoke(app, ["search", "anything"])
+    hits = json.loads(sem.output)["semantic"]
+    texts = [h["semantic_text"] for h in hits if h["entry"]["id"] == entry_id]
+    assert texts == ["second"]
+
+
+def test_embed_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedder):
+    monkeypatch.setenv(ENV_VAR, str(tmp_path))
+    result = runner.invoke(
+        app,
+        ["embed", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--text", "anything"],
+    )
+    assert result.exit_code != 0
+    assert "Mount does not exist" in result.output
+
+
+def test_embed_fails_for_unknown_id(mounted):
+    result = runner.invoke(
+        app,
+        ["embed", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--text", "anything"],
+    )
+    assert result.exit_code != 0
+
+
+def test_keyword_indexes_for_match(mounted):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(app, ["keyword", entry_id, "--text", "the moon glows"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["id"] == entry_id
+
+    kw = runner.invoke(app, ["search", "moon"])
+    hits = json.loads(kw.output)["keyword"]
+    assert any(h["entry"]["id"] == entry_id and h["keyword_text"] == "the moon glows" for h in hits)
+
+
+def test_keyword_replaces_text_on_reindex(mounted):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+
+    runner.invoke(app, ["keyword", entry_id, "--text", "moon"])
+    runner.invoke(app, ["keyword", entry_id, "--text", "stars"])
+
+    moon = runner.invoke(app, ["search", "moon"])
+    stars = runner.invoke(app, ["search", "stars"])
+    assert json.loads(moon.output)["keyword"] == []
+    assert any(h["entry"]["id"] == entry_id for h in json.loads(stars.output)["keyword"])
+
+
+def test_keyword_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedder):
+    monkeypatch.setenv(ENV_VAR, str(tmp_path))
+    result = runner.invoke(
+        app,
+        ["keyword", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--text", "anything"],
+    )
+    assert result.exit_code != 0
+    assert "Mount does not exist" in result.output
+
+
+def test_keyword_fails_for_unknown_id(mounted):
+    result = runner.invoke(
+        app,
+        ["keyword", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--text", "anything"],
+    )
+    assert result.exit_code != 0
+
+
+def test_keyword_stores_threshold_rank(mounted):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+
+    runner.invoke(
+        app,
+        ["keyword", entry_id, "--text", "hello", "--threshold-rank", "0.25"],
+    )
+
+    out = json.loads(runner.invoke(app, ["search", "hello"]).output)
+    assert [h["threshold_rank"] for h in out["keyword"]] == [0.25]
+
+
+def test_embed_stores_threshold_distance(mounted):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+
+    runner.invoke(
+        app,
+        ["embed", entry_id, "--text", "hello", "--threshold-distance", "0.75"],
+    )
+
+    out = json.loads(runner.invoke(app, ["search", "hello"]).output)
+    assert [h["threshold_distance"] for h in out["semantic"]] == [0.75]
+
+
 def test_search_runs_both_modes(mounted):
-    runner.invoke(app, ["entry", "add", "the moon glows", "--keyword-text", "moon glow"])
+    _add(embed="the moon glows", keyword="moon glow")
 
     result = runner.invoke(app, ["search", "moon"])
     assert result.exit_code == 0, result.output
 
     out = json.loads(result.output)
     assert set(out.keys()) == {"keyword", "semantic"}
-    assert any(h["entry"]["keyword_text"] == "moon glow" for h in out["keyword"])
-    assert any(h["entry"]["semantic_text"] == "the moon glows" for h in out["semantic"])
+    assert any(h["keyword_text"] == "moon glow" for h in out["keyword"])
+    assert any(h["semantic_text"] == "the moon glows" for h in out["semantic"])
 
 
 def test_search_keyword_rank_is_low_is_better(mounted):
-    runner.invoke(app, ["entry", "add", "first", "--keyword-text", "match match match"])
-    runner.invoke(app, ["entry", "add", "second", "--keyword-text", "match"])
+    _add(keyword="match match match")
+    _add(keyword="match")
 
     result = runner.invoke(app, ["search", "match"])
     out = json.loads(result.output)
@@ -511,18 +622,19 @@ def test_search_keyword_rank_is_low_is_better(mounted):
 
 
 def test_search_semantic_distance_is_low_is_better(mounted):
-    runner.invoke(app, ["entry", "add", "alpha"])
-    runner.invoke(app, ["entry", "add", "beta"])
+    _add(embed="alpha")
+    _add(embed="beta")
 
     result = runner.invoke(app, ["search", "anything"])
     out = json.loads(result.output)
     distances = [h["distance"] for h in out["semantic"]]
+    assert len(distances) == 2
     assert distances == sorted(distances)
 
 
 def test_search_default_limit_is_10(mounted):
     for i in range(15):
-        runner.invoke(app, ["entry", "add", f"entry {i}", "--keyword-text", f"target {i}"])
+        _add(embed=f"entry {i}", keyword=f"target {i}")
 
     result = runner.invoke(app, ["search", "target"])
     out = json.loads(result.output)
@@ -532,7 +644,7 @@ def test_search_default_limit_is_10(mounted):
 
 def test_search_respects_explicit_limit(mounted):
     for i in range(5):
-        runner.invoke(app, ["entry", "add", f"entry {i}", "--keyword-text", f"target {i}"])
+        _add(embed=f"entry {i}", keyword=f"target {i}")
 
     result = runner.invoke(app, ["search", "target", "--limit", "2"])
     out = json.loads(result.output)
@@ -540,48 +652,58 @@ def test_search_respects_explicit_limit(mounted):
     assert len(out["semantic"]) == 2
 
 
-def test_search_filters_by_group_key(mounted):
-    runner.invoke(app, ["entry", "add", "a", "--keyword-text", "target", "--group-key", "tale"])
-    runner.invoke(app, ["entry", "add", "b", "--keyword-text", "target", "--group-key", "note"])
+def test_search_group_key_filters_keyword_only(mounted):
+    _add("--group-key", "tale", keyword="target")
+    _add("--group-key", "note", keyword="target")
 
     result = runner.invoke(app, ["search", "target", "--group-key", "tale"])
     out = json.loads(result.output)
     assert all(h["entry"]["group_key"] == "tale" for h in out["keyword"])
-    assert all(h["entry"]["group_key"] == "tale" for h in out["semantic"])
+    assert len(out["keyword"]) >= 1
+
+
+def test_search_partition_filters_semantic_only(mounted):
+    _add(keyword="target", embed="tale-a", partition="tale")
+    _add(keyword="target", embed="note-b", partition="note")
+
+    result = runner.invoke(app, ["search", "target", "--partition", "tale"])
+    out = json.loads(result.output)
+    assert all(h["semantic_text"] == "tale-a" for h in out["semantic"])
+    assert len(out["semantic"]) == 1
 
 
 def test_search_targets_named_db(mounted):
     create = runner.invoke(app, ["mount", "add", "spellbook"])
     assert create.exit_code == 0, create.output
 
-    runner.invoke(app, ["entry", "add", "named-thing", "--keyword-text", "named", "-n", "spellbook"])
+    _add(name="spellbook", keyword="named")
 
     result = runner.invoke(app, ["search", "named", "-n", "spellbook"])
     assert result.exit_code == 0, result.output
     out = json.loads(result.output)
-    assert any(h["entry"]["semantic_text"] == "named-thing" for h in out["keyword"])
+    assert any(h["keyword_text"] == "named" for h in out["keyword"])
 
 
 def test_search_accepts_apostrophes_and_punctuation(mounted):
-    runner.invoke(app, ["entry", "add", "what is happening", "--keyword-text", "happening mate"])
+    _add(keyword="happening mate")
 
     result = runner.invoke(app, ["search", "what's going on mate?"])
     assert result.exit_code == 0, result.output
     out = json.loads(result.output)
-    assert any(h["entry"]["keyword_text"] == "happening mate" for h in out["keyword"])
+    assert any(h["keyword_text"] == "happening mate" for h in out["keyword"])
 
 
 def test_search_treats_operator_words_as_literals(mounted):
-    runner.invoke(app, ["entry", "add", "boom", "--keyword-text", "AND OR NOT"])
+    _add(keyword="AND OR NOT")
 
     result = runner.invoke(app, ["search", "AND OR NOT"])
     assert result.exit_code == 0, result.output
     out = json.loads(result.output)
-    assert any(h["entry"]["keyword_text"] == "AND OR NOT" for h in out["keyword"])
+    assert any(h["keyword_text"] == "AND OR NOT" for h in out["keyword"])
 
 
 def test_search_all_punctuation_query_skips_keyword(mounted):
-    runner.invoke(app, ["entry", "add", "anything", "--keyword-text", "anything"])
+    _add(keyword="anything")
 
     result = runner.invoke(app, ["search", "?!?"])
     assert result.exit_code == 0, result.output

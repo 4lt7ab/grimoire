@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +11,6 @@ from grimoire.data.entry import (
     Filters,
     KeywordHit,
     SemanticHit,
-    _IndexedEntry,
 )
 from grimoire.embed import Embedder
 from grimoire.errors import GrimoireMismatch, GrimoireNotFound
@@ -23,16 +23,6 @@ class Peek:
     schema_version: int
     entry_count: int
     group_counts: dict[str | None, int]
-
-
-def _index(entries: list[Entry], embedder: Embedder) -> list[_IndexedEntry]:
-    texts = [entry.semantic_text for entry in entries]
-    to_embed = [text for text in texts if text is not None]
-    vec_iter = iter(embedder.embed_many(to_embed)) if to_embed else iter(())
-    return [
-        _IndexedEntry(entry, next(vec_iter) if text is not None else None)
-        for entry, text in zip(entries, texts, strict=True)
-    ]
 
 
 class Grimoire:
@@ -50,7 +40,7 @@ class Grimoire:
             self._conn.rollback()
 
     def add(self, entries: list[Entry]) -> list[Entry]:
-        return entry.add(self._conn, _index(entries, self.embedder))
+        return entry.add(self._conn, entries)
 
     def update(self, entries: list[Entry]) -> list[Entry]:
         return entry.update(self._conn, entries)
@@ -65,6 +55,70 @@ class Grimoire:
     ) -> list[Entry]:
         return entry.fetch(self._conn, filters, limit)
 
+    def keyword(
+        self,
+        items: list[tuple[str, str]] | None = None,
+        *,
+        threshold_rank: float | None = None,
+    ) -> list[Entry]:
+        """Index (or re-index) entries' keyword text from (id, keyword_text) pairs.
+
+        Empty or None `items` is a no-op. Each id must refer to an existing
+        entry. Existing fts rows for these ids are replaced. `threshold_rank`
+        is stored on every row written in this call.
+        """
+        if not items:
+            return []
+
+        ids = [i for i, _ in items]
+        existing = self._conn.execute(
+            "SELECT id FROM entry WHERE id IN (SELECT value FROM json_each(?))",
+            (json.dumps(ids),),
+        ).fetchall()
+        known = {r["id"] for r in existing}
+        for entry_id in ids:
+            if entry_id not in known:
+                raise ValueError(f"No entry with id {entry_id!r}")
+
+        return entry.keyword(self._conn, items, threshold_rank=threshold_rank)
+
+    def embed(
+        self,
+        items: list[tuple[str, str]] | None = None,
+        *,
+        partition: str | None = None,
+        threshold_distance: float | None = None,
+    ) -> list[Entry]:
+        """Embed (or re-embed) entries from (id, semantic_text) pairs into the given partition.
+
+        Empty or None `items` is a no-op. Each id must refer to an existing
+        entry; the given text is embedded and stored on the vec row. Existing
+        vec rows for these ids are replaced. `threshold_distance` is stored on
+        every row written in this call.
+        """
+        if not items:
+            return []
+
+        ids = [i for i, _ in items]
+        texts = [t for _, t in items]
+
+        existing = self._conn.execute(
+            "SELECT id FROM entry WHERE id IN (SELECT value FROM json_each(?))",
+            (json.dumps(ids),),
+        ).fetchall()
+        known = {r["id"] for r in existing}
+        for entry_id in ids:
+            if entry_id not in known:
+                raise ValueError(f"No entry with id {entry_id!r}")
+
+        embeddings = self.embedder.embed_many(texts)
+        return entry.embed(
+            self._conn,
+            [(i, t, v) for (i, t), v in zip(items, embeddings, strict=True)],
+            partition=partition,
+            threshold_distance=threshold_distance,
+        )
+
     def keyword_search(
         self,
         query: str,
@@ -76,13 +130,13 @@ class Grimoire:
     def semantic_search(
         self,
         query: str,
-        group_key: str | None,
+        partition: str | None = None,
         limit: int = 10,
     ) -> list[SemanticHit]:
         return entry.semantic_search(
             self._conn,
             self.embedder.embed(query),
-            group_key,
+            partition,
             limit,
         )
 

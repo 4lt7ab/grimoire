@@ -15,28 +15,22 @@ class Entry:
     group_ref: str | None
     payload: dict[str, Any] | None
     context: str | None = None
-    keyword_text: str | None = None
-    semantic_text: str | None = None
-    threshold_rank: float | None = None
-    threshold_distance: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class KeywordHit:
     entry: Entry
+    keyword_text: str | None
+    threshold_rank: float | None
     score: float
 
 
 @dataclass(frozen=True, slots=True)
 class SemanticHit:
     entry: Entry
+    semantic_text: str | None
+    threshold_distance: float | None
     distance: float
-
-
-@dataclass(frozen=True, slots=True)
-class _IndexedEntry:
-    entry: Entry
-    embedding: Sequence[float] | None
 
 
 def _row_to_entry(r: sqlite3.Row) -> Entry:
@@ -46,10 +40,6 @@ def _row_to_entry(r: sqlite3.Row) -> Entry:
         group_ref=r["group_ref"],
         payload=json.loads(r["payload"]) if r["payload"] is not None else None,
         context=r["context"],
-        keyword_text=r["keyword_text"],
-        semantic_text=r["semantic_text"],
-        threshold_rank=r["threshold_rank"],
-        threshold_distance=r["threshold_distance"],
     )
 
 
@@ -59,68 +49,120 @@ def _serialize_vec(v: Sequence[float]) -> bytes:
 
 def add(
     conn: sqlite3.Connection,
-    indexed: list[_IndexedEntry],
+    entries: list[Entry],
 ) -> list[Entry]:
-    if not indexed:
+    if not entries:
         return []
 
-    ids = [str(ULID()) for _ in indexed]
+    ids = [str(ULID()) for _ in entries]
 
     batch = json.dumps(
         [
             {
                 "id": id_,
-                "group_key": i.entry.group_key,
-                "group_ref": i.entry.group_ref,
-                "payload": i.entry.payload,
-                "context": i.entry.context,
-                "keyword_text": i.entry.keyword_text,
-                "semantic_text": i.entry.semantic_text,
-                "threshold_rank": i.entry.threshold_rank,
-                "threshold_distance": i.entry.threshold_distance,
+                "group_key": e.group_key,
+                "group_ref": e.group_ref,
+                "payload": e.payload,
+                "context": e.context,
             }
-            for id_, i in zip(ids, indexed, strict=True)
+            for id_, e in zip(ids, entries, strict=True)
         ]
     )
 
     cur = conn.execute(
         """
         INSERT INTO entry (
-            id, group_key, group_ref, payload, context,
-            keyword_text, semantic_text, threshold_rank, threshold_distance
+            id, group_key, group_ref, payload, context
         )
         SELECT
             value->>'id',
             value->>'group_key',
             value->>'group_ref',
             value->>'payload',
-            value->>'context',
-            value->>'keyword_text',
-            value->>'semantic_text',
-            value->>'threshold_rank',
-            value->>'threshold_distance'
+            value->>'context'
         FROM json_each(?)
         RETURNING
-            id, group_key, group_ref, payload, context,
-            keyword_text, semantic_text, threshold_rank, threshold_distance
+            id, group_key, group_ref, payload, context
         """,
         (batch,),
     )
 
-    rows = list(cur)
+    return [_row_to_entry(r) for r in cur]
 
-    vec_rows = [
-        (ids[idx], i.entry.group_key, _serialize_vec(i.embedding))
-        for idx, i in enumerate(indexed)
-        if i.embedding is not None
-    ]
-    if vec_rows:
-        conn.executemany(
-            "INSERT INTO entry_vec(id, group_key, embedding) VALUES (?, ?, ?)",
-            vec_rows,
-        )
 
-    return [_row_to_entry(r) for r in rows]
+def keyword(
+    conn: sqlite3.Connection,
+    items: list[tuple[str, str]],
+    *,
+    threshold_rank: float | None = None,
+) -> list[Entry]:
+    """Write (or replace) entry_fts rows for the given (id, keyword_text) pairs.
+
+    Existing fts rows for these ids are deleted first so the text or threshold
+    can change freely. `threshold_rank` applies to every row in this batch.
+    """
+    if not items:
+        return []
+
+    ids = [i for i, _ in items]
+    conn.execute(
+        "DELETE FROM entry_fts WHERE entry_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(ids),),
+    )
+    conn.executemany(
+        "INSERT INTO entry_fts(entry_id, keyword_text, threshold_rank) VALUES (?, ?, ?)",
+        [(id_, text, threshold_rank) for id_, text in items],
+    )
+
+    cur = conn.execute(
+        _FETCH_SQL,
+        {
+            "ids": json.dumps(ids),
+            "group_keys": None,
+            "group_refs": None,
+        },
+    )
+    return [_row_to_entry(r) for r in cur]
+
+
+def embed(
+    conn: sqlite3.Connection,
+    indexed: list[tuple[str, str, Sequence[float]]],
+    *,
+    partition: str | None = None,
+    threshold_distance: float | None = None,
+) -> list[Entry]:
+    """Write (or replace) entry_vec rows for the given (id, semantic_text, embedding) triples.
+
+    Existing vec rows for these ids are deleted first so the partition,
+    threshold, or text can change freely.
+    """
+    if not indexed:
+        return []
+
+    ids = [i for i, _, _ in indexed]
+    conn.execute(
+        "DELETE FROM entry_vec WHERE id IN (SELECT value FROM json_each(?))",
+        (json.dumps(ids),),
+    )
+    conn.executemany(
+        "INSERT INTO entry_vec(id, partition, semantic_text, threshold_distance, embedding) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [
+            (id_, partition, text, threshold_distance, _serialize_vec(vec))
+            for id_, text, vec in indexed
+        ],
+    )
+
+    cur = conn.execute(
+        _FETCH_SQL,
+        {
+            "ids": json.dumps(ids),
+            "group_keys": None,
+            "group_refs": None,
+        },
+    )
+    return [_row_to_entry(r) for r in cur]
 
 
 def update(
@@ -137,8 +179,6 @@ def update(
                 "group_ref": e.group_ref,
                 "payload": e.payload,
                 "context": e.context,
-                "threshold_rank": e.threshold_rank,
-                "threshold_distance": e.threshold_distance,
             }
             for e in entries
         ]
@@ -147,25 +187,20 @@ def update(
     cur = conn.execute(
         """
         UPDATE entry
-        SET group_ref          = src.group_ref,
-            payload            = src.payload,
-            context            = src.context,
-            threshold_rank     = src.threshold_rank,
-            threshold_distance = src.threshold_distance
+        SET group_ref = src.group_ref,
+            payload   = src.payload,
+            context   = src.context
         FROM (
             SELECT
-                value->>'id'                 AS id,
-                value->>'group_ref'          AS group_ref,
-                value->>'payload'            AS payload,
-                value->>'context'            AS context,
-                value->>'threshold_rank'     AS threshold_rank,
-                value->>'threshold_distance' AS threshold_distance
+                value->>'id'        AS id,
+                value->>'group_ref' AS group_ref,
+                value->>'payload'   AS payload,
+                value->>'context'   AS context
             FROM json_each(?)
         ) AS src
         WHERE entry.id = src.id
         RETURNING
-            id, group_key, group_ref, payload, context,
-            keyword_text, semantic_text, threshold_rank, threshold_distance
+            id, group_key, group_ref, payload, context
         """,
         (batch,),
     )
@@ -177,16 +212,28 @@ def remove(conn: sqlite3.Connection, ids: list[str]) -> list[str]:
     if not ids:
         return []
 
+    ids_json = json.dumps(ids)
     cur = conn.execute(
         """
         DELETE FROM entry
         WHERE id IN (SELECT value FROM json_each(?))
         RETURNING id
         """,
-        (json.dumps(ids),),
+        (ids_json,),
+    )
+    removed = [r["id"] for r in cur]
+
+    # Cascade cleanup to virtual tables; FKs don't reach across to fts5/vec0.
+    conn.execute(
+        "DELETE FROM entry_fts WHERE entry_id IN (SELECT value FROM json_each(?))",
+        (ids_json,),
+    )
+    conn.execute(
+        "DELETE FROM entry_vec WHERE id IN (SELECT value FROM json_each(?))",
+        (ids_json,),
     )
 
-    return [r["id"] for r in cur]
+    return removed
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,8 +244,7 @@ class Filters:
 
 
 _FETCH_SQL = """
-SELECT id, group_key, group_ref, payload, context,
-       keyword_text, semantic_text, threshold_rank, threshold_distance
+SELECT id, group_key, group_ref, payload, context
 FROM entry
 WHERE (:ids IS NULL OR id IN (SELECT value FROM json_each(:ids)))
   AND (:group_keys IS NULL OR group_key IN (SELECT value FROM json_each(:group_keys)))
@@ -227,10 +273,11 @@ def fetch(
 
 _KEYWORD_SEARCH_SQL = """
 SELECT e.id, e.group_key, e.group_ref, e.payload, e.context,
-       e.keyword_text, e.semantic_text, e.threshold_rank, e.threshold_distance,
+       entry_fts.keyword_text AS keyword_text,
+       entry_fts.threshold_rank AS threshold_rank,
        -bm25(entry_fts) AS score
 FROM entry_fts
-JOIN entry e ON e.rowid = entry_fts.rowid
+JOIN entry e ON e.id = entry_fts.entry_id
 WHERE entry_fts MATCH :query
   AND (:ids IS NULL OR e.id IN (SELECT value FROM json_each(:ids)))
   AND (:group_keys IS NULL OR e.group_key IN (SELECT value FROM json_each(:group_keys)))
@@ -261,29 +308,39 @@ def keyword_search(
         params["limit"] = limit
 
     cur = conn.execute(sql, params)
-    return [KeywordHit(entry=_row_to_entry(r), score=r["score"]) for r in cur]
+    return [
+        KeywordHit(
+            entry=_row_to_entry(r),
+            keyword_text=r["keyword_text"],
+            threshold_rank=r["threshold_rank"],
+            score=r["score"],
+        )
+        for r in cur
+    ]
 
 
 _SEMANTIC_SEARCH_SQL = """
 SELECT e.id, e.group_key, e.group_ref, e.payload, e.context,
-       e.keyword_text, e.semantic_text, e.threshold_rank, e.threshold_distance,
+       v.semantic_text AS semantic_text,
+       v.threshold_distance AS threshold_distance,
        v.distance AS distance
 FROM entry_vec v
 JOIN entry e ON e.id = v.id
 WHERE v.embedding MATCH :query
-  AND v.group_key = :group_key
+  AND v.partition = :partition
   AND k = :k
 ORDER BY v.distance
 """
 
 _SEMANTIC_SEARCH_NULL_SQL = """
 SELECT e.id, e.group_key, e.group_ref, e.payload, e.context,
-       e.keyword_text, e.semantic_text, e.threshold_rank, e.threshold_distance,
+       v.semantic_text AS semantic_text,
+       v.threshold_distance AS threshold_distance,
        v.distance AS distance
 FROM entry_vec v
 JOIN entry e ON e.id = v.id
 WHERE v.embedding MATCH :query
-  AND v.group_key IS NULL
+  AND v.partition IS NULL
   AND k = :k
 ORDER BY v.distance
 """
@@ -292,13 +349,13 @@ ORDER BY v.distance
 def semantic_search(
     conn: sqlite3.Connection,
     embedding: Sequence[float],
-    group_key: str | None,
+    partition: str | None,
     limit: int = 10,
 ) -> list[SemanticHit]:
     if not embedding:
         raise ValueError("embedding must be non-empty")
 
-    if group_key is None:
+    if partition is None:
         sql = _SEMANTIC_SEARCH_NULL_SQL
         params: dict[str, Any] = {
             "query": _serialize_vec(embedding),
@@ -308,9 +365,17 @@ def semantic_search(
         sql = _SEMANTIC_SEARCH_SQL
         params = {
             "query": _serialize_vec(embedding),
-            "group_key": group_key,
+            "partition": partition,
             "k": limit,
         }
 
     cur = conn.execute(sql, params)
-    return [SemanticHit(entry=_row_to_entry(r), distance=r["distance"]) for r in cur]
+    return [
+        SemanticHit(
+            entry=_row_to_entry(r),
+            semantic_text=r["semantic_text"],
+            threshold_distance=r["threshold_distance"],
+            distance=r["distance"],
+        )
+        for r in cur
+    ]
