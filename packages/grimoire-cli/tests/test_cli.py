@@ -952,15 +952,40 @@ def test_search_runs_both_modes(mounted):
     assert any(h["semantic_text"] == "the moon glows" for h in out["semantic"])
 
 
-def test_search_keyword_rank_is_low_is_better(mounted):
+def test_search_keyword_rank_is_high_is_better(mounted):
     _add(keyword="match match match")
     _add(keyword="match")
 
     result = runner.invoke(app, ["search", "match"])
     out = json.loads(result.output)
     ranks = [h["rank"] for h in out["keyword"]]
-    assert ranks == sorted(ranks)
-    assert all(r <= 0 for r in ranks)
+    # Best-first ordering for canonical BM25: descending, non-negative.
+    assert ranks == sorted(ranks, reverse=True)
+    assert all(r >= 0 for r in ranks)
+
+
+def test_index_keyword_rejects_negative_threshold(mounted):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(
+        app,
+        ["index", "keyword", entry_id, "--text", "x", "--threshold-rank", "-1"],
+    )
+    assert result.exit_code != 0
+    assert "--threshold-rank" in result.output
+
+
+def test_index_semantic_rejects_negative_threshold(mounted):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(
+        app,
+        ["index", "semantic", entry_id, "--text", "x", "--threshold-distance", "-1"],
+    )
+    assert result.exit_code != 0
+    assert "--threshold-distance" in result.output
 
 
 def test_search_semantic_distance_is_low_is_better(mounted):

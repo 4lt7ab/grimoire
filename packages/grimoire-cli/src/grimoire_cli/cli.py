@@ -438,7 +438,7 @@ def index_keyword_cmd(
     ] = None,
     threshold_rank: Annotated[
         float | None,
-        typer.Option("--threshold-rank", help="Minimum BM25 rank score for keyword hits."),
+        typer.Option("--threshold-rank", help="Minimum BM25 score for keyword hits (non-negative).", min=0),
     ] = None,
     delete: Annotated[
         bool,
@@ -507,7 +507,7 @@ def index_semantic_cmd(
     ] = None,
     threshold_distance: Annotated[
         float | None,
-        typer.Option("--threshold-distance", help="Maximum vector distance for semantic hits."),
+        typer.Option("--threshold-distance", help="Maximum vector distance for semantic hits (non-negative).", min=0),
     ] = None,
     delete: Annotated[
         bool,
@@ -589,9 +589,10 @@ def search_cmd(
 ) -> None:
     """Search a database — runs both keyword (FTS5 BM25) and semantic (vector) modes.
 
-    Both scores are low-is-better: `rank` is the raw BM25 rank, `distance` is
-    the raw vector distance. The query is treated as natural language —
-    punctuation and FTS5 operators are stripped from the keyword pass.
+    `rank` is the BM25 score (higher = better, non-negative). `distance` is the
+    raw vector distance (lower = better, non-negative). The query is treated as
+    natural language — punctuation and FTS5 operators are stripped from the
+    keyword pass.
     """
     mnt = _existing_mount(ctx)
 
@@ -620,7 +621,7 @@ def search_cmd(
                 "entry": asdict(h.entry),
                 "keyword_text": h.keyword_text,
                 "threshold_rank": h.threshold_rank,
-                "rank": -h.score,
+                "rank": h.score,
             }
             for h in kw_hits
         ],
