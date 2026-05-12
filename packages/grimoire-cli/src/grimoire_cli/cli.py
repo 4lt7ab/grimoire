@@ -341,7 +341,7 @@ def fetch_cmd(
     ] = None,
     limit: Annotated[
         int,
-        typer.Option("--limit", help="Maximum entries to return."),
+        typer.Option("--limit", help="Maximum entries to return.", min=0),
     ] = 100,
 ) -> None:
     """Fetch Grimoire entries matching the given filters."""
@@ -522,7 +522,7 @@ def search_cmd(
     ] = None,
     limit: Annotated[
         int,
-        typer.Option("--limit", help="Maximum hits per mode."),
+        typer.Option("--limit", help="Maximum hits per mode.", min=0),
     ] = 10,
 ) -> None:
     """Search a database — runs both keyword (FTS5 BM25) and semantic (vector) modes.

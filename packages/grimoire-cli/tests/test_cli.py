@@ -365,6 +365,12 @@ def test_fetch_default_limit_caps_at_100(mounted):
     assert len(json.loads(result.output)) == 100
 
 
+def test_fetch_rejects_negative_limit(mounted):
+    result = runner.invoke(app, ["fetch", "--limit", "-1"])
+    assert result.exit_code != 0
+    assert "--limit" in result.output
+
+
 def test_fetch_empty_when_no_match(mounted):
     runner.invoke(app, ["entry", "add"])
 
@@ -864,6 +870,12 @@ def test_search_respects_explicit_limit(mounted):
     out = json.loads(result.output)
     assert len(out["keyword"]) == 2
     assert len(out["semantic"]) == 2
+
+
+def test_search_rejects_negative_limit(mounted):
+    result = runner.invoke(app, ["search", "wizard", "--limit", "-1"])
+    assert result.exit_code != 0
+    assert "--limit" in result.output
 
 
 def test_search_group_key_filters_keyword_only(mounted):
