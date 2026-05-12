@@ -518,7 +518,7 @@ def search_cmd(
     ] = None,
     partition: Annotated[
         str | None,
-        typer.Option("--partition", help="Restrict semantic hits to this vec partition. Omit for the NULL partition."),
+        typer.Option("--partition", help="Restrict semantic hits to this vec partition. Omit to search every partition."),
     ] = None,
     limit: Annotated[
         int,

@@ -114,6 +114,17 @@ def test_embed_replaces_existing_vec_row_in_new_partition(tmp_path, fake_embedde
     assert old_hits == []
 
 
+def test_semantic_search_without_partition_spans_all_partitions(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    [a, b, c] = g.add([Entry(None, None, None, None) for _ in range(3)])
+    g.embed([(a.id, "hello")])
+    g.embed([(b.id, "hello")], partition="alpha")
+    g.embed([(c.id, "hello")], partition="beta")
+
+    hits = g.semantic_search("hello")
+    assert {h.entry.id for h in hits} == {a.id, b.id, c.id}
+
+
 def test_embed_replaces_text_on_reembed(tmp_path, fake_embedder):
     g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])

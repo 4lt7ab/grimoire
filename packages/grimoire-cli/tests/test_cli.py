@@ -606,9 +606,12 @@ def test_embed_into_named_partition(mounted):
     out = json.loads(in_partition.output)
     assert [h["entry"]["id"] for h in out["semantic"]] == [entry_id]
 
-    in_null = runner.invoke(app, ["search", "hello"])
-    out_null = json.loads(in_null.output)
-    assert out_null["semantic"] == []
+    unfiltered = runner.invoke(app, ["search", "hello"])
+    out_any = json.loads(unfiltered.output)
+    assert [h["entry"]["id"] for h in out_any["semantic"]] == [entry_id]
+
+    other_partition = runner.invoke(app, ["search", "hello", "--partition", "beta"])
+    assert json.loads(other_partition.output)["semantic"] == []
 
 
 def test_embed_replaces_existing_vec_row(mounted):

@@ -333,7 +333,7 @@ def keyword_search(
     ]
 
 
-_SEMANTIC_SEARCH_SQL = """
+_SEMANTIC_SEARCH_BY_PARTITION_SQL = """
 SELECT e.id, e.group_key, e.group_ref, e.payload, e.context,
        v.semantic_text AS semantic_text,
        v.threshold_distance AS threshold_distance,
@@ -346,7 +346,7 @@ WHERE v.embedding MATCH :query
 ORDER BY v.distance
 """
 
-_SEMANTIC_SEARCH_NULL_SQL = """
+_SEMANTIC_SEARCH_ANY_PARTITION_SQL = """
 SELECT e.id, e.group_key, e.group_ref, e.payload, e.context,
        v.semantic_text AS semantic_text,
        v.threshold_distance AS threshold_distance,
@@ -354,7 +354,6 @@ SELECT e.id, e.group_key, e.group_ref, e.payload, e.context,
 FROM entry_vec v
 JOIN entry e ON e.id = v.id
 WHERE v.embedding MATCH :query
-  AND v.partition IS NULL
   AND k = :k
 ORDER BY v.distance
 """
@@ -370,13 +369,13 @@ def semantic_search(
         raise ValueError("embedding must be non-empty")
 
     if partition is None:
-        sql = _SEMANTIC_SEARCH_NULL_SQL
+        sql = _SEMANTIC_SEARCH_ANY_PARTITION_SQL
         params: dict[str, Any] = {
             "query": _serialize_vec(embedding),
             "k": limit,
         }
     else:
-        sql = _SEMANTIC_SEARCH_SQL
+        sql = _SEMANTIC_SEARCH_BY_PARTITION_SQL
         params = {
             "query": _serialize_vec(embedding),
             "partition": partition,
