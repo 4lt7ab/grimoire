@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import asdict
 from typing import Annotated
 
@@ -245,6 +246,58 @@ def entry_fetch_cmd(
         entries = g.fetch(filters, limit=limit)
 
     typer.echo(json.dumps([asdict(e) for e in entries], indent=2, default=str))
+
+
+@app.command(name="search")
+def search_cmd(
+    query: Annotated[
+        str,
+        typer.Argument(help="Search query — embedded for semantic, parsed as FTS5 for keyword."),
+    ],
+    name: Annotated[
+        str | None,
+        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+    ] = None,
+    group_key: Annotated[
+        str | None,
+        typer.Option("--group-key", help="Restrict to this group_key partition. Omit for the NULL partition."),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", help="Maximum hits per mode."),
+    ] = 10,
+) -> None:
+    """Search a database — runs both keyword (FTS5 BM25) and semantic (vector) modes.
+
+    Both scores are low-is-better: `rank` is the raw BM25 rank, `distance` is
+    the raw vector distance. The query is treated as natural language —
+    punctuation and FTS5 operators are stripped from the keyword pass.
+    """
+    mnt = mount.resolve()
+    if not mnt.exists():
+        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+
+    db_path = mnt.db_path(name)
+    if not db_path.exists():
+        target = f"database {name!r}" if name else "default database"
+        raise typer.BadParameter(f"No {target} in the mount.")
+
+    filters = Filters(group_key=[group_key] if group_key else None)
+    # Quote-wrap each word token so apostrophes, punctuation, and bareword
+    # FTS5 operators (AND/OR/NOT/NEAR/*) can't reach the parser. Join with
+    # OR so casual prose matches any-of, not all-of; BM25 still ranks by
+    # aggregate match strength.
+    fts_query = " OR ".join(f'"{t}"' for t in re.findall(r"\w+", query))
+
+    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+        kw_hits = g.keyword_search(fts_query, filters=filters, limit=limit) if fts_query else []
+        sem_hits = g.semantic_search(query, group_key=group_key, limit=limit)
+
+    result = {
+        "keyword": [{"entry": asdict(h.entry), "rank": -h.score} for h in kw_hits],
+        "semantic": [{"entry": asdict(h.entry), "distance": h.distance} for h in sem_hits],
+    }
+    typer.echo(json.dumps(result, indent=2, default=str))
 
 
 @entry_app.command(name="delete")
