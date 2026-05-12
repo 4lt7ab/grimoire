@@ -23,6 +23,7 @@ class Peek:
     schema_version: int
     entry_count: int
     group_counts: dict[str | None, int]
+    partition_counts: dict[str | None, int]
 
 
 class Grimoire:
@@ -142,11 +143,12 @@ class Grimoire:
 
 
 def peek(path: str | Path) -> Peek:
-    """Inspect a grimoire file without loading an embedder or sqlite-vec.
+    """Inspect a grimoire file without loading an embedder.
 
-    Returns model, dimension, schema version, total entry count, and
-    per-group counts. Raises `GrimoireNotFound` if the file does not exist
-    or has not been initialized.
+    Returns model, dimension, schema version, entry count, per-group counts
+    (from `entry`), and per-partition counts (from `entry_vec`). Raises
+    `GrimoireNotFound` if the file does not exist or has not been
+    initialized.
     """
     p = Path(path)
     if not p.exists():
@@ -154,22 +156,29 @@ def peek(path: str | Path) -> Peek:
 
     conn = sqlite3.connect(p)
     conn.row_factory = sqlite3.Row
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
 
     try:
         if schema.read_version(conn) == 0:
             raise GrimoireNotFound(f"{p} is not an initialized grimoire")
-        
+
         schema.validate(conn)
         model = meta.fetch(conn, "model")
         dimension_str = meta.fetch(conn, "dimension")
 
         if model is None or dimension_str is None:
             raise GrimoireNotFound(f"{p} is missing its embedder lock")
-        
+
         entry_count = conn.execute("SELECT COUNT(*) FROM entry").fetchone()[0]
-        rows = conn.execute(
+        group_rows = conn.execute(
             "SELECT group_key, COUNT(*) AS n FROM entry GROUP BY group_key "
             "ORDER BY group_key IS NULL, group_key"
+        ).fetchall()
+        partition_rows = conn.execute(
+            "SELECT partition, COUNT(*) AS n FROM entry_vec GROUP BY partition "
+            "ORDER BY partition IS NULL, partition"
         ).fetchall()
 
         return Peek(
@@ -177,7 +186,8 @@ def peek(path: str | Path) -> Peek:
             dimension=int(dimension_str),
             schema_version=schema.read_version(conn),
             entry_count=entry_count,
-            group_counts={r["group_key"]: r["n"] for r in rows},
+            group_counts={r["group_key"]: r["n"] for r in group_rows},
+            partition_counts={r["partition"]: r["n"] for r in partition_rows},
         )
     finally:
         conn.close()

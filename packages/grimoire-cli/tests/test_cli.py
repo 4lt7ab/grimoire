@@ -421,6 +421,7 @@ def test_info_reports_empty_default_db(mounted):
     assert info["schema_version"] == 1
     assert info["entry_count"] == 0
     assert info["group_counts"] == {}
+    assert info["partition_counts"] == {}
 
 
 def test_info_counts_entries_and_groups(mounted):
@@ -435,6 +436,18 @@ def test_info_counts_entries_and_groups(mounted):
     info = json.loads(result.output)
     assert info["entry_count"] == 4
     assert info["group_counts"] == {"tale": 2, "note": 1, "null": 1}
+
+
+def test_info_counts_partitions(mounted):
+    _add(embed="a", partition="alpha")
+    _add(embed="b", partition="alpha")
+    _add(embed="c", partition="beta")
+    _add(embed="d")  # NULL partition
+    _add()  # unembedded — no vec row, not in any partition
+
+    result = runner.invoke(app, ["info"])
+    info = json.loads(result.output)
+    assert info["partition_counts"] == {"alpha": 2, "beta": 1, "null": 1}
 
 
 def test_info_targets_named_db(mounted):
