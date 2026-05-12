@@ -50,6 +50,27 @@ def test_add_empty_does_not_call_embedder(tmp_path, fake_embedder):
     assert fake_embedder.embed_many_calls == 0
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"order": "Istari", "headmaster": True, "levels": [1, 2, 3]},
+        [1, 2, 3],
+        "a scalar string",
+        42,
+        3.14,
+        True,
+        False,
+        None,
+    ],
+)
+def test_add_round_trips_any_json_payload(tmp_path, fake_embedder, payload):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    [saved] = g.add([Entry(None, None, None, payload)])
+    [fetched] = g.fetch()
+    assert saved.payload == payload
+    assert fetched.payload == payload
+
+
 def test_embed_empty_is_noop(tmp_path, fake_embedder):
     g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
     assert g.embed([]) == []

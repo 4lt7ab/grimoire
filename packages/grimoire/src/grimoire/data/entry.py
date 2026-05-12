@@ -54,40 +54,31 @@ def add(
     if not entries:
         return []
 
-    ids = [str(ULID()) for _ in entries]
-
-    batch = json.dumps(
-        [
-            {
-                "id": id_,
-                "group_key": e.group_key,
-                "group_ref": e.group_ref,
-                "payload": e.payload,
-                "context": e.context,
-            }
-            for id_, e in zip(ids, entries, strict=True)
-        ]
-    )
-
-    cur = conn.execute(
-        """
-        INSERT INTO entry (
-            id, group_key, group_ref, payload, context
+    saved = [
+        Entry(
+            id=str(ULID()),
+            group_key=e.group_key,
+            group_ref=e.group_ref,
+            payload=e.payload,
+            context=e.context,
         )
-        SELECT
-            value->>'id',
-            value->>'group_key',
-            value->>'group_ref',
-            value->>'payload',
-            value->>'context'
-        FROM json_each(?)
-        RETURNING
-            id, group_key, group_ref, payload, context
-        """,
-        (batch,),
+        for e in entries
+    ]
+    conn.executemany(
+        "INSERT INTO entry (id, group_key, group_ref, payload, context) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [
+            (
+                e.id,
+                e.group_key,
+                e.group_ref,
+                json.dumps(e.payload) if e.payload is not None else None,
+                e.context,
+            )
+            for e in saved
+        ],
     )
-
-    return [_row_to_entry(r) for r in cur]
+    return saved
 
 
 def keyword_remove(conn: sqlite3.Connection, ids: list[str]) -> list[str]:
@@ -217,43 +208,18 @@ def update(
     if not entries:
         return []
 
-    batch = json.dumps(
-        [
-            {
-                "id": e.id,
-                "group_key": e.group_key,
-                "group_ref": e.group_ref,
-                "payload": e.payload,
-                "context": e.context,
-            }
-            for e in entries
-        ]
-    )
-
-    cur = conn.execute(
-        """
-        UPDATE entry
-        SET group_key = src.group_key,
-            group_ref = src.group_ref,
-            payload   = src.payload,
-            context   = src.context
-        FROM (
-            SELECT
-                value->>'id'        AS id,
-                value->>'group_key' AS group_key,
-                value->>'group_ref' AS group_ref,
-                value->>'payload'   AS payload,
-                value->>'context'   AS context
-            FROM json_each(?)
-        ) AS src
-        WHERE entry.id = src.id
-        RETURNING
-            id, group_key, group_ref, payload, context
-        """,
-        (batch,),
-    )
-
-    return [_row_to_entry(r) for r in cur]
+    saved: list[Entry] = []
+    for e in entries:
+        payload_text = json.dumps(e.payload) if e.payload is not None else None
+        cur = conn.execute(
+            "UPDATE entry "
+            "SET group_key = ?, group_ref = ?, payload = ?, context = ? "
+            "WHERE id = ?",
+            (e.group_key, e.group_ref, payload_text, e.context, e.id),
+        )
+        if cur.rowcount > 0:
+            saved.append(e)
+    return saved
 
 
 def remove(conn: sqlite3.Connection, ids: list[str]) -> list[str]:
