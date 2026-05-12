@@ -176,6 +176,7 @@ def update(
         [
             {
                 "id": e.id,
+                "group_key": e.group_key,
                 "group_ref": e.group_ref,
                 "payload": e.payload,
                 "context": e.context,
@@ -187,12 +188,14 @@ def update(
     cur = conn.execute(
         """
         UPDATE entry
-        SET group_ref = src.group_ref,
+        SET group_key = src.group_key,
+            group_ref = src.group_ref,
             payload   = src.payload,
             context   = src.context
         FROM (
             SELECT
                 value->>'id'        AS id,
+                value->>'group_key' AS group_key,
                 value->>'group_ref' AS group_ref,
                 value->>'payload'   AS payload,
                 value->>'context'   AS context

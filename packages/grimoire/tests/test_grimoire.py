@@ -233,7 +233,7 @@ def test_update_does_not_call_embedder(tmp_path, fake_embedder):
     assert fake_embedder.embed_many_calls == 0
 
 
-def test_update_ignores_immutable_fields(tmp_path, fake_embedder):
+def test_update_changes_all_metadata_fields(tmp_path, fake_embedder):
     g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add(
         [
@@ -242,6 +242,7 @@ def test_update_ignores_immutable_fields(tmp_path, fake_embedder):
                 group_key="g1",
                 group_ref=None,
                 payload={"a": 1},
+                context="orig",
             )
         ]
     )
@@ -253,12 +254,14 @@ def test_update_ignores_immutable_fields(tmp_path, fake_embedder):
                 group_key="g2",
                 group_ref="ref-1",
                 payload={"a": 2},
+                context="new",
             )
         ]
     )
-    assert updated.group_key == "g1"
+    assert updated.group_key == "g2"
     assert updated.group_ref == "ref-1"
     assert updated.payload == {"a": 2}
+    assert updated.context == "new"
 
 
 def test_update_clears_nullable_fields(tmp_path, fake_embedder):
