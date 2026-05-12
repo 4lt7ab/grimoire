@@ -170,6 +170,18 @@ def test_entry_update_sets_group_key(mounted):
     assert json.loads(result.output)["group_key"] == "note"
 
 
+def test_entry_update_sets_group_ref(mounted):
+    add = runner.invoke(app, ["entry", "add", "--group-ref", "ref-old"])
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(
+        app,
+        ["entry", "update", entry_id, "--group-ref", "ref-new"],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["group_ref"] == "ref-new"
+
+
 def test_entry_update_sets_context(mounted):
     add = runner.invoke(app, ["entry", "add", "--context", "first"])
     entry_id = json.loads(add.output)["id"]
