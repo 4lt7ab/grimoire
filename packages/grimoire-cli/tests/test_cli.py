@@ -665,7 +665,10 @@ def test_embed_writes_vec_row(mounted):
     result = runner.invoke(app, ["index", "semantic", entry_id, "--text", "hello"])
     assert result.exit_code == 0, result.output
     out = json.loads(result.output)
-    assert out["id"] == entry_id
+    assert out["entry"]["id"] == entry_id
+    assert out["semantic_text"] == "hello"
+    assert out["partition"] is None
+    assert out["threshold_distance"] is None
 
     sem = runner.invoke(app, ["search", "hello"])
     sem_hits = json.loads(sem.output)["semantic"]
@@ -682,6 +685,10 @@ def test_embed_into_named_partition(mounted):
         ["index", "semantic", entry_id, "--text", "hello", "--partition", "alpha"],
     )
     assert result.exit_code == 0, result.output
+    out = json.loads(result.output)
+    assert out["entry"]["id"] == entry_id
+    assert out["semantic_text"] == "hello"
+    assert out["partition"] == "alpha"
 
     in_partition = runner.invoke(app, ["search", "hello", "--partition", "alpha"])
     out = json.loads(in_partition.output)
@@ -693,6 +700,34 @@ def test_embed_into_named_partition(mounted):
 
     other_partition = runner.invoke(app, ["search", "hello", "--partition", "beta"])
     assert json.loads(other_partition.output)["semantic"] == []
+
+
+def test_index_keyword_echoes_threshold_rank(mounted):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(
+        app,
+        ["index", "keyword", entry_id, "--text", "moon", "--threshold-rank", "1.5"],
+    )
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.output)
+    assert out["keyword_text"] == "moon"
+    assert out["threshold_rank"] == 1.5
+
+
+def test_index_semantic_echoes_threshold_distance(mounted):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(
+        app,
+        ["index", "semantic", entry_id, "--text", "moon", "--threshold-distance", "0.75"],
+    )
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.output)
+    assert out["semantic_text"] == "moon"
+    assert out["threshold_distance"] == 0.75
 
 
 def test_embed_replaces_existing_vec_row(mounted):
@@ -734,7 +769,10 @@ def test_keyword_indexes_for_match(mounted):
         app, ["index", "keyword", entry_id, "--text", "the moon glows"]
     )
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["id"] == entry_id
+    out = json.loads(result.output)
+    assert out["entry"]["id"] == entry_id
+    assert out["keyword_text"] == "the moon glows"
+    assert out["threshold_rank"] is None
 
     kw = runner.invoke(app, ["search", "moon"])
     hits = json.loads(kw.output)["keyword"]

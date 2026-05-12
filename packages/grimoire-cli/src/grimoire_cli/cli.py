@@ -478,7 +478,12 @@ def index_keyword_cmd(
                 [indexed] = g.keyword([(entry_id, text)], threshold_rank=threshold_rank)
             except ValueError as e:
                 raise typer.BadParameter(str(e)) from e
-            typer.echo(json.dumps(asdict(indexed), indent=2, default=str))
+            result = {
+                "entry": asdict(indexed),
+                "keyword_text": text,
+                "threshold_rank": threshold_rank,
+            }
+            typer.echo(json.dumps(result, indent=2, default=str))
 
 
 @index_app.command(name="semantic")
@@ -549,7 +554,13 @@ def index_semantic_cmd(
                 )
             except ValueError as e:
                 raise typer.BadParameter(str(e)) from e
-            typer.echo(json.dumps(asdict(embedded), indent=2, default=str))
+            result = {
+                "entry": asdict(embedded),
+                "semantic_text": text,
+                "partition": partition,
+                "threshold_distance": threshold_distance,
+            }
+            typer.echo(json.dumps(result, indent=2, default=str))
 
 
 @app.command(name="search")
