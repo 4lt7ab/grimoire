@@ -193,6 +193,10 @@ def entry_update_cmd(
         str | None,
         typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
     ] = None,
+    group_key: Annotated[
+        str | None,
+        typer.Option("--group-key", help="Group key metadata for this entry."),
+    ] = None,
     payload: Annotated[
         str | None,
         typer.Option("--payload", help="JSON payload object."),
@@ -202,7 +206,7 @@ def entry_update_cmd(
         typer.Option("--context", help="Unindexed contextual text."),
     ] = None,
 ) -> None:
-    """Update payload and context on an entry. Unspecified fields are preserved.
+    """Update group_key, payload, and context on an entry. Unspecified fields are preserved.
 
     To change keyword thresholds or semantic thresholds, re-run `grimoire keyword`
     or `grimoire embed` with the new threshold value.
@@ -227,6 +231,7 @@ def entry_update_cmd(
 
         merged = replace(
             current,
+            group_key=current.group_key if group_key is None else group_key,
             payload=payload_value if payload_provided else current.payload,
             context=current.context if context is None else context,
         )
