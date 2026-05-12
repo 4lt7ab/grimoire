@@ -217,6 +217,64 @@ def test_entry_fetch_fails_for_unknown_named_db(mounted):
     assert "nonesuch" in result.output
 
 
+def test_entry_delete_removes_existing(mounted):
+    add = runner.invoke(app, ["entry", "add", "ephemeral"])
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(app, ["entry", "delete", entry_id, "--yes"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"id": entry_id, "deleted": True}
+
+    fetched = runner.invoke(app, ["entry", "fetch", "--id", entry_id])
+    assert json.loads(fetched.output) == []
+
+
+def test_entry_delete_missing_id_is_soft(mounted):
+    result = runner.invoke(app, ["entry", "delete", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"id": "01HXXXXXXXXXXXXXXXXXXXXXXX", "deleted": False}
+
+
+def test_entry_delete_requires_yes(mounted):
+    add = runner.invoke(app, ["entry", "add", "ephemeral"])
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(app, ["entry", "delete", entry_id])
+    assert result.exit_code != 0
+    assert "--yes" in result.output
+
+    fetched = runner.invoke(app, ["entry", "fetch", "--id", entry_id])
+    assert len(json.loads(fetched.output)) == 1
+
+
+def test_entry_delete_targets_named_db(mounted):
+    create = runner.invoke(app, ["mount", "add", "spellbook"])
+    assert create.exit_code == 0, create.output
+
+    add = runner.invoke(app, ["entry", "add", "named", "-n", "spellbook"])
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(app, ["entry", "delete", entry_id, "-n", "spellbook", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"id": entry_id, "deleted": True}
+
+
+def test_entry_delete_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedder):
+    monkeypatch.setenv(ENV_VAR, str(tmp_path))
+    result = runner.invoke(app, ["entry", "delete", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--yes"])
+    assert result.exit_code != 0
+    assert "Mount does not exist" in result.output
+
+
+def test_entry_delete_fails_for_unknown_named_db(mounted):
+    result = runner.invoke(
+        app,
+        ["entry", "delete", "01HXXXXXXXXXXXXXXXXXXXXXXX", "-n", "nonesuch", "--yes"],
+    )
+    assert result.exit_code != 0
+    assert "nonesuch" in result.output
+
+
 def test_mount_ls_lists_default_only(mounted):
     result = runner.invoke(app, ["mount", "ls"])
     assert result.exit_code == 0, result.output

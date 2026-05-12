@@ -245,3 +245,37 @@ def entry_fetch_cmd(
         entries = g.fetch(filters, limit=limit)
 
     typer.echo(json.dumps([asdict(e) for e in entries], indent=2, default=str))
+
+
+@entry_app.command(name="delete")
+def entry_delete_cmd(
+    entry_id: Annotated[
+        str,
+        typer.Argument(help="Id of the entry to delete."),
+    ],
+    name: Annotated[
+        str | None,
+        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+    ] = None,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", help="Confirm deletion."),
+    ] = False,
+) -> None:
+    """Delete a Grimoire entry by id. Idempotent — missing ids return deleted=false."""
+    if not yes:
+        raise typer.BadParameter("Pass --yes to confirm deletion.")
+
+    mnt = mount.resolve()
+    if not mnt.exists():
+        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+
+    db_path = mnt.db_path(name)
+    if not db_path.exists():
+        target = f"database {name!r}" if name else "default database"
+        raise typer.BadParameter(f"No {target} in the mount.")
+
+    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+        removed = g.remove([entry_id])
+
+    typer.echo(json.dumps({"id": entry_id, "deleted": bool(removed)}, indent=2))
