@@ -31,12 +31,12 @@ def _add(
     add_result = runner.invoke(app, ["entry", "add", *name_flag, *flags])
     entry_id = json.loads(add_result.output)["id"]
     if embed is not None:
-        cmd = ["embed", entry_id, *name_flag, "--text", embed]
+        cmd = ["embed", "set", entry_id, *name_flag, "--text", embed]
         if partition is not None:
             cmd += ["--partition", partition]
         runner.invoke(app, cmd)
     if keyword is not None:
-        runner.invoke(app, ["keyword", entry_id, *name_flag, "--text", keyword])
+        runner.invoke(app, ["keyword", "set", entry_id, *name_flag, "--text", keyword])
     return entry_id
 
 
@@ -504,7 +504,7 @@ def test_embed_writes_vec_row(mounted):
     add = runner.invoke(app, ["entry", "add"])
     entry_id = json.loads(add.output)["id"]
 
-    result = runner.invoke(app, ["embed", entry_id, "--text", "hello"])
+    result = runner.invoke(app, ["embed", "set", entry_id, "--text", "hello"])
     assert result.exit_code == 0, result.output
     out = json.loads(result.output)
     assert out["id"] == entry_id
@@ -521,7 +521,7 @@ def test_embed_into_named_partition(mounted):
 
     result = runner.invoke(
         app,
-        ["embed", entry_id, "--text", "hello", "--partition", "alpha"],
+        ["embed", "set", entry_id, "--text", "hello", "--partition", "alpha"],
     )
     assert result.exit_code == 0, result.output
 
@@ -538,8 +538,8 @@ def test_embed_replaces_existing_vec_row(mounted):
     add = runner.invoke(app, ["entry", "add"])
     entry_id = json.loads(add.output)["id"]
 
-    runner.invoke(app, ["embed", entry_id, "--text", "first"])
-    runner.invoke(app, ["embed", entry_id, "--text", "second"])
+    runner.invoke(app, ["embed", "set", entry_id, "--text", "first"])
+    runner.invoke(app, ["embed", "set", entry_id, "--text", "second"])
 
     sem = runner.invoke(app, ["search", "anything"])
     hits = json.loads(sem.output)["semantic"]
@@ -551,7 +551,7 @@ def test_embed_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedder)
     monkeypatch.setenv(ENV_VAR, str(tmp_path))
     result = runner.invoke(
         app,
-        ["embed", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--text", "anything"],
+        ["embed", "set", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--text", "anything"],
     )
     assert result.exit_code != 0
     assert "Mount does not exist" in result.output
@@ -560,7 +560,7 @@ def test_embed_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedder)
 def test_embed_fails_for_unknown_id(mounted):
     result = runner.invoke(
         app,
-        ["embed", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--text", "anything"],
+        ["embed", "set", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--text", "anything"],
     )
     assert result.exit_code != 0
 
@@ -569,7 +569,7 @@ def test_keyword_indexes_for_match(mounted):
     add = runner.invoke(app, ["entry", "add"])
     entry_id = json.loads(add.output)["id"]
 
-    result = runner.invoke(app, ["keyword", entry_id, "--text", "the moon glows"])
+    result = runner.invoke(app, ["keyword", "set", entry_id, "--text", "the moon glows"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["id"] == entry_id
 
@@ -582,8 +582,8 @@ def test_keyword_replaces_text_on_reindex(mounted):
     add = runner.invoke(app, ["entry", "add"])
     entry_id = json.loads(add.output)["id"]
 
-    runner.invoke(app, ["keyword", entry_id, "--text", "moon"])
-    runner.invoke(app, ["keyword", entry_id, "--text", "stars"])
+    runner.invoke(app, ["keyword", "set", entry_id, "--text", "moon"])
+    runner.invoke(app, ["keyword", "set", entry_id, "--text", "stars"])
 
     moon = runner.invoke(app, ["search", "moon"])
     stars = runner.invoke(app, ["search", "stars"])
@@ -595,7 +595,7 @@ def test_keyword_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedde
     monkeypatch.setenv(ENV_VAR, str(tmp_path))
     result = runner.invoke(
         app,
-        ["keyword", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--text", "anything"],
+        ["keyword", "set", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--text", "anything"],
     )
     assert result.exit_code != 0
     assert "Mount does not exist" in result.output
@@ -604,7 +604,7 @@ def test_keyword_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedde
 def test_keyword_fails_for_unknown_id(mounted):
     result = runner.invoke(
         app,
-        ["keyword", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--text", "anything"],
+        ["keyword", "set", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--text", "anything"],
     )
     assert result.exit_code != 0
 
@@ -615,11 +615,91 @@ def test_keyword_stores_threshold_rank(mounted):
 
     runner.invoke(
         app,
-        ["keyword", entry_id, "--text", "hello", "--threshold-rank", "0.25"],
+        ["keyword", "set", entry_id, "--text", "hello", "--threshold-rank", "0.25"],
     )
 
     out = json.loads(runner.invoke(app, ["search", "hello"]).output)
     assert [h["threshold_rank"] for h in out["keyword"]] == [0.25]
+
+
+def test_keyword_delete_removes_fts_row(mounted):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+    runner.invoke(app, ["keyword", "set", entry_id, "--text", "hello"])
+
+    result = runner.invoke(app, ["keyword", "delete", entry_id, "--yes"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"id": entry_id, "deleted": True}
+
+    out = json.loads(runner.invoke(app, ["search", "hello"]).output)
+    assert out["keyword"] == []
+
+
+def test_keyword_delete_missing_id_is_soft(mounted):
+    result = runner.invoke(
+        app, ["keyword", "delete", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {
+        "id": "01HXXXXXXXXXXXXXXXXXXXXXXX",
+        "deleted": False,
+    }
+
+
+def test_keyword_delete_requires_yes(mounted):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+    runner.invoke(app, ["keyword", "set", entry_id, "--text", "hello"])
+
+    result = runner.invoke(app, ["keyword", "delete", entry_id])
+    assert result.exit_code != 0
+    assert "--yes" in result.output
+
+
+def test_keyword_delete_leaves_entry_intact(mounted):
+    add = runner.invoke(app, ["entry", "add", "--group-key", "tale"])
+    entry_id = json.loads(add.output)["id"]
+    runner.invoke(app, ["keyword", "set", entry_id, "--text", "hello"])
+
+    runner.invoke(app, ["keyword", "delete", entry_id, "--yes"])
+
+    fetched = json.loads(runner.invoke(app, ["fetch", "--id", entry_id]).output)
+    assert len(fetched) == 1
+    assert fetched[0]["group_key"] == "tale"
+
+
+def test_embed_delete_removes_vec_row(mounted):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+    runner.invoke(app, ["embed", "set", entry_id, "--text", "hello"])
+
+    result = runner.invoke(app, ["embed", "delete", entry_id, "--yes"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"id": entry_id, "deleted": True}
+
+    out = json.loads(runner.invoke(app, ["search", "hello"]).output)
+    assert out["semantic"] == []
+
+
+def test_embed_delete_missing_id_is_soft(mounted):
+    result = runner.invoke(
+        app, ["embed", "delete", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--yes"]
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {
+        "id": "01HXXXXXXXXXXXXXXXXXXXXXXX",
+        "deleted": False,
+    }
+
+
+def test_embed_delete_requires_yes(mounted):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+    runner.invoke(app, ["embed", "set", entry_id, "--text", "hello"])
+
+    result = runner.invoke(app, ["embed", "delete", entry_id])
+    assert result.exit_code != 0
+    assert "--yes" in result.output
 
 
 def test_embed_stores_threshold_distance(mounted):
@@ -628,7 +708,7 @@ def test_embed_stores_threshold_distance(mounted):
 
     runner.invoke(
         app,
-        ["embed", entry_id, "--text", "hello", "--threshold-distance", "0.75"],
+        ["embed", "set", entry_id, "--text", "hello", "--threshold-distance", "0.75"],
     )
 
     out = json.loads(runner.invoke(app, ["search", "hello"]).output)

@@ -56,6 +56,20 @@ class Grimoire:
     ) -> list[Entry]:
         return entry.fetch(self._conn, filters, limit)
 
+    def keyword_remove(self, ids: list[str]) -> list[str]:
+        """Delete entry_fts rows for the given ids. Returns the ids that had rows.
+
+        Entries themselves are not affected. Empty `ids` is a no-op.
+        """
+        return entry.keyword_remove(self._conn, ids)
+
+    def embed_remove(self, ids: list[str]) -> list[str]:
+        """Delete entry_vec rows for the given ids. Returns the ids that had rows.
+
+        Entries themselves are not affected. Empty `ids` is a no-op.
+        """
+        return entry.embed_remove(self._conn, ids)
+
     def keyword(
         self,
         items: list[tuple[str, str]] | None = None,

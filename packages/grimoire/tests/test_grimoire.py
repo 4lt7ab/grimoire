@@ -178,6 +178,64 @@ def test_keyword_stores_threshold_rank(tmp_path, fake_embedder):
     assert [h.threshold_rank for h in hits] == [0.25]
 
 
+def test_keyword_remove_deletes_fts_row(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    [saved] = g.add([Entry(None, None, None, None)])
+    g.keyword([(saved.id, "hello")])
+    assert g.keyword_search("hello") != []
+
+    removed = g.keyword_remove([saved.id])
+    assert removed == [saved.id]
+    assert g.keyword_search("hello") == []
+
+
+def test_keyword_remove_missing_id_returns_empty(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    assert g.keyword_remove(["01MISSINGMISSINGMISSINGMI"]) == []
+
+
+def test_keyword_remove_leaves_entry_intact(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    [saved] = g.add([Entry(None, "tale", None, {"k": "v"})])
+    g.keyword([(saved.id, "hello")])
+
+    g.keyword_remove([saved.id])
+
+    [entry_after] = g.fetch()
+    assert entry_after.id == saved.id
+    assert entry_after.group_key == "tale"
+    assert entry_after.payload == {"k": "v"}
+
+
+def test_embed_remove_deletes_vec_row(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    [saved] = g.add([Entry(None, None, None, None)])
+    g.embed([(saved.id, "hello")])
+    assert _has_vec_row(g._conn, saved.id)
+
+    removed = g.embed_remove([saved.id])
+    assert removed == [saved.id]
+    assert not _has_vec_row(g._conn, saved.id)
+
+
+def test_embed_remove_missing_id_returns_empty(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    assert g.embed_remove(["01MISSINGMISSINGMISSINGMI"]) == []
+
+
+def test_embed_remove_leaves_entry_intact(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    [saved] = g.add([Entry(None, "tale", None, {"k": "v"})])
+    g.embed([(saved.id, "hello")])
+
+    g.embed_remove([saved.id])
+
+    [entry_after] = g.fetch()
+    assert entry_after.id == saved.id
+    assert entry_after.group_key == "tale"
+    assert entry_after.payload == {"k": "v"}
+
+
 def test_embed_stores_threshold_distance(tmp_path, fake_embedder):
     g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])

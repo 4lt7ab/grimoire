@@ -90,6 +90,51 @@ def add(
     return [_row_to_entry(r) for r in cur]
 
 
+def keyword_remove(conn: sqlite3.Connection, ids: list[str]) -> list[str]:
+    """Delete entry_fts rows for the given ids. Returns the ids that had rows.
+
+    Entries themselves are not affected.
+    """
+    if not ids:
+        return []
+
+    ids_json = json.dumps(ids)
+    existing = conn.execute(
+        "SELECT entry_id FROM entry_fts "
+        "WHERE entry_id IN (SELECT value FROM json_each(?))",
+        (ids_json,),
+    ).fetchall()
+    removed = [r["entry_id"] for r in existing]
+
+    conn.execute(
+        "DELETE FROM entry_fts WHERE entry_id IN (SELECT value FROM json_each(?))",
+        (ids_json,),
+    )
+    return removed
+
+
+def embed_remove(conn: sqlite3.Connection, ids: list[str]) -> list[str]:
+    """Delete entry_vec rows for the given ids. Returns the ids that had rows.
+
+    Entries themselves are not affected.
+    """
+    if not ids:
+        return []
+
+    ids_json = json.dumps(ids)
+    existing = conn.execute(
+        "SELECT id FROM entry_vec WHERE id IN (SELECT value FROM json_each(?))",
+        (ids_json,),
+    ).fetchall()
+    removed = [r["id"] for r in existing]
+
+    conn.execute(
+        "DELETE FROM entry_vec WHERE id IN (SELECT value FROM json_each(?))",
+        (ids_json,),
+    )
+    return removed
+
+
 def keyword(
     conn: sqlite3.Connection,
     items: list[tuple[str, str]],
