@@ -197,7 +197,7 @@ def entry_add_cmd(
         typer.Option("--payload", help="JSON payload object."),
     ] = None,
 ) -> None:
-    """Create a Grimoire entry. Add searchable text via `grimoire embed` or `grimoire keyword`."""
+    """Create a Grimoire entry. Add searchable text via `grimoire index keyword` or `grimoire index semantic`."""
     mnt = _existing_mount(ctx)
 
     try:
@@ -258,8 +258,8 @@ def entry_update_cmd(
 ) -> None:
     """Update group_key, group_ref, payload, and context on an entry. Unspecified fields are preserved.
 
-    To change keyword thresholds or semantic thresholds, re-run `grimoire keyword`
-    or `grimoire embed` with the new threshold value.
+    To change keyword thresholds or semantic thresholds, re-run `grimoire index keyword`
+    or `grimoire index semantic` with the new threshold value.
     """
     mnt = _existing_mount(ctx)
 
