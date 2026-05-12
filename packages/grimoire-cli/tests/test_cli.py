@@ -125,94 +125,94 @@ def test_entry_add_fails_for_unknown_named_db(mounted):
     assert "nonesuch" in result.output
 
 
-def test_entry_fetch_no_filters_returns_all(mounted):
+def test_fetch_no_filters_returns_all(mounted):
     runner.invoke(app, ["entry", "add", "first"])
     runner.invoke(app, ["entry", "add", "second"])
 
-    result = runner.invoke(app, ["entry", "fetch"])
+    result = runner.invoke(app, ["fetch"])
     assert result.exit_code == 0, result.output
     entries = json.loads(result.output)
     assert {e["semantic_text"] for e in entries} == {"first", "second"}
 
 
-def test_entry_fetch_filters_by_id(mounted):
+def test_fetch_filters_by_id(mounted):
     a = json.loads(runner.invoke(app, ["entry", "add", "alpha"]).output)
     runner.invoke(app, ["entry", "add", "beta"])
 
-    result = runner.invoke(app, ["entry", "fetch", "--id", a["id"]])
+    result = runner.invoke(app, ["fetch", "--id", a["id"]])
     assert result.exit_code == 0, result.output
     entries = json.loads(result.output)
     assert [e["id"] for e in entries] == [a["id"]]
 
 
-def test_entry_fetch_filters_by_group_key(mounted):
+def test_fetch_filters_by_group_key(mounted):
     runner.invoke(app, ["entry", "add", "tale-one", "--group-key", "tale"])
     runner.invoke(app, ["entry", "add", "note-one", "--group-key", "note"])
 
-    result = runner.invoke(app, ["entry", "fetch", "--group-key", "tale"])
+    result = runner.invoke(app, ["fetch", "--group-key", "tale"])
     assert result.exit_code == 0, result.output
     entries = json.loads(result.output)
     assert [e["semantic_text"] for e in entries] == ["tale-one"]
 
 
-def test_entry_fetch_repeatable_filter(mounted):
+def test_fetch_repeatable_filter(mounted):
     a = json.loads(runner.invoke(app, ["entry", "add", "alpha"]).output)
     b = json.loads(runner.invoke(app, ["entry", "add", "beta"]).output)
     runner.invoke(app, ["entry", "add", "gamma"])
 
-    result = runner.invoke(app, ["entry", "fetch", "--id", a["id"], "--id", b["id"]])
+    result = runner.invoke(app, ["fetch", "--id", a["id"], "--id", b["id"]])
     assert result.exit_code == 0, result.output
     entries = json.loads(result.output)
     assert {e["id"] for e in entries} == {a["id"], b["id"]}
 
 
-def test_entry_fetch_respects_explicit_limit(mounted):
+def test_fetch_respects_explicit_limit(mounted):
     for word in ["one", "two", "three", "four", "five"]:
         runner.invoke(app, ["entry", "add", word])
 
-    result = runner.invoke(app, ["entry", "fetch", "--limit", "2"])
+    result = runner.invoke(app, ["fetch", "--limit", "2"])
     assert result.exit_code == 0, result.output
     assert len(json.loads(result.output)) == 2
 
 
-def test_entry_fetch_default_limit_caps_at_100(mounted):
+def test_fetch_default_limit_caps_at_100(mounted):
     for i in range(101):
         runner.invoke(app, ["entry", "add", f"entry-{i}"])
 
-    result = runner.invoke(app, ["entry", "fetch"])
+    result = runner.invoke(app, ["fetch"])
     assert result.exit_code == 0, result.output
     assert len(json.loads(result.output)) == 100
 
 
-def test_entry_fetch_empty_when_no_match(mounted):
+def test_fetch_empty_when_no_match(mounted):
     runner.invoke(app, ["entry", "add", "hello"])
 
-    result = runner.invoke(app, ["entry", "fetch", "--id", "01HXXXXXXXXXXXXXXXXXXXXXXX"])
+    result = runner.invoke(app, ["fetch", "--id", "01HXXXXXXXXXXXXXXXXXXXXXXX"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == []
 
 
-def test_entry_fetch_targets_named_db(mounted):
+def test_fetch_targets_named_db(mounted):
     create = runner.invoke(app, ["mount", "add", "spellbook"])
     assert create.exit_code == 0, create.output
 
     runner.invoke(app, ["entry", "add", "named-hello", "-n", "spellbook"])
 
-    result = runner.invoke(app, ["entry", "fetch", "-n", "spellbook"])
+    result = runner.invoke(app, ["fetch", "-n", "spellbook"])
     assert result.exit_code == 0, result.output
     entries = json.loads(result.output)
     assert [e["semantic_text"] for e in entries] == ["named-hello"]
 
 
-def test_entry_fetch_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedder):
+def test_fetch_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedder):
     monkeypatch.setenv(ENV_VAR, str(tmp_path))
-    result = runner.invoke(app, ["entry", "fetch"])
+    result = runner.invoke(app, ["fetch"])
     assert result.exit_code != 0
     assert "Mount does not exist" in result.output
 
 
-def test_entry_fetch_fails_for_unknown_named_db(mounted):
-    result = runner.invoke(app, ["entry", "fetch", "-n", "nonesuch"])
+def test_fetch_fails_for_unknown_named_db(mounted):
+    result = runner.invoke(app, ["fetch", "-n", "nonesuch"])
     assert result.exit_code != 0
     assert "nonesuch" in result.output
 
@@ -225,7 +225,7 @@ def test_entry_delete_removes_existing(mounted):
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == {"id": entry_id, "deleted": True}
 
-    fetched = runner.invoke(app, ["entry", "fetch", "--id", entry_id])
+    fetched = runner.invoke(app, ["fetch", "--id", entry_id])
     assert json.loads(fetched.output) == []
 
 
@@ -243,7 +243,7 @@ def test_entry_delete_requires_yes(mounted):
     assert result.exit_code != 0
     assert "--yes" in result.output
 
-    fetched = runner.invoke(app, ["entry", "fetch", "--id", entry_id])
+    fetched = runner.invoke(app, ["fetch", "--id", entry_id])
     assert len(json.loads(fetched.output)) == 1
 
 
