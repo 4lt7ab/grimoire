@@ -351,6 +351,110 @@ def test_entry_update_rejects_collision_with_existing_pair(mounted):
     assert "group_key, group_ref" in result.output
 
 
+def test_entry_update_put_clears_unspecified_fields(mounted):
+    add = runner.invoke(
+        app,
+        [
+            "entry", "add",
+            "--group-key", "wizard",
+            "--group-ref", "gandalf",
+            "--payload", '{"order":"Istari"}',
+            "--context", "ancient",
+        ],
+    )
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(
+        app,
+        ["entry", "update", entry_id, "--put", "--group-key", "wizard"],
+    )
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.output)
+    assert out["group_key"] == "wizard"
+    assert out["group_ref"] is None
+    assert out["payload"] is None
+    assert out["context"] is None
+
+
+def test_entry_update_put_with_no_fields_clears_everything(mounted):
+    add = runner.invoke(
+        app,
+        [
+            "entry", "add",
+            "--group-key", "wizard",
+            "--group-ref", "gandalf",
+            "--payload", '{"a":1}',
+            "--context", "ctx",
+        ],
+    )
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(app, ["entry", "update", entry_id, "--put"])
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.output)
+    assert out["group_key"] is None
+    assert out["group_ref"] is None
+    assert out["payload"] is None
+    assert out["context"] is None
+
+
+def test_entry_update_put_keeps_fields_that_are_restated(mounted):
+    add = runner.invoke(
+        app,
+        [
+            "entry", "add",
+            "--group-key", "wizard",
+            "--group-ref", "gandalf",
+            "--payload", '{"order":"Istari"}',
+            "--context", "ancient",
+        ],
+    )
+    entry_id = json.loads(add.output)["id"]
+
+    # Restate every field except context; context should clear.
+    result = runner.invoke(
+        app,
+        [
+            "entry", "update", entry_id, "--put",
+            "--group-key", "wizard",
+            "--group-ref", "gandalf",
+            "--payload", '{"order":"Istari"}',
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.output)
+    assert out["group_key"] == "wizard"
+    assert out["group_ref"] == "gandalf"
+    assert out["payload"] == {"order": "Istari"}
+    assert out["context"] is None
+
+
+def test_entry_update_default_mode_still_preserves_unspecified(mounted):
+    add = runner.invoke(
+        app,
+        [
+            "entry", "add",
+            "--group-key", "wizard",
+            "--group-ref", "gandalf",
+            "--payload", '{"a":1}',
+            "--context", "ctx",
+        ],
+    )
+    entry_id = json.loads(add.output)["id"]
+
+    # No --put: only payload changes; group_key, group_ref, context preserved.
+    result = runner.invoke(
+        app,
+        ["entry", "update", entry_id, "--payload", '{"a":2}'],
+    )
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.output)
+    assert out["group_key"] == "wizard"
+    assert out["group_ref"] == "gandalf"
+    assert out["payload"] == {"a": 2}
+    assert out["context"] == "ctx"
+
+
 def test_entry_get_returns_entry(mounted):
     add = runner.invoke(
         app,

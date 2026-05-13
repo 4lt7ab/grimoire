@@ -263,11 +263,27 @@ def entry_update_cmd(
         str | None,
         typer.Option("--context", help="Unindexed contextual text."),
     ] = None,
+    put: Annotated[
+        bool,
+        typer.Option(
+            "--put",
+            help=(
+                "Replace the entry's mutable fields wholesale. Any field not "
+                "given is set to NULL. Destructive — pair every field you want "
+                "to keep with its current value."
+            ),
+        ),
+    ] = False,
 ) -> None:
-    """Update group_key, group_ref, payload, and context on an entry. Unspecified fields are preserved.
+    """Update group_key, group_ref, payload, and context on an entry.
 
-    To change keyword thresholds or semantic thresholds, re-run `grimoire index keyword`
-    or `grimoire index semantic` with the new threshold value.
+    Default mode is partial-update: unspecified fields are preserved. Pass
+    `--put` to switch to replace mode, where any field not given on the command
+    line is set to NULL.
+
+    To change keyword thresholds or semantic thresholds, re-run
+    `grimoire index keyword` or `grimoire index semantic` with the new
+    threshold value.
     """
     mnt = _existing_mount(ctx)
 
@@ -291,13 +307,22 @@ def entry_update_cmd(
             raise typer.BadParameter(f"No entry with id {entry_id!r}.")
         current = existing[0]
 
-        merged = replace(
-            current,
-            group_key=current.group_key if group_key is None else group_key,
-            group_ref=current.group_ref if group_ref is None else group_ref,
-            payload=payload_value if payload_provided else current.payload,
-            context=current.context if context is None else context,
-        )
+        if put:
+            merged = Entry(
+                id=current.id,
+                group_key=group_key,
+                group_ref=group_ref,
+                payload=payload_value if payload_provided else None,
+                context=context,
+            )
+        else:
+            merged = replace(
+                current,
+                group_key=current.group_key if group_key is None else group_key,
+                group_ref=current.group_ref if group_ref is None else group_ref,
+                payload=payload_value if payload_provided else current.payload,
+                context=current.context if context is None else context,
+            )
 
         try:
             [returned] = g.update([merged])
