@@ -2,6 +2,7 @@ import contextlib
 import json
 import re
 from dataclasses import asdict, replace
+from importlib.metadata import version
 from pathlib import Path
 from typing import Annotated
 
@@ -51,6 +52,12 @@ mcp_app = typer.Typer(
 app.add_typer(mcp_app)
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(version("4lt7ab-grimoire-cli"))
+        raise typer.Exit()
+
+
 @app.callback()
 def main(
     ctx: typer.Context,
@@ -64,6 +71,15 @@ def main(
             ),
         ),
     ] = None,
+    _version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            help="Show the grimoire CLI version and exit.",
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = False,
 ) -> None:
     ctx.obj = mount.resolve(mount_path)
 
