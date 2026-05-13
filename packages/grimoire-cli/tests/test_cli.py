@@ -1,10 +1,9 @@
 import json
 
 import pytest
-from typer.testing import CliRunner
-
 from grimoire_cli.cli import app
 from grimoire_cli.mount import DB_FILENAME, ENV_VAR, MODELS_DIRNAME, REGISTRY_FILENAME
+from typer.testing import CliRunner
 
 runner = CliRunner()
 
@@ -21,23 +20,23 @@ def _add(
     embed: str | None = None,
     keyword: str | None = None,
     partition: str | None = None,
-    name: str | None = None,
+    db: str | None = None,
 ) -> str:
     """Add an entry; optionally embed it and/or index its keyword text.
 
-    `name` selects the DB for every sub-call (entry add, embed, keyword).
+    `db` selects the DB for every sub-call (entry add, embed, keyword).
     """
-    name_flag = ["-n", name] if name else []
-    add_result = runner.invoke(app, ["entry", "add", *name_flag, *flags])
+    db_flag = ["-d", db] if db else []
+    add_result = runner.invoke(app, ["entry", "add", *db_flag, *flags])
     entry_id = json.loads(add_result.output)["id"]
     if embed is not None:
-        cmd = ["index", "semantic", entry_id, *name_flag, "--text", embed]
+        cmd = ["index", "semantic", entry_id, *db_flag, "--text", embed]
         if partition is not None:
             cmd += ["--partition", partition]
         runner.invoke(app, cmd)
     if keyword is not None:
         runner.invoke(
-            app, ["index", "keyword", entry_id, *name_flag, "--text", keyword]
+            app, ["index", "keyword", entry_id, *db_flag, "--text", keyword]
         )
     return entry_id
 
@@ -91,11 +90,16 @@ def test_entry_add_populates_every_field(mounted):
     result = runner.invoke(
         app,
         [
-            "entry", "add",
-            "--group-key", "notes",
-            "--group-ref", "note-001",
-            "--context", "from chapter 3",
-            "--payload", json.dumps(payload),
+            "entry",
+            "add",
+            "--group-key",
+            "notes",
+            "--group-ref",
+            "note-001",
+            "--context",
+            "from chapter 3",
+            "--payload",
+            json.dumps(payload),
         ],
     )
     assert result.exit_code == 0, result.output
@@ -123,7 +127,9 @@ def test_entry_add_with_no_flags_is_a_metadata_only_entry(mounted):
         assert entry[field] is None, field
 
 
-def test_entry_add_fails_when_mount_does_not_exist(tmp_path, monkeypatch, patched_embedder):
+def test_entry_add_fails_when_mount_does_not_exist(
+    tmp_path, monkeypatch, patched_embedder
+):
     monkeypatch.setenv(ENV_VAR, str(tmp_path))
     result = runner.invoke(app, ["entry", "add"])
     assert result.exit_code != 0
@@ -134,13 +140,15 @@ def test_entry_add_targets_named_db(mounted):
     create = runner.invoke(app, ["mount", "add", "spellbook"])
     assert create.exit_code == 0, create.output
 
-    result = runner.invoke(app, ["entry", "add", "--group-ref", "ref-1", "-n", "spellbook"])
+    result = runner.invoke(
+        app, ["entry", "add", "--group-ref", "ref-1", "-d", "spellbook"]
+    )
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["group_ref"] == "ref-1"
 
 
 def test_entry_add_fails_for_unknown_named_db(mounted):
-    result = runner.invoke(app, ["entry", "add", "-n", "nonesuch"])
+    result = runner.invoke(app, ["entry", "add", "-d", "nonesuch"])
     assert result.exit_code != 0
     assert "nonesuch" in result.output
 
@@ -170,7 +178,7 @@ def test_entry_add_rejects_duplicate_group_key_and_ref(mounted):
 def test_mount_add_lowercases_name(mounted):
     result = runner.invoke(app, ["mount", "add", "Spellbook"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["name"] == "spellbook"
+    assert json.loads(result.output)["db"] == "spellbook"
     assert (mounted / "spellbook" / DB_FILENAME).is_file()
 
 
@@ -194,7 +202,7 @@ def test_mount_add_rejects_dunder_prefixed_name(mounted):
 
 def test_named_db_lookup_is_case_insensitive(mounted):
     runner.invoke(app, ["mount", "add", "spellbook"])
-    result = runner.invoke(app, ["entry", "add", "-n", "SPELLBOOK"])
+    result = runner.invoke(app, ["entry", "add", "-d", "SPELLBOOK"])
     assert result.exit_code == 0, result.output
 
 
@@ -202,7 +210,7 @@ def test_mount_remove_canonical_name_in_output(mounted):
     runner.invoke(app, ["mount", "add", "Spellbook"])
     result = runner.invoke(app, ["mount", "remove", "SPELLBOOK", "--yes"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == {"name": "spellbook", "removed": True}
+    assert json.loads(result.output) == {"db": "spellbook", "removed": True}
 
 
 def test_index_keyword_unknown_id_is_clean_error(mounted):
@@ -230,9 +238,7 @@ def test_index_keyword_rejects_empty_text(mounted, text):
     add = runner.invoke(app, ["entry", "add"])
     entry_id = json.loads(add.output)["id"]
 
-    result = runner.invoke(
-        app, ["index", "keyword", entry_id, "--text", text]
-    )
+    result = runner.invoke(app, ["index", "keyword", entry_id, "--text", text])
     assert result.exit_code != 0
     assert "keyword_text must be non-empty" in result.output
     assert "Traceback" not in result.output
@@ -243,9 +249,7 @@ def test_index_semantic_rejects_empty_text(mounted, text):
     add = runner.invoke(app, ["entry", "add"])
     entry_id = json.loads(add.output)["id"]
 
-    result = runner.invoke(
-        app, ["index", "semantic", entry_id, "--text", text]
-    )
+    result = runner.invoke(app, ["index", "semantic", entry_id, "--text", text])
     assert result.exit_code != 0
     assert "semantic_text must be non-empty" in result.output
     assert "Traceback" not in result.output
@@ -255,9 +259,7 @@ def test_entry_update_rejects_invalid_payload_json(mounted):
     add = runner.invoke(app, ["entry", "add"])
     entry_id = json.loads(add.output)["id"]
 
-    result = runner.invoke(
-        app, ["entry", "update", entry_id, "--payload", "not-json"]
-    )
+    result = runner.invoke(app, ["entry", "update", entry_id, "--payload", "not-json"])
     assert result.exit_code != 0
     assert "Invalid JSON payload" in result.output
 
@@ -266,11 +268,16 @@ def test_entry_update_changes_only_specified_fields(mounted):
     add = runner.invoke(
         app,
         [
-            "entry", "add",
-            "--group-key", "tale",
-            "--group-ref", "ref-1",
-            "--context", "ch.3",
-            "--payload", json.dumps({"author": "merlin"}),
+            "entry",
+            "add",
+            "--group-key",
+            "tale",
+            "--group-ref",
+            "ref-1",
+            "--context",
+            "ch.3",
+            "--payload",
+            json.dumps({"author": "merlin"}),
         ],
     )
     entry_id = json.loads(add.output)["id"]
@@ -355,11 +362,16 @@ def test_entry_update_put_clears_unspecified_fields(mounted):
     add = runner.invoke(
         app,
         [
-            "entry", "add",
-            "--group-key", "wizard",
-            "--group-ref", "gandalf",
-            "--payload", '{"order":"Istari"}',
-            "--context", "ancient",
+            "entry",
+            "add",
+            "--group-key",
+            "wizard",
+            "--group-ref",
+            "gandalf",
+            "--payload",
+            '{"order":"Istari"}',
+            "--context",
+            "ancient",
         ],
     )
     entry_id = json.loads(add.output)["id"]
@@ -380,11 +392,16 @@ def test_entry_update_put_with_no_fields_clears_everything(mounted):
     add = runner.invoke(
         app,
         [
-            "entry", "add",
-            "--group-key", "wizard",
-            "--group-ref", "gandalf",
-            "--payload", '{"a":1}',
-            "--context", "ctx",
+            "entry",
+            "add",
+            "--group-key",
+            "wizard",
+            "--group-ref",
+            "gandalf",
+            "--payload",
+            '{"a":1}',
+            "--context",
+            "ctx",
         ],
     )
     entry_id = json.loads(add.output)["id"]
@@ -402,11 +419,16 @@ def test_entry_update_put_keeps_fields_that_are_restated(mounted):
     add = runner.invoke(
         app,
         [
-            "entry", "add",
-            "--group-key", "wizard",
-            "--group-ref", "gandalf",
-            "--payload", '{"order":"Istari"}',
-            "--context", "ancient",
+            "entry",
+            "add",
+            "--group-key",
+            "wizard",
+            "--group-ref",
+            "gandalf",
+            "--payload",
+            '{"order":"Istari"}',
+            "--context",
+            "ancient",
         ],
     )
     entry_id = json.loads(add.output)["id"]
@@ -415,10 +437,16 @@ def test_entry_update_put_keeps_fields_that_are_restated(mounted):
     result = runner.invoke(
         app,
         [
-            "entry", "update", entry_id, "--put",
-            "--group-key", "wizard",
-            "--group-ref", "gandalf",
-            "--payload", '{"order":"Istari"}',
+            "entry",
+            "update",
+            entry_id,
+            "--put",
+            "--group-key",
+            "wizard",
+            "--group-ref",
+            "gandalf",
+            "--payload",
+            '{"order":"Istari"}',
         ],
     )
     assert result.exit_code == 0, result.output
@@ -433,11 +461,16 @@ def test_entry_update_default_mode_still_preserves_unspecified(mounted):
     add = runner.invoke(
         app,
         [
-            "entry", "add",
-            "--group-key", "wizard",
-            "--group-ref", "gandalf",
-            "--payload", '{"a":1}',
-            "--context", "ctx",
+            "entry",
+            "add",
+            "--group-key",
+            "wizard",
+            "--group-ref",
+            "gandalf",
+            "--payload",
+            '{"a":1}',
+            "--context",
+            "ctx",
         ],
     )
     entry_id = json.loads(add.output)["id"]
@@ -487,12 +520,20 @@ def test_entry_get_unknown_id_errors(mounted):
 
 def test_entry_update_targets_named_db(mounted):
     runner.invoke(app, ["mount", "add", "spellbook"])
-    add = runner.invoke(app, ["entry", "add", "-n", "spellbook"])
+    add = runner.invoke(app, ["entry", "add", "-d", "spellbook"])
     entry_id = json.loads(add.output)["id"]
 
     result = runner.invoke(
         app,
-        ["entry", "update", entry_id, "-n", "spellbook", "--payload", json.dumps({"x": 1})],
+        [
+            "entry",
+            "update",
+            entry_id,
+            "-d",
+            "spellbook",
+            "--payload",
+            json.dumps({"x": 1}),
+        ],
     )
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["payload"] == {"x": 1}
@@ -511,7 +552,15 @@ def test_entry_update_fails_when_mount_missing(tmp_path, monkeypatch, patched_em
 def test_entry_update_fails_for_unknown_named_db(mounted):
     result = runner.invoke(
         app,
-        ["entry", "update", "01HXXXXXXXXXXXXXXXXXXXXXXX", "-n", "nonesuch", "--payload", "{}"],
+        [
+            "entry",
+            "update",
+            "01HXXXXXXXXXXXXXXXXXXXXXXX",
+            "-d",
+            "nonesuch",
+            "--payload",
+            "{}",
+        ],
     )
     assert result.exit_code != 0
     assert "nonesuch" in result.output
@@ -538,8 +587,12 @@ def test_fetch_filters_by_id(mounted):
 
 
 def test_fetch_filters_by_group_key(mounted):
-    runner.invoke(app, ["entry", "add", "--group-key", "tale", "--group-ref", "tale-one"])
-    runner.invoke(app, ["entry", "add", "--group-key", "note", "--group-ref", "note-one"])
+    runner.invoke(
+        app, ["entry", "add", "--group-key", "tale", "--group-ref", "tale-one"]
+    )
+    runner.invoke(
+        app, ["entry", "add", "--group-key", "note", "--group-ref", "note-one"]
+    )
 
     result = runner.invoke(app, ["fetch", "--group-key", "tale"])
     assert result.exit_code == 0, result.output
@@ -584,8 +637,7 @@ def test_fetch_rejects_negative_limit(mounted):
 
 def test_fetch_cursor_paginates_chronologically(mounted):
     ids = [
-        json.loads(runner.invoke(app, ["entry", "add"]).output)["id"]
-        for _ in range(5)
+        json.loads(runner.invoke(app, ["entry", "add"]).output)["id"] for _ in range(5)
     ]
 
     page1 = runner.invoke(app, ["fetch", "--limit", "2"])
@@ -603,9 +655,7 @@ def test_fetch_cursor_paginates_chronologically(mounted):
 def test_fetch_cursor_past_end_returns_empty(mounted):
     runner.invoke(app, ["entry", "add"])
 
-    result = runner.invoke(
-        app, ["fetch", "--cursor", "01ZZZZZZZZZZZZZZZZZZZZZZZZ"]
-    )
+    result = runner.invoke(app, ["fetch", "--cursor", "01ZZZZZZZZZZZZZZZZZZZZZZZZ"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == []
 
@@ -622,9 +672,11 @@ def test_fetch_targets_named_db(mounted):
     create = runner.invoke(app, ["mount", "add", "spellbook"])
     assert create.exit_code == 0, create.output
 
-    runner.invoke(app, ["entry", "add", "--group-ref", "named-hello", "-n", "spellbook"])
+    runner.invoke(
+        app, ["entry", "add", "--group-ref", "named-hello", "-d", "spellbook"]
+    )
 
-    result = runner.invoke(app, ["fetch", "-n", "spellbook"])
+    result = runner.invoke(app, ["fetch", "-d", "spellbook"])
     assert result.exit_code == 0, result.output
     entries = json.loads(result.output)
     assert [e["group_ref"] for e in entries] == ["named-hello"]
@@ -638,7 +690,7 @@ def test_fetch_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedder)
 
 
 def test_fetch_fails_for_unknown_named_db(mounted):
-    result = runner.invoke(app, ["fetch", "-n", "nonesuch"])
+    result = runner.invoke(app, ["fetch", "-d", "nonesuch"])
     assert result.exit_code != 0
     assert "nonesuch" in result.output
 
@@ -656,9 +708,14 @@ def test_entry_delete_removes_existing(mounted):
 
 
 def test_entry_delete_missing_id_is_soft(mounted):
-    result = runner.invoke(app, ["entry", "delete", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--yes"])
+    result = runner.invoke(
+        app, ["entry", "delete", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--yes"]
+    )
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output) == {"id": "01HXXXXXXXXXXXXXXXXXXXXXXX", "deleted": False}
+    assert json.loads(result.output) == {
+        "id": "01HXXXXXXXXXXXXXXXXXXXXXXX",
+        "deleted": False,
+    }
 
 
 def test_entry_delete_requires_yes(mounted):
@@ -677,17 +734,21 @@ def test_entry_delete_targets_named_db(mounted):
     create = runner.invoke(app, ["mount", "add", "spellbook"])
     assert create.exit_code == 0, create.output
 
-    add = runner.invoke(app, ["entry", "add", "-n", "spellbook"])
+    add = runner.invoke(app, ["entry", "add", "-d", "spellbook"])
     entry_id = json.loads(add.output)["id"]
 
-    result = runner.invoke(app, ["entry", "delete", entry_id, "-n", "spellbook", "--yes"])
+    result = runner.invoke(
+        app, ["entry", "delete", entry_id, "-d", "spellbook", "--yes"]
+    )
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == {"id": entry_id, "deleted": True}
 
 
 def test_entry_delete_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedder):
     monkeypatch.setenv(ENV_VAR, str(tmp_path))
-    result = runner.invoke(app, ["entry", "delete", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--yes"])
+    result = runner.invoke(
+        app, ["entry", "delete", "01HXXXXXXXXXXXXXXXXXXXXXXX", "--yes"]
+    )
     assert result.exit_code != 0
     assert "Mount does not exist" in result.output
 
@@ -695,7 +756,7 @@ def test_entry_delete_fails_when_mount_missing(tmp_path, monkeypatch, patched_em
 def test_entry_delete_fails_for_unknown_named_db(mounted):
     result = runner.invoke(
         app,
-        ["entry", "delete", "01HXXXXXXXXXXXXXXXXXXXXXXX", "-n", "nonesuch", "--yes"],
+        ["entry", "delete", "01HXXXXXXXXXXXXXXXXXXXXXXX", "-d", "nonesuch", "--yes"],
     )
     assert result.exit_code != 0
     assert "nonesuch" in result.output
@@ -705,7 +766,7 @@ def test_mount_ls_lists_default_only(mounted):
     result = runner.invoke(app, ["mount", "ls"])
     assert result.exit_code == 0, result.output
     dbs = json.loads(result.output)
-    assert dbs == [{"name": None, "path": str(mounted / DB_FILENAME)}]
+    assert dbs == [{"db": None, "path": str(mounted / DB_FILENAME)}]
 
 
 def test_mount_ls_includes_named_dbs(mounted):
@@ -714,7 +775,7 @@ def test_mount_ls_includes_named_dbs(mounted):
 
     result = runner.invoke(app, ["mount", "ls"])
     assert result.exit_code == 0, result.output
-    names = [d["name"] for d in json.loads(result.output)]
+    names = [d["db"] for d in json.loads(result.output)]
     assert names == [None, "atlas", "spellbook"]
 
 
@@ -752,7 +813,7 @@ def test_info_reports_empty_default_db(mounted):
     assert result.exit_code == 0, result.output
 
     info = json.loads(result.output)
-    assert info["name"] is None
+    assert info["db"] is None
     assert info["path"] == str(mounted / DB_FILENAME)
     assert info["size_bytes"] > 0
     assert info["size"].endswith(("B", "KB", "MB", "GB", "TB"))
@@ -792,13 +853,13 @@ def test_info_counts_partitions(mounted):
 
 def test_info_targets_named_db(mounted):
     runner.invoke(app, ["mount", "add", "spellbook"])
-    runner.invoke(app, ["entry", "add", "-n", "spellbook"])
+    runner.invoke(app, ["entry", "add", "-d", "spellbook"])
 
-    result = runner.invoke(app, ["info", "-n", "spellbook"])
+    result = runner.invoke(app, ["info", "-d", "spellbook"])
     assert result.exit_code == 0, result.output
 
     info = json.loads(result.output)
-    assert info["name"] == "spellbook"
+    assert info["db"] == "spellbook"
     assert info["path"] == str(mounted / "spellbook" / DB_FILENAME)
     assert info["entry_count"] == 1
 
@@ -811,7 +872,7 @@ def test_info_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedder):
 
 
 def test_info_fails_for_unknown_named_db(mounted):
-    result = runner.invoke(app, ["info", "-n", "nonesuch"])
+    result = runner.invoke(app, ["info", "-d", "nonesuch"])
     assert result.exit_code != 0
     assert "nonesuch" in result.output
 
@@ -848,7 +909,9 @@ def test_embed_into_named_partition(mounted):
     assert out["semantic_text"] == "hello"
     assert out["partition"] == "alpha"
 
-    in_partition = runner.invoke(app, ["search", "semantic", "hello", "--partition", "alpha"])
+    in_partition = runner.invoke(
+        app, ["search", "semantic", "hello", "--partition", "alpha"]
+    )
     out = json.loads(in_partition.output)
     assert [h["entry"]["id"] for h in out] == [entry_id]
 
@@ -856,7 +919,9 @@ def test_embed_into_named_partition(mounted):
     out_any = json.loads(unfiltered.output)
     assert [h["entry"]["id"] for h in out_any] == [entry_id]
 
-    other_partition = runner.invoke(app, ["search", "semantic", "hello", "--partition", "beta"])
+    other_partition = runner.invoke(
+        app, ["search", "semantic", "hello", "--partition", "beta"]
+    )
     assert json.loads(other_partition.output) == []
 
 
@@ -880,7 +945,15 @@ def test_index_semantic_echoes_threshold_distance(mounted):
 
     result = runner.invoke(
         app,
-        ["index", "semantic", entry_id, "--text", "moon", "--threshold-distance", "0.75"],
+        [
+            "index",
+            "semantic",
+            entry_id,
+            "--text",
+            "moon",
+            "--threshold-distance",
+            "0.75",
+        ],
     )
     assert result.exit_code == 0, result.output
     out = json.loads(result.output)
@@ -934,7 +1007,10 @@ def test_keyword_indexes_for_match(mounted):
 
     kw = runner.invoke(app, ["search", "keyword", "moon"])
     hits = json.loads(kw.output)
-    assert any(h["entry"]["id"] == entry_id and h["keyword_text"] == "the moon glows" for h in hits)
+    assert any(
+        h["entry"]["id"] == entry_id and h["keyword_text"] == "the moon glows"
+        for h in hits
+    )
 
 
 def test_keyword_replaces_text_on_reindex(mounted):
@@ -1089,8 +1165,13 @@ def test_embed_stores_threshold_distance(mounted):
     runner.invoke(
         app,
         [
-            "index", "semantic", entry_id,
-            "--text", "hello", "--threshold-distance", "0.75",
+            "index",
+            "semantic",
+            entry_id,
+            "--text",
+            "hello",
+            "--threshold-distance",
+            "0.75",
         ],
     )
 
@@ -1266,9 +1347,9 @@ def test_search_keyword_targets_named_db(mounted):
     create = runner.invoke(app, ["mount", "add", "spellbook"])
     assert create.exit_code == 0, create.output
 
-    _add(name="spellbook", keyword="named")
+    _add(db="spellbook", keyword="named")
 
-    result = runner.invoke(app, ["search", "keyword", "named", "-n", "spellbook"])
+    result = runner.invoke(app, ["search", "keyword", "named", "-d", "spellbook"])
     assert result.exit_code == 0, result.output
     out = json.loads(result.output)
     assert any(h["keyword_text"] == "named" for h in out)
@@ -1300,7 +1381,9 @@ def test_search_keyword_all_punctuation_query_returns_empty(mounted):
     assert json.loads(result.output) == []
 
 
-def test_search_keyword_fails_when_mount_missing(tmp_path, monkeypatch, patched_embedder):
+def test_search_keyword_fails_when_mount_missing(
+    tmp_path, monkeypatch, patched_embedder
+):
     monkeypatch.setenv(ENV_VAR, str(tmp_path))
     result = runner.invoke(app, ["search", "keyword", "anything"])
     assert result.exit_code != 0
@@ -1308,6 +1391,6 @@ def test_search_keyword_fails_when_mount_missing(tmp_path, monkeypatch, patched_
 
 
 def test_search_keyword_fails_for_unknown_named_db(mounted):
-    result = runner.invoke(app, ["search", "keyword", "anything", "-n", "nonesuch"])
+    result = runner.invoke(app, ["search", "keyword", "anything", "-d", "nonesuch"])
     assert result.exit_code != 0
     assert "nonesuch" in result.output

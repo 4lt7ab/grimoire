@@ -17,10 +17,10 @@ from grimoire.data.entry import Entry, Filters
 from grimoire_cli import embed, mount
 
 
-def _resolve_db(mnt: mount.Mount, name: str | None) -> Path:
-    db_path = mnt.db_path(name)
+def _resolve_db(mnt: mount.Mount, db: str | None) -> Path:
+    db_path = mnt.db_path(db)
     if not db_path.exists():
-        target = f"database {name!r}" if name else "default database"
+        target = f"database {db!r}" if db else "default database"
         raise ValueError(f"No {target} in the mount.")
     return db_path
 
@@ -43,17 +43,17 @@ def build_server(mnt: mount.Mount) -> FastMCP:
     mcp = FastMCP("grimoire")
 
     @mcp.tool
-    def info(name: str | None = None) -> dict[str, Any]:
+    def info(db: str | None = None) -> dict[str, Any]:
         """Show metadata for a grimoire database.
 
         Includes embedder lock, schema version, entry counts, and file size.
-        `name` selects a named DB in the mount; omit for the default DB.
+        `db` selects a named DB in the mount; omit for the default DB.
         """
-        db_path = _resolve_db(mnt, name)
+        db_path = _resolve_db(mnt, db)
         peeked = grimoire.peek(db_path)
         size_bytes = db_path.stat().st_size
         return {
-            "name": name,
+            "db": db,
             "path": str(db_path),
             "size_bytes": size_bytes,
             "size": _human_size(size_bytes),
@@ -62,7 +62,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
 
     @mcp.tool
     def fetch(
-        name: str | None = None,
+        db: str | None = None,
         ids: list[str] | None = None,
         group_keys: list[str] | None = None,
         group_refs: list[str] | None = None,
@@ -75,7 +75,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         page. ULIDs sort lexicographically by creation time, so cursor paging
         walks entries in the order they were added.
         """
-        db_path = _resolve_db(mnt, name)
+        db_path = _resolve_db(mnt, db)
         filters = Filters(
             id=ids or None,
             group_key=group_keys or None,
@@ -86,9 +86,9 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         return [asdict(e) for e in entries]
 
     @mcp.tool
-    def entry_get(entry_id: str, name: str | None = None) -> dict[str, Any]:
+    def entry_get(entry_id: str, db: str | None = None) -> dict[str, Any]:
         """Fetch a single grimoire entry by id."""
-        db_path = _resolve_db(mnt, name)
+        db_path = _resolve_db(mnt, db)
         with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             entries = g.fetch(Filters(id=[entry_id]), limit=1)
         if not entries:
@@ -97,7 +97,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
 
     @mcp.tool
     def entry_add(
-        name: str | None = None,
+        db: str | None = None,
         group_key: str | None = None,
         group_ref: str | None = None,
         context: str | None = None,
@@ -108,21 +108,25 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         Add searchable text via `index_keyword` or `index_semantic` after
         creation; this tool only writes the entry record itself.
         """
-        db_path = _resolve_db(mnt, name)
+        db_path = _resolve_db(mnt, db)
         with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
-            [created] = g.add([Entry(
-                id=None,
-                group_key=group_key,
-                group_ref=group_ref,
-                payload=payload,
-                context=context,
-            )])
+            [created] = g.add(
+                [
+                    Entry(
+                        id=None,
+                        group_key=group_key,
+                        group_ref=group_ref,
+                        payload=payload,
+                        context=context,
+                    )
+                ]
+            )
         return asdict(created)
 
     @mcp.tool
     def entry_update(
         entry_id: str,
-        name: str | None = None,
+        db: str | None = None,
         group_key: str | None = None,
         group_ref: str | None = None,
         payload: dict[str, Any] | None = None,
@@ -138,7 +142,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         To change keyword thresholds or semantic thresholds, re-run
         `index_keyword` or `index_semantic` with the new threshold value.
         """
-        db_path = _resolve_db(mnt, name)
+        db_path = _resolve_db(mnt, db)
         with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             existing = g.fetch(Filters(id=[entry_id]), limit=1)
             if not existing:
@@ -166,12 +170,12 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         return asdict(returned)
 
     @mcp.tool
-    def entry_delete(entry_id: str, name: str | None = None) -> dict[str, Any]:
+    def entry_delete(entry_id: str, db: str | None = None) -> dict[str, Any]:
         """Delete a grimoire entry by id.
 
         Idempotent — a missing id returns `deleted=false`.
         """
-        db_path = _resolve_db(mnt, name)
+        db_path = _resolve_db(mnt, db)
         with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             removed = g.remove([entry_id])
         return {"id": entry_id, "deleted": bool(removed)}
@@ -179,7 +183,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
     @mcp.tool
     def index_keyword(
         entry_id: str,
-        name: str | None = None,
+        db: str | None = None,
         text: str | None = None,
         threshold_rank: float | None = None,
         delete: bool = False,
@@ -196,7 +200,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         if not delete and text is None:
             raise ValueError("Provide `text` to index, or `delete=True` to remove.")
 
-        db_path = _resolve_db(mnt, name)
+        db_path = _resolve_db(mnt, db)
         with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             if delete:
                 removed = g.keyword_remove([entry_id])
@@ -211,7 +215,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
     @mcp.tool
     def index_semantic(
         entry_id: str,
-        name: str | None = None,
+        db: str | None = None,
         text: str | None = None,
         partition: str | None = None,
         threshold_distance: float | None = None,
@@ -232,7 +236,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         if not delete and text is None:
             raise ValueError("Provide `text` to embed, or `delete=True` to remove.")
 
-        db_path = _resolve_db(mnt, name)
+        db_path = _resolve_db(mnt, db)
         with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             if delete:
                 removed = g.embed_remove([entry_id])
@@ -252,7 +256,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
     @mcp.tool
     def search_keyword(
         query: str,
-        name: str | None = None,
+        db: str | None = None,
         group_keys: list[str] | None = None,
         group_refs: list[str] | None = None,
         ids: list[str] | None = None,
@@ -263,7 +267,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         Supports filtering by group_key, group_ref, and id. `rank` is the BM25
         score (higher = better, non-negative).
         """
-        db_path = _resolve_db(mnt, name)
+        db_path = _resolve_db(mnt, db)
         filters = Filters(
             id=ids or None,
             group_key=group_keys or None,
@@ -292,7 +296,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
     @mcp.tool
     def search_semantic(
         query: str,
-        name: str | None = None,
+        db: str | None = None,
         partition: str | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
@@ -300,7 +304,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
 
         `distance` is the raw vector distance (lower = better, non-negative).
         """
-        db_path = _resolve_db(mnt, name)
+        db_path = _resolve_db(mnt, db)
         with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             hits = g.semantic_search(query, partition=partition, limit=limit)
         return [

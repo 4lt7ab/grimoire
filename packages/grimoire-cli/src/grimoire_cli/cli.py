@@ -1,13 +1,14 @@
+import contextlib
 import json
 import re
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Annotated
 
-from grimoire.data.entry import Entry, Filters
 import typer
-
 from grimoire import grimoire
+from grimoire.data.entry import Entry, Filters
+
 from grimoire_cli import embed, mount
 
 app = typer.Typer(
@@ -65,7 +66,10 @@ def main(
         Path | None,
         typer.Option(
             "--mount",
-            help="Path to the grimoire mount (overrides $GRIMOIRE_MOUNT; default ~/.grimoire).",
+            help=(
+                "Path to the grimoire mount (overrides $GRIMOIRE_MOUNT;"
+                " default ~/.grimoire)."
+            ),
         ),
     ] = None,
 ) -> None:
@@ -75,7 +79,9 @@ def main(
 def _existing_mount(ctx: typer.Context) -> mount.Mount:
     mnt: mount.Mount = ctx.obj
     if not mnt.exists():
-        raise typer.BadParameter("Mount does not exist; run `grimoire mount create` first.")
+        raise typer.BadParameter(
+            "Mount does not exist; run `grimoire mount create` first."
+        )
     return mnt
 
 
@@ -115,7 +121,7 @@ def mount_destroy_cmd(
 @mount_app.command(name="add")
 def mount_add_cmd(
     ctx: typer.Context,
-    name: Annotated[
+    db: Annotated[
         str,
         typer.Argument(help="Name of the database to add."),
     ],
@@ -124,7 +130,7 @@ def mount_add_cmd(
     mnt = _existing_mount(ctx)
 
     try:
-        db_path = mnt.db_path(name)
+        db_path = mnt.db_path(db)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
     db_path.parent.mkdir(exist_ok=True)
@@ -133,7 +139,7 @@ def mount_add_cmd(
         pass
 
     typer.echo(
-        json.dumps({"name": db_path.parent.name, "path": str(db_path)}, indent=2)
+        json.dumps({"db": db_path.parent.name, "path": str(db_path)}, indent=2)
     )
 
 
@@ -142,13 +148,13 @@ def mount_ls_cmd(ctx: typer.Context) -> None:
     """List databases in the mount."""
     mnt = _existing_mount(ctx)
 
-    dbs: list[dict[str, str | None]] = [{"name": None, "path": str(mnt.default_db)}]
+    dbs: list[dict[str, str | None]] = [{"db": None, "path": str(mnt.default_db)}]
     for sub in sorted(mnt.path.iterdir()):
         if not sub.is_dir():
             continue
-        db = sub / mount.DB_FILENAME
-        if db.is_file():
-            dbs.append({"name": sub.name, "path": str(db)})
+        db_file = sub / mount.DB_FILENAME
+        if db_file.is_file():
+            dbs.append({"db": sub.name, "path": str(db_file)})
 
     typer.echo(json.dumps(dbs, indent=2))
 
@@ -156,7 +162,7 @@ def mount_ls_cmd(ctx: typer.Context) -> None:
 @mount_app.command(name="remove")
 def mount_remove_cmd(
     ctx: typer.Context,
-    name: Annotated[
+    db: Annotated[
         str,
         typer.Argument(help="Name of the database to remove."),
     ],
@@ -172,29 +178,25 @@ def mount_remove_cmd(
     mnt = _existing_mount(ctx)
 
     try:
-        db_path = mnt.db_path(name)
+        db_path = mnt.db_path(db)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
-        raise typer.BadParameter(f"No database named {name!r}.")
+        raise typer.BadParameter(f"No database named {db!r}.")
 
     db_path.unlink()
-    try:
+    with contextlib.suppress(OSError):
         db_path.parent.rmdir()
-    except OSError:
-        pass
 
-    typer.echo(
-        json.dumps({"name": db_path.parent.name, "removed": True}, indent=2)
-    )
+    typer.echo(json.dumps({"db": db_path.parent.name, "removed": True}, indent=2))
 
 
 @entry_app.command(name="add")
 def entry_add_cmd(
     ctx: typer.Context,
-    name: Annotated[
+    db: Annotated[
         str | None,
-        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+        typer.Option("--db", "-d", help="Database name (default DB if omitted)."),
     ] = None,
     group_key: Annotated[
         str | None,
@@ -213,15 +215,18 @@ def entry_add_cmd(
         typer.Option("--payload", help="JSON payload object."),
     ] = None,
 ) -> None:
-    """Create a Grimoire entry. Add searchable text via `grimoire index keyword` or `grimoire index semantic`."""
+    """Create a Grimoire entry.
+
+    Add searchable text via `grimoire index keyword` or `grimoire index semantic`.
+    """
     mnt = _existing_mount(ctx)
 
     try:
-        db_path = mnt.db_path(name)
+        db_path = mnt.db_path(db)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
-        target = f"database {name!r}" if name else "default database"
+        target = f"database {db!r}" if db else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
     try:
@@ -231,13 +236,17 @@ def entry_add_cmd(
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
         try:
-            [created] = g.add([Entry(
-                id=None,
-                group_key=group_key,
-                group_ref=group_ref,
-                payload=payload_data,
-                context=context,
-            )])
+            [created] = g.add(
+                [
+                    Entry(
+                        id=None,
+                        group_key=group_key,
+                        group_ref=group_ref,
+                        payload=payload_data,
+                        context=context,
+                    )
+                ]
+            )
         except ValueError as e:
             raise typer.BadParameter(str(e)) from e
 
@@ -251,9 +260,9 @@ def entry_update_cmd(
         str,
         typer.Argument(help="Id of the entry to update."),
     ],
-    name: Annotated[
+    db: Annotated[
         str | None,
-        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+        typer.Option("--db", "-d", help="Database name (default DB if omitted)."),
     ] = None,
     group_key: Annotated[
         str | None,
@@ -296,11 +305,11 @@ def entry_update_cmd(
     mnt = _existing_mount(ctx)
 
     try:
-        db_path = mnt.db_path(name)
+        db_path = mnt.db_path(db)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
-        target = f"database {name!r}" if name else "default database"
+        target = f"database {db!r}" if db else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
     payload_provided = payload is not None
@@ -347,20 +356,20 @@ def entry_get_cmd(
         str,
         typer.Argument(help="Id of the entry to fetch."),
     ],
-    name: Annotated[
+    db: Annotated[
         str | None,
-        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+        typer.Option("--db", "-d", help="Database name (default DB if omitted)."),
     ] = None,
 ) -> None:
     """Fetch a single Grimoire entry by id."""
     mnt = _existing_mount(ctx)
 
     try:
-        db_path = mnt.db_path(name)
+        db_path = mnt.db_path(db)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
-        target = f"database {name!r}" if name else "default database"
+        target = f"database {db!r}" if db else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
@@ -372,41 +381,40 @@ def entry_get_cmd(
 
 
 def _human_size(n: int) -> str:
-    if n < 1024:
-        return f"{n} B"
     size = float(n)
-    for unit in ("KB", "MB", "GB", "TB"):
-        size /= 1024
+    for unit in ("B", "KB", "MB", "GB"):
         if size < 1024:
-            break
-    if size == int(size):
-        return f"{int(size)} {unit}"
-    return f"{size:.1f} {unit}"
+            return f"{int(size)} {unit}" if size == int(size) else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{int(size)} TB" if size == int(size) else f"{size:.1f} TB"
 
 
 @app.command(name="info")
 def info_cmd(
     ctx: typer.Context,
-    name: Annotated[
+    db: Annotated[
         str | None,
-        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+        typer.Option("--db", "-d", help="Database name (default DB if omitted)."),
     ] = None,
 ) -> None:
-    """Show metadata for a grimoire database: embedder lock, schema version, counts, file size."""
+    """Show metadata for a grimoire database.
+
+    Embedder lock, schema version, counts, and file size.
+    """
     mnt = _existing_mount(ctx)
 
     try:
-        db_path = mnt.db_path(name)
+        db_path = mnt.db_path(db)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
-        target = f"database {name!r}" if name else "default database"
+        target = f"database {db!r}" if db else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
     peeked = grimoire.peek(db_path)
     size_bytes = db_path.stat().st_size
     result = {
-        "name": name,
+        "db": db,
         "path": str(db_path),
         "size_bytes": size_bytes,
         "size": _human_size(size_bytes),
@@ -418,9 +426,9 @@ def info_cmd(
 @app.command(name="fetch")
 def fetch_cmd(
     ctx: typer.Context,
-    name: Annotated[
+    db: Annotated[
         str | None,
-        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+        typer.Option("--db", "-d", help="Database name (default DB if omitted)."),
     ] = None,
     ids: Annotated[
         list[str] | None,
@@ -428,17 +436,24 @@ def fetch_cmd(
     ] = None,
     group_keys: Annotated[
         list[str] | None,
-        typer.Option("--group-key", help="Filter to entries with these group keys. Repeatable."),
+        typer.Option(
+            "--group-key", help="Filter to entries with these group keys. Repeatable."
+        ),
     ] = None,
     group_refs: Annotated[
         list[str] | None,
-        typer.Option("--group-ref", help="Filter to entries with these group refs. Repeatable."),
+        typer.Option(
+            "--group-ref", help="Filter to entries with these group refs. Repeatable."
+        ),
     ] = None,
     cursor: Annotated[
         str | None,
         typer.Option(
             "--cursor",
-            help="Return entries with id > this. Pass the id of the last entry from the previous page.",
+            help=(
+                "Return entries with id > this."
+                " Pass the id of the last entry from the previous page."
+            ),
         ),
     ] = None,
     limit: Annotated[
@@ -455,11 +470,11 @@ def fetch_cmd(
     mnt = _existing_mount(ctx)
 
     try:
-        db_path = mnt.db_path(name)
+        db_path = mnt.db_path(db)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
-        target = f"database {name!r}" if name else "default database"
+        target = f"database {db!r}" if db else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
     filters = Filters(
@@ -481,9 +496,9 @@ def index_keyword_cmd(
         str,
         typer.Argument(help="Id of the entry to index."),
     ],
-    name: Annotated[
+    db: Annotated[
         str | None,
-        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+        typer.Option("--db", "-d", help="Database name (default DB if omitted)."),
     ] = None,
     text: Annotated[
         str | None,
@@ -491,7 +506,11 @@ def index_keyword_cmd(
     ] = None,
     threshold_rank: Annotated[
         float | None,
-        typer.Option("--threshold-rank", help="Minimum BM25 score for keyword hits (non-negative).", min=0),
+        typer.Option(
+            "--threshold-rank",
+            help="Minimum BM25 score for keyword hits (non-negative).",
+            min=0,
+        ),
     ] = None,
     delete: Annotated[
         bool,
@@ -515,11 +534,11 @@ def index_keyword_cmd(
     mnt = _existing_mount(ctx)
 
     try:
-        db_path = mnt.db_path(name)
+        db_path = mnt.db_path(db)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
-        target = f"database {name!r}" if name else "default database"
+        target = f"database {db!r}" if db else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
@@ -546,9 +565,9 @@ def index_semantic_cmd(
         str,
         typer.Argument(help="Id of the entry to embed."),
     ],
-    name: Annotated[
+    db: Annotated[
         str | None,
-        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+        typer.Option("--db", "-d", help="Database name (default DB if omitted)."),
     ] = None,
     text: Annotated[
         str | None,
@@ -556,11 +575,18 @@ def index_semantic_cmd(
     ] = None,
     partition: Annotated[
         str | None,
-        typer.Option("--partition", help="Vec partition to write into. Omit for the NULL partition."),
+        typer.Option(
+            "--partition",
+            help="Vec partition to write into. Omit for the NULL partition.",
+        ),
     ] = None,
     threshold_distance: Annotated[
         float | None,
-        typer.Option("--threshold-distance", help="Maximum vector distance for semantic hits (non-negative).", min=0),
+        typer.Option(
+            "--threshold-distance",
+            help="Maximum vector distance for semantic hits (non-negative).",
+            min=0,
+        ),
     ] = None,
     delete: Annotated[
         bool,
@@ -587,11 +613,11 @@ def index_semantic_cmd(
     mnt = _existing_mount(ctx)
 
     try:
-        db_path = mnt.db_path(name)
+        db_path = mnt.db_path(db)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
-        target = f"database {name!r}" if name else "default database"
+        target = f"database {db!r}" if db else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
@@ -623,17 +649,21 @@ def search_keyword_cmd(
         str,
         typer.Argument(help="Search query — parsed as FTS5."),
     ],
-    name: Annotated[
+    db: Annotated[
         str | None,
-        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+        typer.Option("--db", "-d", help="Database name (default DB if omitted)."),
     ] = None,
     group_keys: Annotated[
         list[str] | None,
-        typer.Option("--group-key", help="Filter to entries with these group keys. Repeatable."),
+        typer.Option(
+            "--group-key", help="Filter to entries with these group keys. Repeatable."
+        ),
     ] = None,
     group_refs: Annotated[
         list[str] | None,
-        typer.Option("--group-ref", help="Filter to entries with these group refs. Repeatable."),
+        typer.Option(
+            "--group-ref", help="Filter to entries with these group refs. Repeatable."
+        ),
     ] = None,
     ids: Annotated[
         list[str] | None,
@@ -644,18 +674,19 @@ def search_keyword_cmd(
         typer.Option("--limit", help="Maximum hits.", min=0),
     ] = 10,
 ) -> None:
-    """Keyword search via FTS5 BM25, with full filter support (group_key, group_ref, id).
+    """Keyword search via FTS5 BM25.
 
+    Supports filtering by group_key, group_ref, and id.
     `rank` is the BM25 score (higher = better, non-negative).
     """
     mnt = _existing_mount(ctx)
 
     try:
-        db_path = mnt.db_path(name)
+        db_path = mnt.db_path(db)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
-        target = f"database {name!r}" if name else "default database"
+        target = f"database {db!r}" if db else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
     filters = Filters(
@@ -670,7 +701,11 @@ def search_keyword_cmd(
     fts_query = " OR ".join(f'"{t}"' for t in re.findall(r"\w+", query))
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
-        hits = g.keyword_search(fts_query, filters=filters, limit=limit) if fts_query else []
+        hits = (
+            g.keyword_search(fts_query, filters=filters, limit=limit)
+            if fts_query
+            else []
+        )
 
     result = [
         {
@@ -691,13 +726,19 @@ def search_semantic_cmd(
         str,
         typer.Argument(help="Search query — embedded for vec0 KNN."),
     ],
-    name: Annotated[
+    db: Annotated[
         str | None,
-        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+        typer.Option("--db", "-d", help="Database name (default DB if omitted)."),
     ] = None,
     partition: Annotated[
         str | None,
-        typer.Option("--partition", help="Restrict semantic hits to this vec partition. Omit to search every partition."),
+        typer.Option(
+            "--partition",
+            help=(
+                "Restrict semantic hits to this vec partition."
+                " Omit to search every partition."
+            ),
+        ),
     ] = None,
     limit: Annotated[
         int,
@@ -711,11 +752,11 @@ def search_semantic_cmd(
     mnt = _existing_mount(ctx)
 
     try:
-        db_path = mnt.db_path(name)
+        db_path = mnt.db_path(db)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
-        target = f"database {name!r}" if name else "default database"
+        target = f"database {db!r}" if db else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
@@ -740,9 +781,9 @@ def entry_delete_cmd(
         str,
         typer.Argument(help="Id of the entry to delete."),
     ],
-    name: Annotated[
+    db: Annotated[
         str | None,
-        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+        typer.Option("--db", "-d", help="Database name (default DB if omitted)."),
     ] = None,
     yes: Annotated[
         bool,
@@ -756,11 +797,11 @@ def entry_delete_cmd(
     mnt = _existing_mount(ctx)
 
     try:
-        db_path = mnt.db_path(name)
+        db_path = mnt.db_path(db)
     except ValueError as e:
         raise typer.BadParameter(str(e)) from e
     if not db_path.exists():
-        target = f"database {name!r}" if name else "default database"
+        target = f"database {db!r}" if db else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
