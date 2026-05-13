@@ -49,6 +49,14 @@ search_app = typer.Typer(
 )
 app.add_typer(search_app)
 
+mcp_app = typer.Typer(
+    name="mcp",
+    no_args_is_help=True,
+    add_completion=False,
+    help="Expose the mount over the Model Context Protocol.",
+)
+app.add_typer(mcp_app)
+
 
 @app.callback()
 def main(
@@ -759,3 +767,18 @@ def entry_delete_cmd(
         removed = g.remove([entry_id])
 
     typer.echo(json.dumps({"id": entry_id, "deleted": bool(removed)}, indent=2))
+
+
+@mcp_app.command(name="serve")
+def mcp_serve_cmd(ctx: typer.Context) -> None:
+    """Run the grimoire MCP server over stdio against this mount."""
+    mnt = _existing_mount(ctx)
+    try:
+        from grimoire_cli import mcp as mcp_module
+    except ImportError as e:
+        raise typer.BadParameter(
+            "MCP support not installed. "
+            "Install with: pip install '4lt7ab-grimoire-cli[mcp]'"
+        ) from e
+
+    mcp_module.build_server(mnt).run()
