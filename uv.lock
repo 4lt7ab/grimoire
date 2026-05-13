@@ -23,7 +23,7 @@ dev = [
 
 [[package]]
 name = "4lt7ab-grimoire"
-version = "0.0.10"
+version = "0.0.11"
 source = { editable = "packages/grimoire" }
 dependencies = [
     { name = "python-ulid" },
@@ -51,10 +51,11 @@ provides-extras = ["fastembed"]
 
 [[package]]
 name = "4lt7ab-grimoire-cli"
-version = "0.0.10"
+version = "0.0.11"
 source = { editable = "packages/grimoire-cli" }
 dependencies = [
     { name = "4lt7ab-grimoire" },
+    { name = "fastmcp" },
     { name = "typer" },
 ]
 
@@ -62,18 +63,15 @@ dependencies = [
 fastembed = [
     { name = "4lt7ab-grimoire", extra = ["fastembed"] },
 ]
-mcp = [
-    { name = "fastmcp" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "4lt7ab-grimoire", editable = "packages/grimoire" },
     { name = "4lt7ab-grimoire", extras = ["fastembed"], marker = "extra == 'fastembed'", editable = "packages/grimoire" },
-    { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=2" },
+    { name = "fastmcp", specifier = ">=2" },
     { name = "typer", specifier = ">=0.12" },
 ]
-provides-extras = ["fastembed", "mcp"]
+provides-extras = ["fastembed"]
 
 [[package]]
 name = "aiofile"

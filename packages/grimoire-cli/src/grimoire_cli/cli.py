@@ -772,13 +772,7 @@ def entry_delete_cmd(
 @mcp_app.command(name="serve")
 def mcp_serve_cmd(ctx: typer.Context) -> None:
     """Run the grimoire MCP server over stdio against this mount."""
-    mnt = _existing_mount(ctx)
-    try:
-        from grimoire_cli import mcp as mcp_module
-    except ImportError as e:
-        raise typer.BadParameter(
-            "MCP support not installed. "
-            "Install with: pip install '4lt7ab-grimoire-cli[mcp]'"
-        ) from e
+    from grimoire_cli import mcp as mcp_module
 
+    mnt = _existing_mount(ctx)
     mcp_module.build_server(mnt).run()
