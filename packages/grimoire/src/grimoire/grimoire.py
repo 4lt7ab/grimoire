@@ -105,12 +105,13 @@ class Grimoire:
         partition: str | None = None,
         threshold_distance: float | None = None,
     ) -> list[Entry]:
-        """Embed (or re-embed) entries from (id, semantic_text) pairs into the given partition.
+        """Embed (or re-embed) entries from (id, semantic_text) pairs.
 
-        Empty or None `items` is a no-op. Each id must refer to an existing
-        entry; the given text is embedded and stored on the vec row. Existing
-        vec rows for these ids are replaced. `threshold_distance` is stored on
-        every row written in this call.
+        Each pair is written into the given partition. Empty or None `items`
+        is a no-op. Each id must refer to an existing entry; the given text
+        is embedded and stored on the vec row. Existing vec rows for these
+        ids are replaced. `threshold_distance` is stored on every row written
+        in this call.
         """
         if not items:
             return []
@@ -228,8 +229,10 @@ def open(path: str | Path, *, embedder: Embedder) -> Grimoire:
         stored_dimension = int(meta.fetch(conn, "dimension"))
         if stored_model != embedder.model or stored_dimension != embedder.dimension:
             raise GrimoireMismatch(
-                f"Embedder reports model={embedder.model!r} dimension={embedder.dimension}, "
-                f"file locked to model={stored_model!r} dimension={stored_dimension}."
+                f"Embedder reports model={embedder.model!r}"
+                f" dimension={embedder.dimension},"
+                f" file locked to model={stored_model!r}"
+                f" dimension={stored_dimension}."
             )
 
     return Grimoire(conn, embedder=embedder)

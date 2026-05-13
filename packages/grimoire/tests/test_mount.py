@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import pytest
-
 from grimoire import mount as mount_mod
 from grimoire.mount import (
     DB_FILENAME,

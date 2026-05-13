@@ -155,7 +155,8 @@ def keyword(
         (json.dumps(ids),),
     )
     conn.executemany(
-        "INSERT INTO entry_fts(entry_id, keyword_text, threshold_rank) VALUES (?, ?, ?)",
+        "INSERT INTO entry_fts(entry_id, keyword_text, threshold_rank)"
+        " VALUES (?, ?, ?)",
         [(id_, text, threshold_rank) for id_, text in items],
     )
 
@@ -178,7 +179,7 @@ def embed(
     partition: str | None = None,
     threshold_distance: float | None = None,
 ) -> list[Entry]:
-    """Write (or replace) entry_vec rows for the given (id, semantic_text, embedding) triples.
+    """Write (or replace) entry_vec rows for the given triples.
 
     Existing vec rows for these ids are deleted first so the partition,
     threshold, or text can change freely.
@@ -192,7 +193,8 @@ def embed(
         (json.dumps(ids),),
     )
     conn.executemany(
-        "INSERT INTO entry_vec(id, partition, semantic_text, threshold_distance, embedding) "
+        "INSERT INTO entry_vec"
+        "(id, partition, semantic_text, threshold_distance, embedding) "
         "VALUES (?, ?, ?, ?, ?)",
         [
             (id_, partition, text, threshold_distance, _serialize_vec(vec))

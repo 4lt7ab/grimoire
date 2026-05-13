@@ -1,5 +1,4 @@
 import pytest
-
 from grimoire.data.entry import Entry, Filters
 from grimoire.grimoire import open as open_grimoire
 
@@ -185,7 +184,9 @@ def test_embed_replaces_existing_vec_row_in_new_partition(tmp_path, fake_embedde
     assert old_hits == []
 
 
-def test_semantic_search_without_partition_spans_all_partitions(tmp_path, fake_embedder):
+def test_semantic_search_without_partition_spans_all_partitions(
+    tmp_path, fake_embedder
+):
     g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
     [a, b, c] = g.add([Entry(None, None, None, None) for _ in range(3)])
     g.embed([(a.id, "hello")])

@@ -2,7 +2,6 @@ import sqlite3
 import struct
 
 import pytest
-
 from grimoire.data import entry as entry_sql
 from grimoire.grimoire import open as open_grimoire
 
@@ -24,9 +23,7 @@ def test_partition_null_insert(tmp_path, fake_embedder):
         "INSERT INTO entry_vec (id, partition, embedding) VALUES (?, ?, ?)",
         ("01NULLINS", None, _vec([0.1] * 384)),
     )
-    rows = g._conn.execute(
-        "SELECT id, partition FROM entry_vec"
-    ).fetchall()
+    rows = g._conn.execute("SELECT id, partition FROM entry_vec").fetchall()
     assert [tuple(r) for r in rows] == [("01NULLINS", None)]
 
 
@@ -92,13 +89,11 @@ def test_partition_isolation(tmp_path, fake_embedder):
     query = _vec([0.5, 0.5] + [0.0] * 382)
 
     alpha = g._conn.execute(
-        "SELECT id FROM entry_vec "
-        "WHERE embedding MATCH ? AND partition = ? AND k = 5",
+        "SELECT id FROM entry_vec WHERE embedding MATCH ? AND partition = ? AND k = 5",
         (query, "alpha"),
     ).fetchall()
     beta = g._conn.execute(
-        "SELECT id FROM entry_vec "
-        "WHERE embedding MATCH ? AND partition = ? AND k = 5",
+        "SELECT id FROM entry_vec WHERE embedding MATCH ? AND partition = ? AND k = 5",
         (query, "beta"),
     ).fetchall()
 
