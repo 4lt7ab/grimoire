@@ -1,7 +1,7 @@
 {
   "name": "grimoire",
   "version": "0.0.13",
-  "description": "Wire the grimoire CLI — a SQLite + sqlite-vec semantic datastore — into Claude Code. Ships a setup skill that checks the install, initializes a mount, and drops a generic CLI cheat sheet into your global CLAUDE.md so future sessions don't burn tokens rediscovering grimoire's surface.",
+  "description": "Wire grimoire — a SQLite + sqlite-vec semantic datastore — into Claude Code. Ships a quickstart skill that silently verifies install, the default mount, and the MCP server registration; orients the user on six common ways people use grimoire (knowledge base, idempotency record, semantic memory, browsable log, decision log with precedent retrieval, translation memory); helps them pick one via AskUserQuestion; then runs a real first entry end-to-end via the mcp__grimoire__* tools so they leave with grimoire actually working. Finishes with a single copy-pastable bash line to delete the demo data. The conversation is the deliverable — no project files are written.",
   "author": {
     "name": "4lt7ab"
   }

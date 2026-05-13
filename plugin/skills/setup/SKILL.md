@@ -1,85 +1,169 @@
 ---
 name: setup
-description: Run the grimoire setup walkthrough — verify the `grimoire` CLI is installed, interview the user on which mount location to use (global, project-local, or custom) and initialize it, then offer to drop a generic grimoire CLI cheat sheet into the user's `~/.claude/CLAUDE.md`. Use whenever the user asks to set up, install, configure, or initialize grimoire for Claude Code, or invokes `/grimoire:setup`.
+description: Run a short conversational grimoire quickstart — silently verify the CLI install, default mount, and MCP server registration; orient the user on six common usage patterns (knowledge base, idempotency record, semantic memory, browsable log, decision log with precedent retrieval, translation memory); help them pick one via `AskUserQuestion`; then run a real end-to-end demo of the chosen pattern via the `mcp__grimoire__*` tools so they leave with grimoire actually working. Finishes with a single copy-pastable bash line that deletes the demo data. **The conversation is the deliverable** — no project files are written. Use whenever the user asks to set up, install, configure, get started with, or invokes `/grimoire:setup`.
 ---
 
-# Grimoire setup
+# Grimoire quickstart
 
-A small, idempotent walkthrough that gets grimoire wired into Claude Code. The skill **interviews** the user before doing anything destructive or persistent — it never assumes the default is the right choice. Re-running on an already-configured machine is a no-op.
+A short conversational walkthrough that gets a new user oriented on grimoire and through a real first entry. **The conversation is the deliverable.** No project files are written, no rules baked in, no `CLAUDE.md` edits, no shell-profile changes.
+
+By the end:
+
+- The user has seen six ways people use grimoire, and the one they picked has been demonstrated end-to-end with actual MCP calls.
+- They have a copy-pastable bash line that deletes every demo entry created.
+- They know what tools to reach for next when they use grimoire for real.
+
+Grimoire is versatile — entries are pure metadata, indexes are independent, payloads are arbitrary JSON. The same datastore can be a knowledge base, a dedup cache, a vector memory, a chronological journal, a precedent retriever, or a translation memory. The walkthrough's job is to make that surface concrete by demoing one shape.
 
 ## Steps
 
-Work through the steps in order. After each one, briefly tell the user what you found and what (if anything) you did. Skip a step entirely if its check passes.
+### 1. Silent infrastructure check
 
-### 1. Verify the CLI is installed
+Run in parallel and stay quiet if everything is fine:
 
-Run `command -v grimoire` via Bash.
+- `command -v grimoire` — CLI installed?
+- `test -f ~/.grimoire/grimoire.db` — default mount initialized?
+- Search `<cwd>/.mcp.json`, `~/.claude.json`, `~/.claude/settings.json`, `<cwd>/.claude/settings.json` for a `grimoire` MCP server entry — registered with Claude Code?
 
-- **Installed:** report the path and move on.
-- **Missing:** detect available installers in parallel (`command -v uv`, `command -v pipx`). Then ask the user how they want to install it via `AskUserQuestion`, with options drawn from what's actually available:
-  - `uv tool install '4lt7ab-grimoire-cli[fastembed]'` (recommended if `uv` is present)
-  - `pipx install '4lt7ab-grimoire-cli[fastembed]'` (if `pipx` is present)
-  - "I'll install it myself later" (skip, and end the walkthrough cleanly)
+If all three pass, proceed silently to step 2.
 
-  If neither `uv` nor `pipx` is on PATH, surface that and stop — direct the user to install one of them first.
+**CLI missing.** Detect installers in parallel: `command -v uv` / `command -v pipx`. AskUserQuestion with whichever are available plus "I'll install it myself later". On a chosen installer, run it and re-check. On "later", end the walkthrough cleanly.
 
-  On a chosen installer, run the command and confirm the binary lands on PATH (re-run `command -v grimoire`).
+**Mount missing.** AskUserQuestion: **Create now** (recommended) or **Skip**. On create, run `grimoire mount create` and report. On skip, end cleanly — there's nothing to demo against.
 
-### 2. Choose and initialize the mount
+**MCP server not registered.** Print the registration snippet below and ask the user to add it to `~/.claude.json` (or `<cwd>/.mcp.json` for project scope), then restart Claude Code. Do **not** auto-edit any config file. End the walkthrough — the demo cannot run without the server.
 
-The mount location is the most important decision in this walkthrough — it is **not** a yes/no on the default. Interview the user properly.
-
-**Step 2a — gather signal before asking.** In parallel, check:
-- Is `$GRIMOIRE_MOUNT` set? If so, capture its value.
-- Does `~/.grimoire/grimoire.db` exist?
-- Does `./.grimoire/grimoire.db` exist (relative to the user's current working directory)?
-- Is the current working directory inside a git repo? (`git rev-parse --show-toplevel`) — useful for naming a project-local option.
-
-**Step 2b — pick the mount path via `AskUserQuestion`.** Frame it as a real choice, with options tailored to the signal above. The available choices, in order:
-
-1. **Existing mount detected** — if `$GRIMOIRE_MOUNT` is set and points to an initialized mount, OR `~/.grimoire/grimoire.db` exists, OR `./.grimoire/grimoire.db` exists, list each as a "use existing" option (most-relevant first). Picking one of these short-circuits step 2c — the mount is already initialized.
-2. **`~/.grimoire`** — global, recommended for users who want one shared datastore across all projects.
-3. **Project-local** — `<git-repo-root>/.grimoire` if inside a repo, otherwise `<cwd>/.grimoire`. Recommended for users who want grimoire data to live and version with a specific project. Mention that the project-local path will not auto-resolve unless they `export GRIMOIRE_MOUNT=<path>` or pass `--mount` every time.
-4. **Custom path** — accept a free-text follow-up. Expand `~` and resolve to absolute.
-5. **Skip mount setup** — exit step 2 without touching anything.
-
-Always describe each option in one short line so the user can scan and pick. Do not pre-tick any choice — let the user choose.
-
-**Step 2c — initialize the chosen mount.** If the user picked a fresh path (not an existing mount), check whether `<chosen>/grimoire.db` exists:
-- **Exists:** report it, move on.
-- **Missing:** run `grimoire mount --mount <chosen>`. The command is idempotent — safe even if directory pieces exist.
-
-**Step 2d — `GRIMOIRE_MOUNT` follow-up.** If the chosen mount is **not** `~/.grimoire` AND `$GRIMOIRE_MOUNT` is not already set to it, print (do not run) the export line they should add to their shell profile:
-
-```sh
-export GRIMOIRE_MOUNT=<chosen-path>
+```json
+{
+  "mcpServers": {
+    "grimoire": {
+      "type": "stdio",
+      "command": "grimoire",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
 ```
 
-Tell the user this is a copy-paste step for them — the skill will not edit `~/.zshrc`, `~/.bashrc`, or any shell profile.
+### 2. Orient — show the patterns
 
-### 3. Drop the CLI cheat sheet into ~/.claude/CLAUDE.md
+Send a single message that introduces grimoire in one short paragraph, then describes six common usage patterns. Keep it scannable. For each pattern, give a name in bold, a one-line "what this shape looks like", a one-line "when this fits", and a tiny pseudo-call hint.
 
-This is the headline deliverable: a generic CLI reference that lets future Claude Code sessions drive grimoire without rediscovering the surface.
+Use this template verbatim — adapt only the framing paragraph if needed for the user's stated context:
 
-The snippet lives next to this `SKILL.md` at `claude-md-snippet.md` (relative to the skill directory). It is wrapped in `<!-- BEGIN grimoire-cheatsheet -->` / `<!-- END grimoire-cheatsheet -->` markers so re-runs can detect and update it cleanly.
+> Grimoire is a single-file SQLite + sqlite-vec datastore. Entries hold metadata; keyword (FTS5) and semantic (vec0) indexing are independent, opt-in operations against the same entry id. That separation lets one datastore bend to a lot of shapes — here are six ways people use it:
+>
+> 1. **Knowledge base.** Broad kinds, both indexes, structured payload. *Fits:* "find similar past notes by topic or keyword." `entry_add → index_keyword + index_semantic → search_*`.
+> 2. **Idempotency record.** `(group_key, group_ref)` enforced unique, payload-only, no indexes. *Fits:* "have I seen / processed this URL, file, or event before?" `entry_add` for the first sighting, then `fetch(group_refs=[...])` to check next time.
+> 3. **Semantic memory.** Semantic-indexed only, lightweight payload. *Fits:* "an agent needs to remember context across turns or sessions." `entry_add → index_semantic → search_semantic`.
+> 4. **Browsable log.** Payload-only, no indexes, walked chronologically with ULID cursoring. *Fits:* "append-only journal; I'll browse it, not search it." `entry_add → fetch(limit=..., cursor=...)`.
+> 5. **Decision log with precedent retrieval.** Each entry is a past decision; rationale prose is semantic-indexed. *Fits:* "when a new tradeoff comes up, find similar decisions we've made before." `entry_add → index_semantic → search_semantic(query=<new tradeoff>)`.
+> 6. **Translation memory.** Each entry is a source/target pair; source text is semantic-indexed. *Fits:* "I want to match the style of my past good translations." `entry_add → index_semantic(source) → search_semantic(query=<new sentence>)`.
+>
+> Pick the one closest to what you want — I'll run through a real first entry so you can see it work.
 
-Procedure:
+### 3. Pick a pattern
 
-1. Read `claude-md-snippet.md` (adjacent to this file).
-2. Read `~/.claude/CLAUDE.md`. If it does not exist, treat it as empty.
-3. Search for the `<!-- BEGIN grimoire-cheatsheet -->` marker:
-   - **Found:** ask the user whether to refresh it. On confirmation, replace everything between the BEGIN and END markers (inclusive) with the current snippet contents. On decline, leave it alone.
-   - **Not found:** ask the user whether to add it. On confirmation, append the snippet to the end of `~/.claude/CLAUDE.md`, separated from existing content by a single blank line. If the file does not exist, create it with the snippet as its sole contents.
-4. Tell the user the file path you wrote and the byte count or line count of the snippet.
+AskUserQuestion (single-select). Bundle the four common patterns plus an escape lane:
 
-### 4. Wrap up
+- **Knowledge base**
+- **Idempotency record**
+- **Semantic memory**
+- **Show me the less common ones**
 
-Print a short summary: which steps ran, which were skipped, and any one-line follow-ups (e.g. "set `GRIMOIRE_MOUNT` in your shell profile if you want a non-default mount").
+If the user picks "Show me the less common ones", second AskUserQuestion:
+
+- **Browsable log**
+- **Decision log**
+- **Translation memory**
+- **Skip the demo — I'll design my own**
+
+On "Skip the demo", end the walkthrough cleanly. The orientation alone was the value; they're ready to design from here.
+
+### 4. Demo the chosen pattern end-to-end via MCP
+
+Tell the user in one sentence what you're about to do: how many entries you'll add, which indexes you'll touch, which search you'll demonstrate.
+
+Then run the demo using the **MCP tools** (`mcp__grimoire__entry_add`, `mcp__grimoire__index_keyword`, etc.) — **not** the CLI. After each tool call, give the user a one-line update ("created entry `<id>`", "indexed for semantic search", "search returned N hits with top distance X").
+
+**Always use `group_key="quickstart-demo"`** on every entry the demo creates. That makes them findable by `fetch(group_keys=["quickstart-demo"])` later if the user loses the cleanup command.
+
+**Pattern recipes.** Adapt the example content if the user has hinted at a specific domain; otherwise the neutral seeds below are fine.
+
+#### Knowledge base — 1 entry, both indexes
+
+- `entry_add(group_key="quickstart-demo", payload={"title": "Phoenix mythology", "tags": ["mythology", "fire"]}, context="quickstart demo entry")`
+- `index_keyword(entry_id=<id>, text="phoenix mythology rebirth fire bird")`
+- `index_semantic(entry_id=<id>, text="The phoenix is a mythological bird that cyclically regenerates from its own ashes.")`
+- `search_semantic(query="bird that returns from death")` — show the hit with its `distance`.
+- `search_keyword(query="phoenix")` — show the hit with its `rank`.
+
+#### Idempotency record — 2 entries + a deliberate collision
+
+- `entry_add(group_key="quickstart-demo", group_ref="https://example.com/article-42", payload={"title": "Article 42", "processed_at": "<now>"})`
+- `entry_add(group_key="quickstart-demo", group_ref="https://example.com/article-99", payload={"title": "Article 99", "processed_at": "<now>"})`
+- Re-attempt: `entry_add(group_key="quickstart-demo", group_ref="https://example.com/article-42", payload={})` — show that this raises. Tell the user this is the whole point: the unique constraint is the dedup primitive.
+- Look up by ref: `fetch(group_keys=["quickstart-demo"], group_refs=["https://example.com/article-42"])` — show the existing record being found.
+
+#### Semantic memory — 3 entries, semantic-only
+
+- Three short prose entries that an agent might remember (e.g. user preferences, observed patterns).
+- `entry_add(group_key="quickstart-demo", payload={"summary": "<short>"})` then `index_semantic(entry_id=<id>, text="<longer prose>")` for each.
+- `search_semantic(query="<near-paraphrase of one of them>")` — show the matching memory surface with its distance.
+
+#### Browsable log — 3 payload-only entries, then a walk
+
+- Three `entry_add(group_key="quickstart-demo", payload={"event": "<...>", "level": "info", "ts": "<iso>"})` with **no** index calls.
+- `fetch(group_keys=["quickstart-demo"], limit=10)` — show the chronological order and call out that the id IS the cursor (ULIDs sort by creation time).
+
+#### Decision log with precedent retrieval — 3 entries, semantic-indexed on rationale
+
+- Three past-decision entries: `entry_add(group_key="quickstart-demo", payload={"decision": "<short>", "date": "<iso>"})` with a short rationale.
+- `index_semantic(entry_id=<id>, text=<rationale prose>)` for each.
+- `search_semantic(query=<new tradeoff that echoes one of the past decisions>)` — show the precedent surfacing with its distance.
+
+#### Translation memory — 3 source/target pairs, semantic-indexed on source
+
+- Three short pairs (e.g. English source → Spanish target).
+- `entry_add(group_key="quickstart-demo", payload={"source": "<en>", "target": "<es>"})` for each.
+- `index_semantic(entry_id=<id>, text=<source>)` for each.
+- `search_semantic(query=<a near-paraphrase of one source in English>)` — show the matching pair surface, payload includes the canonical target.
+
+### 5. Cleanup command
+
+Collect the entry ids returned by every `entry_add` during the demo. Print **one single bash line** that deletes them, chained with `&&`. **No comments anywhere in the bash** — comments break some shells when piped or pasted partially.
+
+For one entry:
+
+```sh
+grimoire entry delete <ID> --yes
+```
+
+For multiple (most patterns):
+
+```sh
+grimoire entry delete <ID1> --yes && grimoire entry delete <ID2> --yes && grimoire entry delete <ID3> --yes
+```
+
+After the block, tell the user in plain English: "This deletes only the entries the demo created — every entry with `group_key='quickstart-demo'`. Your other entries in `~/.grimoire/grimoire.db` are untouched." If they lose the line, they can find demo entries any time via `grimoire fetch --group-key quickstart-demo`.
+
+### 6. Cap-off
+
+One short paragraph closing the walkthrough:
+
+- Name the pattern they picked and the 2-3 tools they'd reach for next when using it for real.
+- Mention `mcp__grimoire__info()` for checking current state at any time.
+- Note that grimoire is local-first — nothing left the machine.
+
+No file is written. The conversation ends.
 
 ## Guardrails
 
-- **Never** modify the user's shell profile (`~/.zshrc`, `~/.bashrc`, etc.) — only suggest the export line for them to add.
-- **Never** delete an existing mount or run `grimoire mount destroy` from this skill, even if the user asks mid-walkthrough. Tell them to run it themselves.
-- **Interview, don't assume.** When a step has a real fork (where the mount lives, which installer to use), ask the user with `AskUserQuestion` and let them pick — don't pre-select the default and rubber-stamp it. A short follow-up (e.g. capturing a custom path) is fine; back-to-back yes/no confirmations are not.
-- **Confirm before every destructive or persistent action.** Installing a CLI, creating a mount, and editing `~/.claude/CLAUDE.md` all need explicit user assent.
-- The cheat sheet is **generic by design**. Do not embellish it with project-specific kinds, opinionated workflows, or examples drawn from the user's own data. If the user wants tailored notes, they can add them outside the marker block.
+- **Never** write project files. No `.claude/rules/grimoire.md`, no edits to `CLAUDE.md`, no shell-profile changes, no `~/.claude/CLAUDE.md` cheatsheet. The skill is purely conversational; persistence is the user's own follow-up.
+- **Never** auto-edit `~/.claude.json` or any MCP-server config. If the server isn't registered, print the snippet and end the walkthrough cleanly.
+- **Never** put comments (`#`) in any bash command surfaced to the user. The cleanup line is a single chained `&&` invocation with no `#` anywhere.
+- **Demo via MCP, not CLI.** Every read/write/index/search during the demo goes through `mcp__grimoire__*`. The CLI is referenced only in the cleanup command and the "if you need to set something up" infra-fix steps.
+- **Label every demo entry** with `group_key="quickstart-demo"`. The user must be able to find and delete demo data even without the printed cleanup line.
+- **Always print the cleanup command after the demo**, even if the user said they want to keep the entries. Their future self will want it.
+- **Honor disengagement.** If the user wants to skip the demo after orientation, the orient-and-pick phase was the value. End cleanly without grinding through more questions.
+- **Use `AskUserQuestion` at every real fork** — install method, mount creation, pattern pick. Free-text prompts are reserved for cases where the user has to supply a shape that doesn't fit a menu.
