@@ -202,6 +202,14 @@ def test_embed_raises_for_unknown_id(tmp_path, fake_embedder):
         g.embed([("01MISSINGMISSINGMISSINGMI", "hello")])
 
 
+@pytest.mark.parametrize("text", ["", "   ", "\n\t"])
+def test_embed_rejects_empty_text(tmp_path, fake_embedder, text):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    [saved] = g.add([Entry(None, None, None, None)])
+    with pytest.raises(ValueError, match="semantic_text must be non-empty"):
+        g.embed([(saved.id, text)])
+
+
 def test_keyword_empty_is_noop(tmp_path, fake_embedder):
     g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
     assert g.keyword([]) == []
@@ -240,6 +248,14 @@ def test_keyword_raises_for_unknown_id(tmp_path, fake_embedder):
     g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
     with pytest.raises(ValueError, match="No entry with id"):
         g.keyword([("01MISSINGMISSINGMISSINGMI", "hello")])
+
+
+@pytest.mark.parametrize("text", ["", "   ", "\n\t"])
+def test_keyword_rejects_empty_text(tmp_path, fake_embedder, text):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    [saved] = g.add([Entry(None, None, None, None)])
+    with pytest.raises(ValueError, match="keyword_text must be non-empty"):
+        g.keyword([(saved.id, text)])
 
 
 def test_keyword_stores_threshold_rank(tmp_path, fake_embedder):

@@ -145,6 +145,10 @@ def keyword(
     if not items:
         return []
 
+    for _, text in items:
+        if not text.strip():
+            raise ValueError("keyword_text must be non-empty")
+
     ids = [i for i, _ in items]
     conn.execute(
         "DELETE FROM entry_fts WHERE entry_id IN (SELECT value FROM json_each(?))",

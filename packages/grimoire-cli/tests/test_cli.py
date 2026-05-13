@@ -225,6 +225,32 @@ def test_index_semantic_unknown_id_is_clean_error(mounted):
     assert "Traceback" not in result.output
 
 
+@pytest.mark.parametrize("text", ["", "   "])
+def test_index_keyword_rejects_empty_text(mounted, text):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(
+        app, ["index", "keyword", entry_id, "--text", text]
+    )
+    assert result.exit_code != 0
+    assert "keyword_text must be non-empty" in result.output
+    assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize("text", ["", "   "])
+def test_index_semantic_rejects_empty_text(mounted, text):
+    add = runner.invoke(app, ["entry", "add"])
+    entry_id = json.loads(add.output)["id"]
+
+    result = runner.invoke(
+        app, ["index", "semantic", entry_id, "--text", text]
+    )
+    assert result.exit_code != 0
+    assert "semantic_text must be non-empty" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_entry_update_rejects_invalid_payload_json(mounted):
     add = runner.invoke(app, ["entry", "add"])
     entry_id = json.loads(add.output)["id"]

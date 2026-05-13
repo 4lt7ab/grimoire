@@ -117,6 +117,10 @@ class Grimoire:
         ids = [i for i, _ in items]
         texts = [t for _, t in items]
 
+        for text in texts:
+            if not text.strip():
+                raise ValueError("semantic_text must be non-empty")
+
         existing = self._conn.execute(
             "SELECT id FROM entry WHERE id IN (SELECT value FROM json_each(?))",
             (json.dumps(ids),),
