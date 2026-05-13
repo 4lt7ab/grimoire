@@ -1,6 +1,6 @@
 # Feature set
 
-**TL;DR:** A single-file SQLite datastore with both vector and keyword search, group-partitioned records, consumer-set unique references, per-record similarity gates, and a thin CLI.
+**TL;DR:** A single-file SQLite datastore. Entries hold metadata; keyword (FTS5) and semantic (vec0 KNN) indexing are independent, opt-in operations against an entry id. Group labels, vec partitions, per-row similarity gates, a CLI with mount layout, and an MCP server round it out.
 
 **When to read this:** When deciding whether a proposed change is in scope.
 
@@ -8,27 +8,46 @@
 
 ## What this does
 
-- **Single-file datastore.** One SQLite file is the entire grimoire — schema, entries, vector index, keyword index. `Grimoire.init(path, embedder=...)` is the one-time setup that creates and prepares the file; `Grimoire.open(path, embedder=...)` opens an existing one and raises `GrimoireNotFound` on a missing or non-grimoire path.
-- **Explicit init.** `Grimoire.init` (and `grimoire init` on the CLI) bundles file creation, lock-row write/validation, and a single embedder exercise (`embed(" ")`) into one idempotent step. Any deferred embedder work — model download, weight load — happens at a moment the caller chose, not silently inside the first `add` or `search`.
-- **Vector search.** `vector_search(query, k=...)` returns entries ranked by vector distance against the embedded query.
-- **Keyword search.** `keyword_search(query, k=...)` returns entries ranked by SQLite FTS5 BM25 against entry content and explicit keywords, with keyword matches weighted 5× content matches. No additional dependency — FTS5 ships with SQLite. The query string accepts FTS5 syntax (phrases, prefix matches, boolean operators, column scoping like `keywords:phoenix`); malformed queries surface as `sqlite3.OperationalError`.
-- **Group partitioning.** Each entry can carry an optional `group_key` label. Reads (`vector_search`, `keyword_search`, `list`) accept an optional `group_key=` filter; the vector index is partitioned on `group_key` so filtered vector search stays cheap. Keyword search applies the filter on the joined `entries` row. `group_key` is nullable — entries without one share a single global namespace.
-- **Consumer-set references.** Each entry can carry an optional `group_ref`, a consumer-supplied identifier looked up via `get_by_group_ref(group_key, group_ref)`. The pair `(group_key, group_ref)` is enforced unique whenever `group_ref` is set, with NULL `group_key` collapsed to a single global namespace for that uniqueness check — so consumers can dedupe by external id whether or not they opt into groups.
-- **Per-record similarity thresholds.** Records can carry a `threshold`. `vector_search(..., dynamic_threshold=True)` drops results that don't clear each record's own distance gate — useful for heuristic-driven filtering where different records demand different match tightness. Vector-only: the threshold is a distance gate and has no equivalent for keyword search.
-- **ULID identifiers.** Entries are addressed by ULID, so chronological order is implicit in the id. `list` paginates via `after_id`, and `Entry.created_at` exposes the ULID's timestamp without an extra column.
-- **Age-windowed reads.** All read methods (`list`, `vector_search`, `keyword_search`) accept `created_after` / `created_before` (inclusive lower, exclusive upper) to restrict results to a time window. The window is enforced as an index range on the ULID id — no `created_at` column, no new index.
-- **Optional payloads.** Each entry carries an optional JSON-object payload alongside its content for caller-specific metadata. Passed in and returned as a `dict` — callers can pipe it straight into a Pydantic model or dataclass without re-parsing.
-- **Optional keywords.** Each entry can carry a list of explicit search terms that augment recall in `keyword_search`. Keywords are indexed alongside content in FTS5 and weighted 5× higher in BM25 ranking — useful for aliases, IDs, or alternate names that don't appear in the entry's prose.
-- **Partial updates.** `update(entry_id, ...)` patches an entry in place: omitted fields are left alone, explicit `None` clears nullable fields (`group_key`, `group_ref`, `payload`, `threshold`, `keywords`). The id and its derived `created_at` are preserved across updates. The embedder is only invoked when `content` actually changed; FTS is only re-indexed when `content` or `keywords` changed; the vector row is only rewritten when `content` or `group_key` changed (a `group_key`-only patch reuses the stored embedding). When re-embed *does* happen, its cost reflects the supplied embedder's `embed()` call — sub-10ms with the bundled fastembed default, but proportional to model size with heavier embedders (remote APIs, large local models). For high-update-rate workloads, batch via `update_many` (one `embed_many` call covers all content changes in the batch).
-- **Bulk writes.** `add_many`, `update_many`, and `delete_many` apply many records in a single transaction. `add_many` and `update_many` issue one batched `embed_many` call covering only records that need it (for `update_many`, that's just the records whose `content` actually changed). All three are atomic — a failure mid-batch leaves the file untouched, unlike a loop over the single-record methods.
-- **Embedder Protocol.** Callers supply any object satisfying the `Embedder` Protocol (`model`, `dimension`, `embed`). A `FastembedEmbedder` is bundled behind the `fastembed` extra.
-- **Embedder lock.** The embedding model name and dimension are written into the file on first open. Reopening with a mismatched embedder raises `GrimoireMismatch` rather than silently producing nonsense vectors.
-- **File inspection without opening.** `Grimoire.peek(path)` returns model, dimension, schema version, total entry count, and per-group counts without loading sqlite-vec or requiring an embedder.
-- **Multi-thread access (opt-in).** `Grimoire.init` and `Grimoire.open` accept `check_same_thread=False` to lift Python's stdlib thread-affinity guard, letting a single instance be shared across worker threads — needed for sync HTTP handlers under FastAPI, Starlette, or gunicorn `--threads`. SQLite's connection-level locking still serializes access; this enables sharing, not concurrency. Default is `True` so single-threaded callers (CLI, scripts) keep the safety rail.
-- **CLI.** `grimoire {init, query, search, import, export, destroy, add, update, get, delete}` operates on a grimoire mount directory (`--mount <dir>` / `GRIMOIRE_MOUNT`), which holds the SQLite file and the embedder model cache. Bare `grimoire` (no subcommand) prints the mount's metadata via `Grimoire.peek` without loading the embedder. JSONL output everywhere makes it pipeable to `jq`. `query` paginates with `--cursor <ulid>` — the entry id IS the cursor, so `LAST=$(grimoire query --limit 100 | tail -1 | jq -r .id); grimoire query --limit 100 --cursor "$LAST"` walks the next page chronologically. `search` unifies vector and keyword search via `--mode vector|keyword` (default vector). `import` and `export` round-trip JSONL of the same shape; `destroy` removes the entire mount directory. `grimoire --help` is the consolidated orientation: commands, the mount model, output conventions, and environment variables in one screen, intended to ground a new operator (human or LLM) without reaching for the README.
+- **Single-file datastore.** One SQLite file is one grimoire — schema, entries, FTS index, vector index. `grimoire.open(path, embedder=...)` initializes an empty file or opens an existing one; mismatched embedders raise `GrimoireMismatch`.
+
+- **Entry/index separation.** Entries are pure metadata: `id`, `group_key`, `group_ref`, `payload`, `context`. To make an entry searchable, call `keyword(items)` to write an FTS5 row, `embed(items)` to write a vec0 row, or both. An entry can exist with neither, either, or both — useful for payload-only records, FTS-only catalogs, vector-only memory, or combined.
+
+- **Re-indexing is cheap and explicit.** Calling `keyword()` or `embed()` on an id that already has an index row replaces it. The entry row is untouched. To "rename" the searchable text on a row, re-index — no need to delete and re-add.
+
+- **Keyword search.** `keyword_search(query, filters, limit)` returns `KeywordHit`s ranked by FTS5 BM25. Hits carry the indexed `keyword_text`, the stored `threshold_rank`, and a positive `score` (higher = better). The CLI also tokenizes free-form prose into safe quoted OR-joined FTS5 syntax for the common case.
+
+- **Semantic search.** `semantic_search(query, partition, limit)` embeds the query, runs vec0 KNN, and returns `SemanticHit`s. Hits carry the source `semantic_text`, the stored `threshold_distance`, and the `distance` (lower = better). Pass `partition` to narrow KNN to one partition; omit it to span every partition in the same query.
+
+- **Partitions.** `entry_vec.partition` is a separate dimension from `entry.group_key`. Partitions are vec0 partition keys: KNN scoped to a partition skips other partitions at the index level. `group_key` is metadata on the entry, queryable from `fetch` and `keyword_search`. The two can move independently.
+
+- **Per-row similarity gates.** Indexed rows can carry a `threshold_rank` (keyword) or `threshold_distance` (semantic). Stored on the index row, surfaced on hits. The library does not auto-filter by them — callers decide how to apply them in their own scoring logic.
+
+- **Group metadata.** Optional `group_key` and `group_ref` on every entry. `(group_key, group_ref)` is enforced unique when both are set; nulls coexist freely. The same `group_ref` is allowed across different `group_key`s.
+
+- **ULID identifiers.** Entries are addressed by ULID, so chronological order is implicit in the id. `fetch(cursor=last_id)` walks pages in creation order without a separate cursor column.
+
+- **JSON payloads.** Every entry carries an optional JSON payload. Any JSON-serializable value is accepted — object, array, scalar, or null. Round-tripped as-is.
+
+- **Filter sets.** `Filters(id=[...], group_key=[...], group_ref=[...])` lets `fetch` and `keyword_search` restrict by sets of values. All three filters are independently optional.
+
+- **Wholesale updates.** `update(entries)` rewrites `group_key`, `group_ref`, `payload`, and `context` on existing rows. `id` is preserved; index rows are untouched. To make a partial update, fetch the entry, replace the fields you want to change, and pass it back. (The CLI offers a `--put` flag and defaults to fetch-then-patch.)
+
+- **Embedder protocol.** Callers supply any object implementing `model`, `dimension`, `embed(text)`, and `embed_many(texts)`. Two implementations ship with the library: `FastembedEmbedder` (ONNX-based, local, default `BAAI/bge-small-en-v1.5`) behind the `fastembed` extra, and `NoOpEmbedder` (zero vectors) for grimoires that only use FTS or payload storage.
+
+- **Embedder lock.** The embedder's `model` and `dimension` are written into the file on first open. Reopening with a different `model` or `dimension` raises `GrimoireMismatch`.
+
+- **Peek without opening.** `grimoire.peek(path)` returns `model`, `dimension`, `schema_version`, entry count, per-group counts, and per-partition counts. Does not require an embedder.
+
+- **Mount layout (CLI).** The CLI organizes one or more grimoires under a mount directory: a default `grimoire.db`, optional named subdirectory databases, and a shared `__models__/` embedder cache. Mount resolution: `--mount` > `$GRIMOIRE_MOUNT` > `~/.grimoire`.
+
+- **CLI.** `grimoire {mount, entry, index, search, info, fetch, mcp} ...` mirrors the library's surface plus mount administration. Every command prints pretty-indented JSON.
+
+- **MCP server.** `grimoire mcp serve` exposes the read+write surface over stdio as FastMCP tools, scoped to the mount picked at boot. Mount administration stays CLI-only; the MCP server operates on existing databases.
 
 ## What this does not do
 
-- Serve as a general-purpose database. grimoire is a search-indexed datastore, not a relational store callers should reach into for arbitrary persistence.
-- Manage embedders. Callers own their embedder lifecycle; grimoire only validates that the supplied embedder matches what the file was created with (and exercises it once during `init` to materialize deferred setup work).
-- Multi-process write coordination. WAL mode is on by default, so concurrent readers don't block a writer and `busy_timeout=5000` lets occasional multi-writer attempts queue rather than fail. Sustained high-concurrency writes still serialize at SQLite's level — not designed for that.
+- **General-purpose database.** Grimoire is a search-indexed datastore, not a relational store callers reach into for arbitrary persistence.
+- **Manage embedders.** Callers own their embedder's lifecycle. The library only validates that the supplied embedder matches what the file was created with.
+- **In-place schema migration.** Pre-v1, schema changes are not migrated. A `SCHEMA_VERSION` mismatch raises `SchemaVersionError`; the response is to recreate the file. Migration ergonomics get designed once v1 is on the table.
+- **Multi-process write coordination.** SQLite's connection-level locking serializes writes. Suitable for one writer with many readers, not for sustained high-concurrency writes.
+- **Auto-filter by stored thresholds.** `threshold_rank` and `threshold_distance` are stored on index rows and surfaced on hits. The library does not drop hits that fail them — that's the caller's policy.

@@ -9,7 +9,3 @@
 | Understand the system | `docs/architecture.md` |
 | Know what the project does | `docs/feature-set.md` |
 | Match the code style | `docs/coding-conventions.md` |
-
-## Rules
-
-All files in `.claude/rules/` apply. Read them before acting in this repo.

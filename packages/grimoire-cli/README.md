@@ -1,6 +1,6 @@
 # 4lt7ab-grimoire-cli
 
-The standalone CLI for grimoire — a single-file semantic datastore backed by SQLite and [`sqlite-vec`](https://github.com/asg017/sqlite-vec).
+The standalone CLI for grimoire — a single-file semantic datastore backed by SQLite and [`sqlite-vec`](https://github.com/asg017/sqlite-vec). Operates on a mount directory holding one or more grimoire databases, plus an embedded MCP server for AI client integration.
 
 For the Python library, see [`4lt7ab-grimoire`](https://pypi.org/project/4lt7ab-grimoire/).
 
@@ -21,11 +21,11 @@ A **mount** is a directory containing one or more grimoire databases plus a shar
 
 ```
 <mount>/
-├── grimoire.toml          # registry of named DBs (lazy)
-├── models/                # shared embedder cache
 ├── grimoire.db            # the default DB
-└── <name>/
-    └── grimoire.db        # a named DB
+├── <name>/
+│   └── grimoire.db        # a named DB
+├── __models__/            # shared embedder cache
+└── grimoire.toml          # registry file (reserved, currently inert)
 ```
 
 The mount resolves in this order: `--mount <dir>` flag > `GRIMOIRE_MOUNT` env var > `~/.grimoire`.
@@ -36,189 +36,176 @@ Set the env var once per shell to avoid passing `--mount` everywhere:
 export GRIMOIRE_MOUNT=$PWD/.grimoire
 ```
 
-A mount can hold one **default database** at `<mount>/grimoire.db` (no name) plus any number of **named databases** under `<mount>/<name>/grimoire.db`, tracked in `<mount>/grimoire.toml`. Pick which one a command targets with `--db <name>`; omit `--db` to target the default.
+A mount can hold one **default database** at `<mount>/grimoire.db` plus any number of **named databases** under `<mount>/<name>/grimoire.db`. Pick which one a command targets with `--name <name>` / `-n <name>`; omit `--name` to target the default. Names must match `[a-z0-9_-]+` and cannot begin with `__` (reserved).
 
 ## Quickstart
 
 ```sh
 export GRIMOIRE_MOUNT=$PWD/.grimoire
 
-# Set up the mount + default database. Idempotent.
-grimoire mount
+# Create the mount + default DB. Idempotent.
+grimoire mount create
 
-# Add a few entries.
-grimoire entry add "the moon is full tonight"
-grimoire entry add "dragons fly at midnight" --keyword-text "dragon midnight flight"
-grimoire entry add "knights joust at dawn" --group-key tale
+# Add an entry (metadata only; not yet searchable).
+ID=$(grimoire entry add \
+    --group-key creature \
+    --group-ref phoenix-001 \
+    --payload '{"habitat": "volcano"}' \
+    --context "discovered in the southern volcanic chain" \
+  | jq -r .id)
+
+# Make it searchable. Keyword and semantic are independent — pick one or both.
+grimoire index keyword "$ID" --text "phoenix fire-bird ashes"
+grimoire index semantic "$ID" --text "A solar phoenix reborn from its own ashes at dawn"
 
 # Search.
-grimoire search "celestial events"
-grimoire search "dragon" --mode keyword
+grimoire search semantic "creatures that come back from the dead"
+grimoire search keyword "phoenix"
 
-# List chronologically; each id IS its own pagination cursor.
-grimoire query --limit 50
+# Browse chronologically; each id IS its own cursor.
+grimoire fetch --limit 50
 
-# Inspect the file (model, dimension, entry count, per-group counts).
-grimoire
+# Inspect the database — model, dimension, schema version, counts, file size.
+grimoire info
 ```
 
-All read commands print one JSON object per line when piped or with `--raw`; pretty tables at the terminal. Pipe through `jq` for filtering.
+Every command prints pretty-indented JSON. Pipe through `jq` for filtering and extraction.
 
 ## Commands
 
-### Top-level
+### Mount administration
 
-#### `grimoire` *(no subcommand)*
+#### `grimoire mount create`
 
-Print metadata for the default database in the mount — model, dimension, schema version, entry count, per-group counts. Exits non-zero if no database exists at `<mount>/grimoire.db`.
+Create the mount directory, shared `__models__/` cache, and the default database. Idempotent — safe to re-run. Loads the default embedder on first create to write the embedder lock.
 
-```sh
-grimoire
-grimoire --mount /path/to/mount
-grimoire --raw                 # force JSONL output at TTY
-```
+#### `grimoire mount destroy --yes`
 
-#### `grimoire mount [--model M]`
+Wipe the entire mount: every database, the model cache, the registry. There is no undo. `--yes` is required.
 
-Set up the mount and its default database. Creates the mount directory and shared `models/` cache if missing, creates the default database at `<mount>/grimoire.db` if missing, then prints the same JSONL listing as `grimoire ls`. Idempotent — re-running on a mount whose default database already exists skips the embedder load entirely. `--model` is consulted only on first create; passing it against an existing database whose locked model differs is an error.
+#### `grimoire mount add <name>`
 
-#### `grimoire mount destroy [--yes]`
+Create a named database in the mount. Errors if the database already exists. The mount itself must already exist (run `mount create` first).
 
-Wipe the entire mount: every database, the manifest, the model cache. There is no undo. Use `grimoire destroy [NAME]` for per-database removal.
+#### `grimoire mount ls`
 
-#### `grimoire create <name> [--model M] [--description D]`
+List databases in the mount as a JSON array of `{"name": <str|null>, "path": <str>}`. The default DB appears first with `name: null`; named DBs follow alphabetically.
 
-Create a new named database in the mount. Strict: errors if a database with this name already exists. The mount directory and shared model cache are created on demand if missing — no need to run `grimoire mount` first when you only want named DBs. `--description` is recorded in the manifest.
+#### `grimoire mount remove <name> --yes`
 
-#### `grimoire ls`
+Delete a single named database file from the mount. The model cache and other databases are preserved. `--yes` is required.
 
-List databases in the mount. Default database (if present) is listed first, then named databases in alphabetical order. Pretty table at the terminal; JSONL when piped or with `--raw` — one object per database (`name` is `null` for the default).
+### Database inspection
 
-#### `grimoire destroy [name] [--yes]`
+#### `grimoire info [--name <name>]`
 
-Delete a single database from the mount. Without `NAME`, drops the default database at `<mount>/grimoire.db`. With `NAME`, drops `<mount>/<name>/grimoire.db` and removes its manifest entry. Idempotent — missing files or manifest entries are tolerated.
+Show metadata for a database: embedder lock (`model`, `dimension`), `schema_version`, `entry_count`, per-group and per-partition counts, file path, file size. Does not load the embedder.
 
-### Reading
+#### `grimoire fetch [filters] [--cursor <id>] [--limit <n>]`
 
-#### `grimoire query [filters/paging]`
-
-List entries chronologically with optional filters and ULID-cursor paging.
+List entries chronologically, with optional filters and ULID-cursor paging.
 
 | Option | Behavior |
 |---|---|
-| `--db NAME` | Target a named DB. Omit for the default. |
-| `--group-key K` | Filter to entries with this `group_key`. |
-| `--group-ref R` | Filter to entries with this `group_ref`. |
-| `--after ISO` | ISO 8601 lower bound on entry creation time (inclusive). |
-| `--before ISO` | ISO 8601 upper bound on entry creation time (exclusive). |
-| `--cursor ID` | Return entries with `id > this`. The id of the last entry from the previous page. |
-| `--limit N` | Maximum number of entries to return (default 100). |
-
-The id IS the cursor — ULIDs sort lexicographically by creation time, so `id > cursor` walks the next page in chronological order without a separate cursor type:
+| `--name`, `-n` | Target a named DB. Omit for the default. |
+| `--id` | Filter to entries with this id. Repeatable. |
+| `--group-key` | Filter to entries with this `group_key`. Repeatable. |
+| `--group-ref` | Filter to entries with this `group_ref`. Repeatable. |
+| `--cursor` | Return entries with `id > <cursor>`. Pass the last id of the previous page. |
+| `--limit` | Maximum entries to return (default 100). |
 
 ```sh
-LAST=$(grimoire query --limit 100 | tail -1 | jq -r .id)
-grimoire query --limit 100 --cursor "$LAST"
+LAST=$(grimoire fetch --limit 100 | jq -r '.[-1].id')
+grimoire fetch --limit 100 --cursor "$LAST"
 ```
 
-#### `grimoire search "QUERY" [--mode MODE] [filters]`
+### Entry CRUD
 
-Run a vector or keyword search against a database.
+#### `grimoire entry add [options]`
+
+Create an entry. The entry is not searchable until indexed via `grimoire index keyword` or `grimoire index semantic`.
 
 | Option | Behavior |
 |---|---|
-| `--mode {vector,keyword}` | `vector` (default) for semantic similarity; `keyword` for FTS5 BM25. |
-| `--db NAME` | Target a named DB. |
-| `--group-key K` | Filter to entries with this `group_key`. |
-| `--after ISO` | Lower bound on creation time (inclusive). |
-| `--before ISO` | Upper bound on creation time (exclusive). |
-| `-k`, `--k N` | Number of results to return (default 10). |
-| `--dynamic-threshold` | Filter results by each entry's stored similarity threshold. Vector mode only. |
+| `--name`, `-n` | Target a named DB. |
+| `--group-key` | Group key metadata. |
+| `--group-ref` | External reference id within the group. |
+| `--context` | Unindexed contextual prose (not searched). |
+| `--payload` | JSON object string. |
 
-Time filters and `--dynamic-threshold` apply **after** the vector KNN's top-k — narrow windows or tight thresholds can return fewer than `k` results. Raise `-k` to compensate. `search` returns top-`k` by score, so paging doesn't apply.
+`(group_key, group_ref)` collisions raise an error.
 
-The `keyword` mode accepts FTS5 syntax — phrases (`"exact phrase"`), prefix (`fire*`), boolean operators (`phoenix OR wyrm NOT egg`).
+#### `grimoire entry update <id> [options] [--put]`
 
-### Writing entries
+Update `group_key`, `group_ref`, `payload`, and `context` on an entry. Default is partial-update: unspecified fields keep their current value. Pass `--put` to switch to replace mode — any field not given on the command line is set to NULL.
 
-#### `grimoire entry add [VECTOR_TEXT] [--keyword-text KT] [options]`
+Indexing fields (`keyword_text`, `threshold_rank`, `semantic_text`, `partition`, `threshold_distance`) are not entry fields; change them by re-running `grimoire index keyword` or `grimoire index semantic`.
 
-Add a single entry. `VECTOR_TEXT` is an optional positional — pass it for the common case of an entry whose meaning is its prose. Both `vector_text` and `keyword_text` are independent: pass either, both, or neither.
+#### `grimoire entry get <id>`
+
+Fetch a single entry by id.
+
+#### `grimoire entry delete <id> --yes`
+
+Delete an entry, cascading to its FTS and vec rows. `--yes` is required.
+
+### Indexing
+
+#### `grimoire index keyword <id> --text <text> [--threshold-rank <n>]`
+
+Index (or re-index) an entry's keyword text for FTS5 BM25 search. Replaces any existing FTS row on the same id. `--threshold-rank` is stored on the row and surfaced on hits.
+
+#### `grimoire index keyword <id> --delete`
+
+Remove the entry's FTS row. The entry itself is not affected.
+
+#### `grimoire index semantic <id> --text <text> [--partition <p>] [--threshold-distance <n>]`
+
+Embed (or re-embed) an entry's semantic text into the given vec0 partition. Replaces any existing vec row on the same id — useful for moving the entry between partitions. `--threshold-distance` is stored on the row and surfaced on hits.
+
+#### `grimoire index semantic <id> --delete`
+
+Remove the entry's vec row. The entry itself is not affected.
+
+### Searching
+
+#### `grimoire search keyword <query> [filters] [--limit <n>]`
+
+FTS5 BM25 search. Free-form prose is tokenized into safe FTS5 syntax automatically: each word token is quoted and joined with `OR`, so apostrophes, punctuation, and bareword FTS5 operators (`AND`, `OR`, `NOT`, `NEAR`, `*`) in the query can't reach the parser.
 
 | Option | Behavior |
 |---|---|
-| *(positional)* | The `vector_text` — embedded for `vector_search`. Omit to skip the vector index. |
-| `--keyword-text TEXT` | Free-form text indexed for FTS5 BM25. Omit to skip the keyword index. |
-| `--db NAME` | Target a named DB. |
-| `--group-key K` | Group label for partitioning. |
-| `--group-ref R` | Consumer-set unique reference within the group. Collisions on `(group_key, group_ref)` raise an error. |
-| `--payload JSON` | JSON object to attach as the entry payload. |
-| `--threshold N` | Per-entry similarity threshold for `--dynamic-threshold` searches. |
+| `--name`, `-n` | Target a named DB. |
+| `--id` | Restrict hits to these ids. Repeatable. |
+| `--group-key` | Restrict hits to these group keys. Repeatable. |
+| `--group-ref` | Restrict hits to these group refs. Repeatable. |
+| `--limit` | Maximum hits (default 10). |
 
-```sh
-grimoire entry add "the moon is full tonight"
-grimoire entry add "dragons fly at midnight" \
-    --keyword-text "dragon midnight flight" \
-    --group-key tale --group-ref dragon-001 \
-    --payload '{"era": "third age"}' \
-    --threshold 0.6
-grimoire entry add --keyword-text "phoenix fire-bird" --payload '{"id": "p001"}'
-```
+Returns hits with the entry, `keyword_text`, `threshold_rank`, and `rank` (the BM25 score; higher = better, non-negative).
 
-The last form creates a payload-only entry: no vector_text, no FTS prose, just structured data addressable by `--group-ref` and findable by the `--keyword-text` tokens.
+#### `grimoire search semantic <query> [--partition <p>] [--limit <n>]`
 
-#### `grimoire entry update <entry_id> [--payload JSON | --clear-payload] [--threshold N | --clear-threshold]`
+vec0 KNN search. Embeds the query via the bundled embedder, then ranks by vector distance.
 
-Patch the mutable metadata fields on an entry. **Only `payload` and `threshold` are mutable.** The indexed and identity fields (`vector_text`, `keyword_text`, `group_key`, `group_ref`) are immutable after creation — to change them, delete the entry and add a fresh one.
+| Option | Behavior |
+|---|---|
+| `--name`, `-n` | Target a named DB. |
+| `--partition` | Restrict KNN to this partition. Omit to span every partition. |
+| `--limit` | Maximum hits (default 10). |
 
-Omit a field to leave it alone; pass the value to replace it; pass the matching `--clear-*` flag to set it to `NULL`. Value and clear flags are mutually exclusive.
+Returns hits with the entry, `semantic_text`, `threshold_distance`, and `distance` (lower = better, non-negative).
 
-```sh
-grimoire entry update 01HXXXXXXXXXXXXXXXXXXXXXXX --payload '{"updated": true}'
-grimoire entry update 01HXXXXXXXXXXXXXXXXXXXXXXX --clear-threshold
-```
+### MCP server
 
-#### `grimoire entry get <entry_id>`
+#### `grimoire mcp serve`
 
-Fetch a single entry by id. Pretty key-value at the terminal; JSON when piped or with `--raw`.
+Run a FastMCP server over stdio, scoped to this mount. Wires the same read+write surface as the CLI into MCP tools that an AI client can call directly. Mount administration (`mount create/destroy/add/remove`) stays CLI-only.
 
-#### `grimoire entry delete <entry_id>`
+Tools exposed: `info`, `fetch`, `entry_get`, `entry_add`, `entry_update`, `entry_delete`, `index_keyword`, `index_semantic`, `search_keyword`, `search_semantic`.
 
-Delete an entry by id, including its vector and FTS index rows.
+## Output format
 
-### Bulk import / export
-
-#### `grimoire entry import <jsonl-file> [--db NAME]`
-
-Bulk-import records into a database from a JSONL file. Additive: records are appended to the existing database. Collisions on `(group_key, group_ref)` raise an error and abort the import — the file must be free of conflicts with existing records, or the conflicting records must be removed first.
-
-#### `grimoire entry export [-o PATH] [--force] [--db NAME]`
-
-Export every entry in a database to a JSONL file. Defaults to `<mount>/export.jsonl`. Refuses to overwrite an existing file unless `--force` is set.
-
-The output format mirrors `import`'s expected input — entries can be round-tripped (`vector_text`, `keyword_text`, `group_key`, `group_ref`, `payload`, and `threshold` are preserved). Ids are NOT preserved on round-trip; they're grimoire-assigned and re-imported records get fresh ULIDs.
-
-## JSONL format
-
-One object per line. Every field is optional. `vector_text` is the text grimoire embeds for `vector_search`; `keyword_text` is the text grimoire indexes for `keyword_search`; `payload` is the structured object returned alongside a match.
-
-```jsonl
-{"group_key": "creature", "group_ref": "phoenix-001", "vector_text": "A solar phoenix reborn from its own ashes", "keyword_text": "phoenix fire-bird ashes", "payload": {"habitat": "volcano"}}
-{"group_key": "creature", "group_ref": "wyrm-014", "vector_text": "An ancient wyrm hoarding obsidian in the Ash Peaks", "payload": {"habitat": "mountain"}, "threshold": 0.5}
-{"group_key": "creature", "group_ref": "p001", "keyword_text": "phantom wraith specter", "payload": {"id": "p001"}}
-```
-
-Three valid shapes shown above: vector + keyword (full record), vector-only (no FTS hit), keyword-only (no embedding). A record with neither `vector_text` nor `keyword_text` is also valid — it's a payload-only entry, addressable by id / `group_ref` / `query`.
-
-## Output conventions
-
-Read commands (`query`, `search`, `entry get`, `ls`, bare `grimoire`) auto-detect output mode:
-
-- **Pretty** at a TTY — Rich tables for collections, key-value blocks for single records.
-- **JSONL** when piped — one JSON object per line, suitable for `jq` and downstream processing.
-- **`--raw`** — force JSONL at the terminal. Useful for inspecting the raw shape interactively.
-
-Write commands (`entry add`, `entry update`) print the resulting entry in the same auto-detected mode.
+Every command prints pretty-indented JSON to stdout. There is no table mode, no `--raw`, no auto-detect — JSON in, JSON out, pipe to `jq` to slice. Errors go to stderr via Typer's standard messaging.
 
 ## Environment variables
 
@@ -228,7 +215,7 @@ Write commands (`entry add`, `entry update`) print the resulting entry in the sa
 
 ## Schema notes
 
-Pre-v1, schema changes are not migrated in place. The library checks `PRAGMA user_version` against its expected `SCHEMA_VERSION` on every open; mismatches raise `SchemaVersionError`. The intended response is to `entry export` from the old grimoire on the older library version, upgrade, then `entry import` into a freshly created grimoire. Migration ergonomics get designed once v1 is on the table.
+Pre-v1, schema changes are not migrated in place. The library checks `PRAGMA user_version` against its expected `SCHEMA_VERSION` on every open; mismatches raise `SchemaVersionError`. Recreate the file (and re-index its contents) when this happens. Migration ergonomics get designed once v1 is on the table.
 
 ## Uninstall
 
