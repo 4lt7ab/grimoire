@@ -41,6 +41,14 @@ index_app = typer.Typer(
 )
 app.add_typer(index_app)
 
+search_app = typer.Typer(
+    name="search",
+    no_args_is_help=True,
+    add_completion=False,
+    help="Search a database — keyword (FTS5 BM25) or semantic (vec0 KNN).",
+)
+app.add_typer(search_app)
+
 
 @app.callback()
 def main(
@@ -563,36 +571,37 @@ def index_semantic_cmd(
             typer.echo(json.dumps(result, indent=2, default=str))
 
 
-@app.command(name="search")
-def search_cmd(
+@search_app.command(name="keyword")
+def search_keyword_cmd(
     ctx: typer.Context,
     query: Annotated[
         str,
-        typer.Argument(help="Search query — embedded for semantic, parsed as FTS5 for keyword."),
+        typer.Argument(help="Search query — parsed as FTS5."),
     ],
     name: Annotated[
         str | None,
         typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
     ] = None,
-    group_key: Annotated[
-        str | None,
-        typer.Option("--group-key", help="Filter keyword hits by this group_key metadata value."),
+    group_keys: Annotated[
+        list[str] | None,
+        typer.Option("--group-key", help="Filter to entries with these group keys. Repeatable."),
     ] = None,
-    partition: Annotated[
-        str | None,
-        typer.Option("--partition", help="Restrict semantic hits to this vec partition. Omit to search every partition."),
+    group_refs: Annotated[
+        list[str] | None,
+        typer.Option("--group-ref", help="Filter to entries with these group refs. Repeatable."),
+    ] = None,
+    ids: Annotated[
+        list[str] | None,
+        typer.Option("--id", help="Filter to entries with these ids. Repeatable."),
     ] = None,
     limit: Annotated[
         int,
-        typer.Option("--limit", help="Maximum hits per mode.", min=0),
+        typer.Option("--limit", help="Maximum hits.", min=0),
     ] = 10,
 ) -> None:
-    """Search a database — runs both keyword (FTS5 BM25) and semantic (vector) modes.
+    """Keyword search via FTS5 BM25, with full filter support (group_key, group_ref, id).
 
-    `rank` is the BM25 score (higher = better, non-negative). `distance` is the
-    raw vector distance (lower = better, non-negative). The query is treated as
-    natural language — punctuation and FTS5 operators are stripped from the
-    keyword pass.
+    `rank` is the BM25 score (higher = better, non-negative).
     """
     mnt = _existing_mount(ctx)
 
@@ -604,37 +613,78 @@ def search_cmd(
         target = f"database {name!r}" if name else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
-    filters = Filters(group_key=[group_key] if group_key else None)
-    # Quote-wrap each word token so apostrophes, punctuation, and bareword
-    # FTS5 operators (AND/OR/NOT/NEAR/*) can't reach the parser. Join with
-    # OR so casual prose matches any-of, not all-of; BM25 still ranks by
-    # aggregate match strength.
+    filters = Filters(
+        id=ids or None,
+        group_key=group_keys or None,
+        group_ref=group_refs or None,
+    )
+    # Quote-wrap each word token so apostrophes, punctuation, and bareword FTS5
+    # operators (AND/OR/NOT/NEAR/*) can't reach the parser. Join with OR so
+    # casual prose matches any-of, not all-of; BM25 still ranks by aggregate
+    # match strength.
     fts_query = " OR ".join(f'"{t}"' for t in re.findall(r"\w+", query))
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
-        kw_hits = g.keyword_search(fts_query, filters=filters, limit=limit) if fts_query else []
-        sem_hits = g.semantic_search(query, partition=partition, limit=limit)
+        hits = g.keyword_search(fts_query, filters=filters, limit=limit) if fts_query else []
 
-    result = {
-        "keyword": [
-            {
-                "entry": asdict(h.entry),
-                "keyword_text": h.keyword_text,
-                "threshold_rank": h.threshold_rank,
-                "rank": h.score,
-            }
-            for h in kw_hits
-        ],
-        "semantic": [
-            {
-                "entry": asdict(h.entry),
-                "semantic_text": h.semantic_text,
-                "threshold_distance": h.threshold_distance,
-                "distance": h.distance,
-            }
-            for h in sem_hits
-        ],
-    }
+    result = [
+        {
+            "entry": asdict(h.entry),
+            "keyword_text": h.keyword_text,
+            "threshold_rank": h.threshold_rank,
+            "rank": h.score,
+        }
+        for h in hits
+    ]
+    typer.echo(json.dumps(result, indent=2, default=str))
+
+
+@search_app.command(name="semantic")
+def search_semantic_cmd(
+    ctx: typer.Context,
+    query: Annotated[
+        str,
+        typer.Argument(help="Search query — embedded for vec0 KNN."),
+    ],
+    name: Annotated[
+        str | None,
+        typer.Option("--name", "-n", help="Database name (default DB if omitted)."),
+    ] = None,
+    partition: Annotated[
+        str | None,
+        typer.Option("--partition", help="Restrict semantic hits to this vec partition. Omit to search every partition."),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", help="Maximum hits.", min=0),
+    ] = 10,
+) -> None:
+    """Semantic search via vec0 KNN, narrowable by partition.
+
+    `distance` is the raw vector distance (lower = better, non-negative).
+    """
+    mnt = _existing_mount(ctx)
+
+    try:
+        db_path = mnt.db_path(name)
+    except ValueError as e:
+        raise typer.BadParameter(str(e)) from e
+    if not db_path.exists():
+        target = f"database {name!r}" if name else "default database"
+        raise typer.BadParameter(f"No {target} in the mount.")
+
+    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+        hits = g.semantic_search(query, partition=partition, limit=limit)
+
+    result = [
+        {
+            "entry": asdict(h.entry),
+            "semantic_text": h.semantic_text,
+            "threshold_distance": h.threshold_distance,
+            "distance": h.distance,
+        }
+        for h in hits
+    ]
     typer.echo(json.dumps(result, indent=2, default=str))
 
 
