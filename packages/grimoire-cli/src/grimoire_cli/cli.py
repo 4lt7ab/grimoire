@@ -299,9 +299,11 @@ def entry_add_cmd(
                 ]
             )
             if keyword_text is not None:
-                g.keyword([(created.id, keyword_text)], threshold_rank=threshold_rank)
+                [created] = g.keyword(
+                    [(created.id, keyword_text)], threshold_rank=threshold_rank
+                )
             if semantic_text is not None:
-                g.embed(
+                [created] = g.embed(
                     [(created.id, semantic_text)],
                     partition=partition,
                     threshold_distance=threshold_distance,
@@ -449,7 +451,9 @@ def entry_update_cmd(
         try:
             [returned] = g.update([merged])
             if keyword_text is not None:
-                g.keyword([(returned.id, keyword_text)], threshold_rank=threshold_rank)
+                g.keyword(
+                    [(returned.id, keyword_text)], threshold_rank=threshold_rank
+                )
             if semantic_text is not None:
                 g.embed(
                     [(returned.id, semantic_text)],
@@ -458,6 +462,8 @@ def entry_update_cmd(
                 )
         except ValueError as e:
             raise typer.BadParameter(str(e)) from e
+
+        [returned] = g.fetch(Filters(id=[returned.id]), limit=1)
 
     typer.echo(json.dumps(asdict(returned), indent=2, default=str))
 
@@ -668,13 +674,7 @@ def search_keyword_cmd(
         )
 
     result = [
-        {
-            "entry": asdict(h.entry),
-            "keyword_text": h.keyword_text,
-            "threshold_rank": h.threshold_rank,
-            "rank": h.score,
-        }
-        for h in hits
+        {"entry": asdict(h.entry), "rank": h.score} for h in hits
     ]
     typer.echo(json.dumps(result, indent=2, default=str))
 
@@ -723,13 +723,7 @@ def search_semantic_cmd(
         hits = g.semantic_search(query, partition=partition, limit=limit)
 
     result = [
-        {
-            "entry": asdict(h.entry),
-            "semantic_text": h.semantic_text,
-            "threshold_distance": h.threshold_distance,
-            "distance": h.distance,
-        }
-        for h in hits
+        {"entry": asdict(h.entry), "distance": h.distance} for h in hits
     ]
     typer.echo(json.dumps(result, indent=2, default=str))
 

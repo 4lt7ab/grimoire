@@ -99,7 +99,7 @@ def test_fetch_cursor_returns_entries_after_cursor(tmp_path, fake_embedder):
     ids = [e.id for e in saved]
 
     page = g.fetch(limit=10, cursor=ids[1])
-    assert [e.id for e in page] == ids[2:]
+    assert [r.id for r in page] == ids[2:]
 
 
 def test_fetch_cursor_past_end_returns_empty(tmp_path, fake_embedder):
@@ -119,7 +119,65 @@ def test_fetch_cursor_combines_with_filters(tmp_path, fake_embedder):
         filters=Filters(group_key=["wizard"]),
         cursor=wizards[0].id,
     )
-    assert [e.id for e in page] == [wizards[1].id, wizards[2].id]
+    assert [r.id for r in page] == [wizards[1].id, wizards[2].id]
+
+
+def test_fetch_unindexed_entry_has_null_index_fields(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    [saved] = g.add([Entry(None, "tale", "ref", {"k": "v"}, "ctx")])
+
+    [row] = g.fetch()
+    assert row.id == saved.id
+    assert row.payload == {"k": "v"}
+    assert row.keyword_text is None
+    assert row.threshold_rank is None
+    assert row.semantic_text is None
+    assert row.partition is None
+    assert row.threshold_distance is None
+
+
+def test_fetch_surfaces_keyword_fields(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    [saved] = g.add([Entry(None, None, None, None)])
+    g.keyword([(saved.id, "moon glow")], threshold_rank=0.5)
+
+    [row] = g.fetch()
+    assert row.id == saved.id
+    assert row.keyword_text == "moon glow"
+    assert row.threshold_rank == 0.5
+    assert row.semantic_text is None
+    assert row.partition is None
+
+
+def test_fetch_surfaces_semantic_fields(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    [saved] = g.add([Entry(None, None, None, None)])
+    g.embed(
+        [(saved.id, "the moon glows")],
+        partition="alpha",
+        threshold_distance=0.75,
+    )
+
+    [row] = g.fetch()
+    assert row.id == saved.id
+    assert row.semantic_text == "the moon glows"
+    assert row.partition == "alpha"
+    assert row.threshold_distance == 0.75
+    assert row.keyword_text is None
+    assert row.threshold_rank is None
+
+
+def test_fetch_surfaces_both_index_sides(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    [saved] = g.add([Entry(None, None, None, None)])
+    g.keyword([(saved.id, "kw")])
+    g.embed([(saved.id, "sem")], partition="p")
+
+    [row] = g.fetch()
+    assert row.id == saved.id
+    assert row.keyword_text == "kw"
+    assert row.semantic_text == "sem"
+    assert row.partition == "p"
 
 
 def test_add_rejects_self_colliding_batch(tmp_path, fake_embedder):
@@ -258,7 +316,7 @@ def test_keyword_indexes_for_match(tmp_path, fake_embedder):
 
     hits = g.keyword_search("moon")
     assert [h.entry.id for h in hits] == [saved.id]
-    assert hits[0].keyword_text == "the moon glows brightly"
+    assert hits[0].entry.keyword_text == "the moon glows brightly"
 
 
 def test_keyword_replaces_text_on_reindex(tmp_path, fake_embedder):
@@ -295,7 +353,7 @@ def test_keyword_stores_threshold_rank(tmp_path, fake_embedder):
     g.keyword([(saved.id, "hello")], threshold_rank=0.25)
 
     hits = g.keyword_search("hello")
-    assert [h.threshold_rank for h in hits] == [0.25]
+    assert [h.entry.threshold_rank for h in hits] == [0.25]
 
 
 def test_keyword_remove_deletes_fts_row(tmp_path, fake_embedder):
@@ -321,10 +379,10 @@ def test_keyword_remove_leaves_entry_intact(tmp_path, fake_embedder):
 
     g.keyword_remove([saved.id])
 
-    [entry_after] = g.fetch()
-    assert entry_after.id == saved.id
-    assert entry_after.group_key == "tale"
-    assert entry_after.payload == {"k": "v"}
+    [row] = g.fetch()
+    assert row.id == saved.id
+    assert row.group_key == "tale"
+    assert row.payload == {"k": "v"}
 
 
 def test_embed_remove_deletes_vec_row(tmp_path, fake_embedder):
@@ -350,10 +408,10 @@ def test_embed_remove_leaves_entry_intact(tmp_path, fake_embedder):
 
     g.embed_remove([saved.id])
 
-    [entry_after] = g.fetch()
-    assert entry_after.id == saved.id
-    assert entry_after.group_key == "tale"
-    assert entry_after.payload == {"k": "v"}
+    [row] = g.fetch()
+    assert row.id == saved.id
+    assert row.group_key == "tale"
+    assert row.payload == {"k": "v"}
 
 
 def test_embed_stores_threshold_distance(tmp_path, fake_embedder):
@@ -363,7 +421,7 @@ def test_embed_stores_threshold_distance(tmp_path, fake_embedder):
     g.embed([(saved.id, "hello")], threshold_distance=0.75)
 
     hits = g.semantic_search("hello")
-    assert [h.threshold_distance for h in hits] == [0.75]
+    assert [h.entry.threshold_distance for h in hits] == [0.75]
 
 
 def test_remove_cascades_to_fts_and_vec(tmp_path, fake_embedder):
@@ -470,7 +528,7 @@ def test_semantic_search_surfaces_semantic_text(tmp_path, fake_embedder):
     hits = g.semantic_search("moon")
     assert len(hits) == 1
     assert hits[0].entry.id == saved.id
-    assert hits[0].semantic_text == "the moon glows"
+    assert hits[0].entry.semantic_text == "the moon glows"
 
 
 def test_semantic_search_uses_embed_not_embed_many(tmp_path, fake_embedder):

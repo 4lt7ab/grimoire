@@ -71,6 +71,10 @@ def build_server(mnt: mount.Mount) -> FastMCP:
     ) -> list[dict[str, Any]]:
         """Fetch entries matching the given filters, ordered chronologically by id.
 
+        Each entry carries its FTS5 (`keyword_text`, `threshold_rank`) and
+        vec0 (`semantic_text`, `partition`, `threshold_distance`) index
+        fields inline — null when the entry isn't indexed on that side.
+
         For paging, pass `cursor` set to the last entry's id from the previous
         page. ULIDs sort lexicographically by creation time, so cursor paging
         walks entries in the order they were added.
@@ -136,9 +140,11 @@ def build_server(mnt: mount.Mount) -> FastMCP:
                 ]
             )
             if keyword_text is not None:
-                g.keyword([(created.id, keyword_text)], threshold_rank=threshold_rank)
+                [created] = g.keyword(
+                    [(created.id, keyword_text)], threshold_rank=threshold_rank
+                )
             if semantic_text is not None:
-                g.embed(
+                [created] = g.embed(
                     [(created.id, semantic_text)],
                     partition=partition,
                     threshold_distance=threshold_distance,
@@ -205,13 +211,17 @@ def build_server(mnt: mount.Mount) -> FastMCP:
 
             [returned] = g.update([merged])
             if keyword_text is not None:
-                g.keyword([(returned.id, keyword_text)], threshold_rank=threshold_rank)
+                g.keyword(
+                    [(returned.id, keyword_text)], threshold_rank=threshold_rank
+                )
             if semantic_text is not None:
                 g.embed(
                     [(returned.id, semantic_text)],
                     partition=partition,
                     threshold_distance=threshold_distance,
                 )
+
+            [returned] = g.fetch(Filters(id=[returned.id]), limit=1)
         return asdict(returned)
 
     @mcp.tool
@@ -255,15 +265,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
 
         with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             hits = g.keyword_search(fts_query, filters=filters, limit=limit)
-        return [
-            {
-                "entry": asdict(h.entry),
-                "keyword_text": h.keyword_text,
-                "threshold_rank": h.threshold_rank,
-                "rank": h.score,
-            }
-            for h in hits
-        ]
+        return [{"entry": asdict(h.entry), "rank": h.score} for h in hits]
 
     @mcp.tool
     def search_semantic(
@@ -279,14 +281,6 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         db_path = _resolve_db(mnt, db)
         with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             hits = g.semantic_search(query, partition=partition, limit=limit)
-        return [
-            {
-                "entry": asdict(h.entry),
-                "semantic_text": h.semantic_text,
-                "threshold_distance": h.threshold_distance,
-                "distance": h.distance,
-            }
-            for h in hits
-        ]
+        return [{"entry": asdict(h.entry), "distance": h.distance} for h in hits]
 
     return mcp

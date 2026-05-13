@@ -15,21 +15,22 @@ class Entry:
     group_ref: str | None
     payload: dict[str, Any] | None
     context: str | None = None
+    keyword_text: str | None = None
+    threshold_rank: float | None = None
+    semantic_text: str | None = None
+    partition: str | None = None
+    threshold_distance: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class KeywordHit:
     entry: Entry
-    keyword_text: str | None
-    threshold_rank: float | None
     score: float
 
 
 @dataclass(frozen=True, slots=True)
 class SemanticHit:
     entry: Entry
-    semantic_text: str | None
-    threshold_distance: float | None
     distance: float
 
 
@@ -40,6 +41,11 @@ def _row_to_entry(r: sqlite3.Row) -> Entry:
         group_ref=r["group_ref"],
         payload=json.loads(r["payload"]) if r["payload"] is not None else None,
         context=r["context"],
+        keyword_text=r["keyword_text"],
+        threshold_rank=r["threshold_rank"],
+        semantic_text=r["semantic_text"],
+        partition=r["vec_partition"],
+        threshold_distance=r["threshold_distance"],
     )
 
 
@@ -160,16 +166,7 @@ def keyword(
         [(id_, text, threshold_rank) for id_, text in items],
     )
 
-    cur = conn.execute(
-        _FETCH_SQL,
-        {
-            "ids": json.dumps(ids),
-            "group_keys": None,
-            "group_refs": None,
-            "cursor": None,
-        },
-    )
-    return [_row_to_entry(r) for r in cur]
+    return fetch(conn, Filters(id=ids), limit=len(ids))
 
 
 def embed(
@@ -202,16 +199,7 @@ def embed(
         ],
     )
 
-    cur = conn.execute(
-        _FETCH_SQL,
-        {
-            "ids": json.dumps(ids),
-            "group_keys": None,
-            "group_refs": None,
-            "cursor": None,
-        },
-    )
-    return [_row_to_entry(r) for r in cur]
+    return fetch(conn, Filters(id=ids), limit=len(ids))
 
 
 def update(
@@ -276,13 +264,21 @@ class Filters:
 
 
 _FETCH_SQL = """
-SELECT id, group_key, group_ref, payload, context
-FROM entry
-WHERE (:ids IS NULL OR id IN (SELECT value FROM json_each(:ids)))
-  AND (:group_keys IS NULL OR group_key IN (SELECT value FROM json_each(:group_keys)))
-  AND (:group_refs IS NULL OR group_ref IN (SELECT value FROM json_each(:group_refs)))
-  AND (:cursor IS NULL OR id > :cursor)
-ORDER BY id
+SELECT e.id, e.group_key, e.group_ref, e.payload, e.context,
+       fts.keyword_text AS keyword_text,
+       fts.threshold_rank AS threshold_rank,
+       v.semantic_text AS semantic_text,
+       v.partition AS vec_partition,
+       v.threshold_distance AS threshold_distance
+FROM entry e
+LEFT JOIN entry_fts fts ON fts.entry_id = e.id
+LEFT JOIN entry_vec v ON v.id = e.id
+WHERE (:ids IS NULL OR e.id IN (SELECT value FROM json_each(:ids)))
+  AND (:group_keys IS NULL OR e.group_key IN (SELECT value FROM json_each(:group_keys)))
+  AND (:group_refs IS NULL OR e.group_ref IN (SELECT value FROM json_each(:group_refs)))
+  AND (:cursor IS NULL OR e.id > :cursor)
+ORDER BY e.id
+LIMIT :limit
 """
 
 
@@ -292,16 +288,17 @@ def fetch(
     limit: int = 100,
     cursor: str | None = None,
 ) -> list[Entry]:
-    """Fetch entries matching filters, ordered by id.
+    """Fetch entries with their FTS5 and vec0 index rows attached.
 
-    `cursor`, when given, returns entries with `id > cursor` — the id of the
-    last entry from the previous page. ULIDs sort lexicographically by
-    creation time, so this gives chronological paging without a separate
-    cursor type.
+    Rows come back ordered by id (chronologically, since ids are ULIDs).
+    Entries with no keyword or semantic index row come back with the
+    corresponding fields set to None. `cursor`, when given, returns entries
+    with `id > cursor` — pass the id of the last entry from the previous
+    page to walk forward.
     """
     f = filters or Filters()
     cur = conn.execute(
-        _FETCH_SQL + "\nLIMIT :limit",
+        _FETCH_SQL,
         {
             "ids": json.dumps(f.id) if f.id else None,
             "group_keys": json.dumps(f.group_key) if f.group_key else None,
@@ -311,21 +308,6 @@ def fetch(
         },
     )
     return [_row_to_entry(r) for r in cur]
-
-
-_KEYWORD_SEARCH_SQL = """
-SELECT e.id, e.group_key, e.group_ref, e.payload, e.context,
-       entry_fts.keyword_text AS keyword_text,
-       entry_fts.threshold_rank AS threshold_rank,
-       -bm25(entry_fts) AS score
-FROM entry_fts
-JOIN entry e ON e.id = entry_fts.entry_id
-WHERE entry_fts MATCH :query
-  AND (:ids IS NULL OR e.id IN (SELECT value FROM json_each(:ids)))
-  AND (:group_keys IS NULL OR e.group_key IN (SELECT value FROM json_each(:group_keys)))
-  AND (:group_refs IS NULL OR e.group_ref IN (SELECT value FROM json_each(:group_refs)))
-ORDER BY bm25(entry_fts)
-"""
 
 
 def keyword_search(
@@ -338,7 +320,18 @@ def keyword_search(
         raise ValueError("search query must be non-empty")
 
     f = filters or Filters()
-    sql = _KEYWORD_SEARCH_SQL
+    sql = (
+        "SELECT entry_fts.entry_id AS id, -bm25(entry_fts) AS score "
+        "FROM entry_fts "
+        "JOIN entry e ON e.id = entry_fts.entry_id "
+        "WHERE entry_fts MATCH :query "
+        "  AND (:ids IS NULL OR e.id IN (SELECT value FROM json_each(:ids))) "
+        "  AND (:group_keys IS NULL OR e.group_key IN "
+        "       (SELECT value FROM json_each(:group_keys))) "
+        "  AND (:group_refs IS NULL OR e.group_ref IN "
+        "       (SELECT value FROM json_each(:group_refs))) "
+        "ORDER BY bm25(entry_fts)"
+    )
     params: dict[str, Any] = {
         "query": query,
         "ids": json.dumps(f.id) if f.id else None,
@@ -349,25 +342,22 @@ def keyword_search(
         sql = sql + "\nLIMIT :limit"
         params["limit"] = limit
 
-    cur = conn.execute(sql, params)
+    matches = conn.execute(sql, params).fetchall()
+    if not matches:
+        return []
+
+    ids_in_order = [r["id"] for r in matches]
+    entries_by_id = {
+        e.id: e for e in fetch(conn, Filters(id=ids_in_order), limit=len(ids_in_order))
+    }
     return [
-        KeywordHit(
-            entry=_row_to_entry(r),
-            keyword_text=r["keyword_text"],
-            threshold_rank=r["threshold_rank"],
-            score=r["score"],
-        )
-        for r in cur
+        KeywordHit(entry=entries_by_id[r["id"]], score=r["score"]) for r in matches
     ]
 
 
 _SEMANTIC_SEARCH_BY_PARTITION_SQL = """
-SELECT e.id, e.group_key, e.group_ref, e.payload, e.context,
-       v.semantic_text AS semantic_text,
-       v.threshold_distance AS threshold_distance,
-       v.distance AS distance
+SELECT v.id AS id, v.distance AS distance
 FROM entry_vec v
-JOIN entry e ON e.id = v.id
 WHERE v.embedding MATCH :query
   AND v.partition = :partition
   AND k = :k
@@ -375,12 +365,8 @@ ORDER BY v.distance
 """
 
 _SEMANTIC_SEARCH_ANY_PARTITION_SQL = """
-SELECT e.id, e.group_key, e.group_ref, e.payload, e.context,
-       v.semantic_text AS semantic_text,
-       v.threshold_distance AS threshold_distance,
-       v.distance AS distance
+SELECT v.id AS id, v.distance AS distance
 FROM entry_vec v
-JOIN entry e ON e.id = v.id
 WHERE v.embedding MATCH :query
   AND k = :k
 ORDER BY v.distance
@@ -410,13 +396,15 @@ def semantic_search(
             "k": limit,
         }
 
-    cur = conn.execute(sql, params)
+    matches = conn.execute(sql, params).fetchall()
+    if not matches:
+        return []
+
+    ids_in_order = [r["id"] for r in matches]
+    entries_by_id = {
+        e.id: e for e in fetch(conn, Filters(id=ids_in_order), limit=len(ids_in_order))
+    }
     return [
-        SemanticHit(
-            entry=_row_to_entry(r),
-            semantic_text=r["semantic_text"],
-            threshold_distance=r["threshold_distance"],
-            distance=r["distance"],
-        )
-        for r in cur
+        SemanticHit(entry=entries_by_id[r["id"]], distance=r["distance"])
+        for r in matches
     ]

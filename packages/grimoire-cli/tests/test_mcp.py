@@ -83,7 +83,7 @@ def test_entry_add_with_keyword_text_indexes_for_search(server):
     entry_id, hits = _run(_go())
     assert len(hits) == 1
     assert hits[0]["entry"]["id"] == entry_id
-    assert hits[0]["keyword_text"] == "phoenix arcane ember"
+    assert hits[0]["entry"]["keyword_text"] == "phoenix arcane ember"
 
 
 def test_entry_add_with_semantic_text_embeds_for_search(server):
@@ -101,7 +101,7 @@ def test_entry_add_with_semantic_text_embeds_for_search(server):
 
     entry_id, hits = _run(_go())
     assert any(h["entry"]["id"] == entry_id for h in hits)
-    assert any(h["semantic_text"] == "a solar phoenix reborn" for h in hits)
+    assert any(h["entry"]["semantic_text"] == "a solar phoenix reborn" for h in hits)
 
 
 def test_entry_update_replaces_keyword_text(server):
@@ -135,7 +135,7 @@ def test_entry_update_without_text_preserves_index(server):
 
     entry_id, hits = _run(_go())
     assert any(
-        h["entry"]["id"] == entry_id and h["keyword_text"] == "moon glow" for h in hits
+        h["entry"]["id"] == entry_id and h["entry"]["keyword_text"] == "moon glow" for h in hits
     )
 
 
@@ -157,6 +157,43 @@ def test_entry_update_partial_preserves_unspecified_fields(server):
     updated = _run(_go())
     assert updated["context"] == "new context"
     assert updated["group_key"] == "notes"
+
+
+def test_fetch_surfaces_keyword_and_semantic_index_fields(server):
+    async def _go():
+        async with Client(server) as client:
+            indexed = await client.call_tool(
+                "entry_add",
+                {
+                    "group_ref": "indexed",
+                    "keyword_text": "moon glow",
+                    "threshold_rank": 0.5,
+                    "semantic_text": "the moon glows",
+                    "partition": "night",
+                    "threshold_distance": 0.75,
+                },
+            )
+            await client.call_tool("entry_add", {"group_ref": "bare"})
+            rows = await client.call_tool("fetch", {})
+            return indexed.data["id"], rows.data
+
+    indexed_id, rows = _run(_go())
+    by_ref = {r["group_ref"]: r for r in rows}
+
+    indexed = by_ref["indexed"]
+    assert indexed["id"] == indexed_id
+    assert indexed["keyword_text"] == "moon glow"
+    assert indexed["threshold_rank"] == 0.5
+    assert indexed["semantic_text"] == "the moon glows"
+    assert indexed["partition"] == "night"
+    assert indexed["threshold_distance"] == 0.75
+
+    bare = by_ref["bare"]
+    assert bare["keyword_text"] is None
+    assert bare["threshold_rank"] is None
+    assert bare["semantic_text"] is None
+    assert bare["partition"] is None
+    assert bare["threshold_distance"] is None
 
 
 def test_entry_delete_idempotent(server):

@@ -55,6 +55,13 @@ class Grimoire:
         limit: int = 100,
         cursor: str | None = None,
     ) -> list[Entry]:
+        """Fetch entries with their FTS5 and vec0 index fields populated.
+
+        Entries with no keyword or semantic index row come back with the
+        corresponding fields set to None. ULIDs sort lexicographically by
+        creation time, so passing `cursor` set to the last entry's id from
+        the previous page walks entries chronologically.
+        """
         return entry.fetch(self._conn, filters, limit, cursor=cursor)
 
     def keyword_remove(self, ids: list[str]) -> list[str]:
