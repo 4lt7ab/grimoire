@@ -15,9 +15,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT_PATTERN = re.compile(r'^version = "(\d+)\.(\d+)\.(\d+)"', re.MULTILINE)
 PYPROJECT_TEMPLATE = 'version = "{major}.{minor}.{patch}"'
 
-PLUGIN_JSON_PATTERN = re.compile(r'"version": "(\d+)\.(\d+)\.(\d+)"')
-PLUGIN_JSON_TEMPLATE = '"version": "{major}.{minor}.{patch}"'
-
 
 @dataclass(frozen=True)
 class Target:
@@ -36,11 +33,6 @@ TARGETS: tuple[Target, ...] = (
         REPO_ROOT / "packages" / "grimoire-cli" / "pyproject.toml",
         PYPROJECT_PATTERN,
         PYPROJECT_TEMPLATE,
-    ),
-    Target(
-        REPO_ROOT / "plugin" / ".claude-plugin" / "plugin.json",
-        PLUGIN_JSON_PATTERN,
-        PLUGIN_JSON_TEMPLATE,
     ),
 )
 
