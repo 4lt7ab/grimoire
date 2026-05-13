@@ -26,6 +26,6 @@ Terms used across grimoire's code and docs, alphabetical.
 
 **Semantic index.** The `entry_vec` row holding the embedding, source text, partition, and `threshold_distance` for an entry. Written by `embed()`, removed by `embed_remove()`. An entry without a semantic index row is invisible to `semantic_search`.
 
-**`threshold_rank` / `threshold_distance`.** Per-row similarity gates stored alongside an index row. Surfaced on hits (`KeywordHit.threshold_rank`, `SemanticHit.threshold_distance`); the library does not auto-filter by them.
+**`threshold_rank` / `threshold_distance`.** Per-row similarity gates stored alongside an index row. Surfaced on the `Entry` returned with each hit (`hit.entry.threshold_rank` for keyword, `hit.entry.threshold_distance` for semantic); the library does not auto-filter by them.
 
 **ULID.** The id format grimoire assigns to every entry. Lexicographically sortable by creation time, which is how `fetch(cursor=...)` walks pages chronologically without a separate cursor column.

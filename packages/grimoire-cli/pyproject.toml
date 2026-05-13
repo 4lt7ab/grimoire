@@ -1,6 +1,6 @@
 [project]
 name = "4lt7ab-grimoire-cli"
-version = "0.0.16"
+version = "0.0.17"
 description = "CLI for managing a grimoire datastore"
 readme = "README.md"
 requires-python = ">=3.12"

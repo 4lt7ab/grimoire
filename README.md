@@ -43,7 +43,7 @@ with grimoire.open("grimoire.db", embedder=FastembedEmbedder()) as g:
     g.embed([(entry.id, "A solar phoenix reborn from its own ashes at dawn")])
 
     for hit in g.semantic_search("creatures that come back from the dead"):
-        print(hit.distance, hit.semantic_text, hit.entry.payload)
+        print(hit.distance, hit.entry.semantic_text, hit.entry.payload)
 ```
 
 CLI:

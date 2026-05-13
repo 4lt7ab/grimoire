@@ -14,9 +14,9 @@
 
 - **Re-indexing is cheap and explicit.** Calling `keyword()` or `embed()` on an id that already has an index row replaces it. The entry row is untouched. To "rename" the searchable text on a row, re-index — no need to delete and re-add.
 
-- **Keyword search.** `keyword_search(query, filters, limit)` returns `KeywordHit`s ranked by FTS5 BM25. Hits carry the indexed `keyword_text`, the stored `threshold_rank`, and a positive `score` (higher = better). The CLI also tokenizes free-form prose into safe quoted OR-joined FTS5 syntax for the common case.
+- **Keyword search.** `keyword_search(query, filters, limit)` returns `KeywordHit`s ranked by FTS5 BM25. Each hit carries the matched `entry` (with its `keyword_text` and `threshold_rank` inline) and a positive `score` (higher = better). The CLI also tokenizes free-form prose into safe quoted OR-joined FTS5 syntax for the common case.
 
-- **Semantic search.** `semantic_search(query, partition, limit)` embeds the query, runs vec0 KNN, and returns `SemanticHit`s. Hits carry the source `semantic_text`, the stored `threshold_distance`, and the `distance` (lower = better). Pass `partition` to narrow KNN to one partition; omit it to span every partition in the same query.
+- **Semantic search.** `semantic_search(query, partition, limit)` embeds the query, runs vec0 KNN, and returns `SemanticHit`s. Each hit carries the matched `entry` (with its `semantic_text`, `partition`, and `threshold_distance` inline) and a `distance` (lower = better). Pass `partition` to narrow KNN to one partition; omit it to span every partition in the same query.
 
 - **Partitions.** `entry_vec.partition` is a separate dimension from `entry.group_key`. Partitions are vec0 partition keys: KNN scoped to a partition skips other partitions at the index level. `group_key` is metadata on the entry, queryable from `fetch` and `keyword_search`. The two can move independently.
 

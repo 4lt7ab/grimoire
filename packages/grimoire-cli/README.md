@@ -36,7 +36,7 @@ Set the env var once per shell to avoid passing `--mount` everywhere:
 export GRIMOIRE_MOUNT=$PWD/.grimoire
 ```
 
-A mount can hold one **default database** at `<mount>/grimoire.db` plus any number of **named databases** under `<mount>/<name>/grimoire.db`. Pick which one a command targets with `--name <name>` / `-n <name>`; omit `--name` to target the default. Names must match `[a-z0-9_-]+` and cannot begin with `__` (reserved).
+A mount can hold one **default database** at `<mount>/grimoire.db` plus any number of **named databases** under `<mount>/<name>/grimoire.db`. Pick which one a command targets with `--db <name>` / `-d <name>`; omit `--db` to target the default. Names must match `[a-z0-9_-]+` and cannot begin with `__` (reserved).
 
 ## Quickstart
 
@@ -87,7 +87,7 @@ Create a named database in the mount. Errors if the database already exists. The
 
 #### `grimoire mount ls`
 
-List databases in the mount as a JSON array of `{"name": <str|null>, "path": <str>}`. The default DB appears first with `name: null`; named DBs follow alphabetically.
+List databases in the mount as a JSON array of `{"db": <str|null>, "path": <str>}`. The default DB appears first with `db: null`; named DBs follow alphabetically.
 
 #### `grimoire mount remove <name> --yes`
 
@@ -95,7 +95,7 @@ Delete a single named database file from the mount. The model cache and other da
 
 ### Database inspection
 
-#### `grimoire info [--name <name>]`
+#### `grimoire info [--db <name>]`
 
 Show metadata for a database: embedder lock (`model`, `dimension`), `schema_version`, `entry_count`, per-group and per-partition counts, file path, file size. Does not load the embedder.
 
@@ -105,7 +105,7 @@ List entries chronologically, with optional filters and ULID-cursor paging.
 
 | Option | Behavior |
 |---|---|
-| `--name`, `-n` | Target a named DB. Omit for the default. |
+| `--db`, `-d` | Target a named DB. Omit for the default. |
 | `--id` | Filter to entries with this id. Repeatable. |
 | `--group-key` | Filter to entries with this `group_key`. Repeatable. |
 | `--group-ref` | Filter to entries with this `group_ref`. Repeatable. |
@@ -125,7 +125,7 @@ Create an entry. Pass `--keyword-text` and/or `--semantic-text` to (re-)index in
 
 | Option | Behavior |
 |---|---|
-| `--name`, `-n` | Target a named DB. |
+| `--db`, `-d` | Target a named DB. |
 | `--group-key` | Group key metadata. |
 | `--group-ref` | External reference id within the group. |
 | `--context` | Unindexed contextual prose (not searched). |
@@ -160,13 +160,13 @@ FTS5 BM25 search. Free-form prose is tokenized into safe FTS5 syntax automatical
 
 | Option | Behavior |
 |---|---|
-| `--name`, `-n` | Target a named DB. |
+| `--db`, `-d` | Target a named DB. |
 | `--id` | Restrict hits to these ids. Repeatable. |
 | `--group-key` | Restrict hits to these group keys. Repeatable. |
 | `--group-ref` | Restrict hits to these group refs. Repeatable. |
 | `--limit` | Maximum hits (default 10). |
 
-Returns hits with the entry, `keyword_text`, `threshold_rank`, and `rank` (the BM25 score; higher = better, non-negative).
+Returns hits as `{"entry": {...}, "rank": <bm25>}`. `rank` is the BM25 score (higher = better, non-negative); the entry carries its `keyword_text` and `threshold_rank` inline.
 
 #### `grimoire search semantic <query> [--partition <p>] [--limit <n>]`
 
@@ -174,11 +174,11 @@ vec0 KNN search. Embeds the query via the bundled embedder, then ranks by vector
 
 | Option | Behavior |
 |---|---|
-| `--name`, `-n` | Target a named DB. |
+| `--db`, `-d` | Target a named DB. |
 | `--partition` | Restrict KNN to this partition. Omit to span every partition. |
 | `--limit` | Maximum hits (default 10). |
 
-Returns hits with the entry, `semantic_text`, `threshold_distance`, and `distance` (lower = better, non-negative).
+Returns hits as `{"entry": {...}, "distance": <float>}`. `distance` is the vec0 distance (lower = better, non-negative); the entry carries its `semantic_text`, `partition`, and `threshold_distance` inline.
 
 ### MCP server
 

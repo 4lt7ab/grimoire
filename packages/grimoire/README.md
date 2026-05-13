@@ -51,10 +51,10 @@ with grimoire.open("grimoire.db", embedder=FastembedEmbedder()) as g:
     g.embed([(entry.id, "A solar phoenix reborn from its own ashes at dawn")])
 
     for hit in g.semantic_search("creatures that come back from the dead"):
-        print(hit.entry.id, hit.distance, hit.semantic_text)
+        print(hit.entry.id, hit.distance, hit.entry.semantic_text)
 
     for hit in g.keyword_search("phoenix"):
-        print(hit.entry.id, hit.score, hit.keyword_text)
+        print(hit.entry.id, hit.score, hit.entry.keyword_text)
 ```
 
 ## Imports
@@ -152,6 +152,8 @@ Drop vec rows for the given ids. Entries themselves are not affected. Returns th
 
 Walk entries ordered by id (i.e. chronologically, since ids are ULIDs). `filters` is a `Filters` instance restricting by sets of `id`, `group_key`, and/or `group_ref`. `cursor`, if given, returns entries with `id > cursor` — pass the last id of the previous page to walk forward.
 
+Each returned `Entry` carries its FTS5 fields (`keyword_text`, `threshold_rank`) and vec0 fields (`semantic_text`, `partition`, `threshold_distance`) inline, populated from a left join. Entries without an index row on either side come back with the corresponding fields set to `None`.
+
 ```python
 saved = g.fetch(limit=100)
 next_page = g.fetch(limit=100, cursor=saved[-1].id)
@@ -161,11 +163,11 @@ next_page = g.fetch(limit=100, cursor=saved[-1].id)
 
 Run an FTS5 BM25 search against `entry_fts`. `query` is passed straight to FTS5 — phrases (`"exact phrase"`), prefix (`fire*`), boolean operators (`phoenix OR wyrm NOT egg`). Malformed queries surface as `sqlite3.OperationalError`. Filters apply on the joined entry row. Empty/whitespace queries raise `ValueError`.
 
-Returns `KeywordHit`s carrying the entry, the indexed `keyword_text`, the stored `threshold_rank`, and a positive `score` (higher = better).
+Returns `KeywordHit`s carrying the matched `entry` and a positive `score` (higher = better). The indexed `keyword_text` and stored `threshold_rank` are available as `hit.entry.keyword_text` and `hit.entry.threshold_rank`.
 
 #### `semantic_search(query, partition=None, limit=10) -> list[SemanticHit]`
 
-Embed `query` via `embedder.embed`, then run vec0 KNN. Pass `partition` to narrow KNN to one partition; omit it (or pass `None`) to span every partition. Returns `SemanticHit`s carrying the entry, the source `semantic_text`, the stored `threshold_distance`, and the `distance` (lower = better).
+Embed `query` via `embedder.embed`, then run vec0 KNN. Pass `partition` to narrow KNN to one partition; omit it (or pass `None`) to span every partition. Returns `SemanticHit`s carrying the matched `entry` and a `distance` (lower = better). The indexed `semantic_text`, `partition`, and stored `threshold_distance` are available as `hit.entry.semantic_text`, `hit.entry.partition`, and `hit.entry.threshold_distance`.
 
 ## Data shapes
 
@@ -179,7 +181,17 @@ class Entry:
     group_ref: str | None
     payload: dict[str, Any] | None
     context: str | None = None
+    # Index fields, populated by `fetch`, `keyword_search`, `semantic_search`.
+    # All None on input to `add`/`update` and ignored — write them via
+    # `keyword()` / `embed()` instead.
+    keyword_text: str | None = None
+    threshold_rank: float | None = None
+    semantic_text: str | None = None
+    partition: str | None = None
+    threshold_distance: float | None = None
 ```
+
+The five trailing fields are *read-side conveniences*. The entry row in SQLite still holds only the first five fields; the rest are pulled in from `entry_fts` and `entry_vec` via a left join whenever an `Entry` is returned. They're ignored on the way into `add()` and `update()` — use `keyword()` and `embed()` to (re-)write the underlying index rows.
 
 ### `Filters`
 
@@ -198,10 +210,8 @@ Each list, when given, restricts to entries whose field matches one of the liste
 ```python
 @dataclass(frozen=True, slots=True)
 class KeywordHit:
-    entry: Entry
-    keyword_text: str | None
-    threshold_rank: float | None
-    score: float        # -bm25, so higher = better and non-negative
+    entry: Entry       # carries `keyword_text` and `threshold_rank` inline
+    score: float       # -bm25, so higher = better and non-negative
 ```
 
 ### `SemanticHit`
@@ -209,10 +219,8 @@ class KeywordHit:
 ```python
 @dataclass(frozen=True, slots=True)
 class SemanticHit:
-    entry: Entry
-    semantic_text: str | None
-    threshold_distance: float | None
-    distance: float     # vec0 distance, lower = better
+    entry: Entry       # carries `semantic_text`, `partition`, and `threshold_distance` inline
+    distance: float    # vec0 distance, lower = better
 ```
 
 ### `Peek`
