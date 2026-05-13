@@ -165,6 +165,7 @@ def keyword(
             "ids": json.dumps(ids),
             "group_keys": None,
             "group_refs": None,
+            "cursor": None,
         },
     )
     return [_row_to_entry(r) for r in cur]
@@ -205,6 +206,7 @@ def embed(
             "ids": json.dumps(ids),
             "group_keys": None,
             "group_refs": None,
+            "cursor": None,
         },
     )
     return [_row_to_entry(r) for r in cur]
@@ -277,6 +279,7 @@ FROM entry
 WHERE (:ids IS NULL OR id IN (SELECT value FROM json_each(:ids)))
   AND (:group_keys IS NULL OR group_key IN (SELECT value FROM json_each(:group_keys)))
   AND (:group_refs IS NULL OR group_ref IN (SELECT value FROM json_each(:group_refs)))
+  AND (:cursor IS NULL OR id > :cursor)
 ORDER BY id
 """
 
@@ -285,7 +288,15 @@ def fetch(
     conn: sqlite3.Connection,
     filters: Filters | None = None,
     limit: int = 100,
+    cursor: str | None = None,
 ) -> list[Entry]:
+    """Fetch entries matching filters, ordered by id.
+
+    `cursor`, when given, returns entries with `id > cursor` — the id of the
+    last entry from the previous page. ULIDs sort lexicographically by
+    creation time, so this gives chronological paging without a separate
+    cursor type.
+    """
     f = filters or Filters()
     cur = conn.execute(
         _FETCH_SQL + "\nLIMIT :limit",
@@ -293,6 +304,7 @@ def fetch(
             "ids": json.dumps(f.id) if f.id else None,
             "group_keys": json.dumps(f.group_key) if f.group_key else None,
             "group_refs": json.dumps(f.group_ref) if f.group_ref else None,
+            "cursor": cursor,
             "limit": limit,
         },
     )

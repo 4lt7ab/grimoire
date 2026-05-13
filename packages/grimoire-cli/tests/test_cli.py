@@ -582,6 +582,34 @@ def test_fetch_rejects_negative_limit(mounted):
     assert "--limit" in result.output
 
 
+def test_fetch_cursor_paginates_chronologically(mounted):
+    ids = [
+        json.loads(runner.invoke(app, ["entry", "add"]).output)["id"]
+        for _ in range(5)
+    ]
+
+    page1 = runner.invoke(app, ["fetch", "--limit", "2"])
+    page1_ids = [e["id"] for e in json.loads(page1.output)]
+    assert page1_ids == ids[:2]
+
+    page2 = runner.invoke(app, ["fetch", "--limit", "2", "--cursor", page1_ids[-1]])
+    page2_ids = [e["id"] for e in json.loads(page2.output)]
+    assert page2_ids == ids[2:4]
+
+    page3 = runner.invoke(app, ["fetch", "--limit", "2", "--cursor", page2_ids[-1]])
+    assert [e["id"] for e in json.loads(page3.output)] == [ids[4]]
+
+
+def test_fetch_cursor_past_end_returns_empty(mounted):
+    runner.invoke(app, ["entry", "add"])
+
+    result = runner.invoke(
+        app, ["fetch", "--cursor", "01ZZZZZZZZZZZZZZZZZZZZZZZZ"]
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == []
+
+
 def test_fetch_empty_when_no_match(mounted):
     runner.invoke(app, ["entry", "add"])
 

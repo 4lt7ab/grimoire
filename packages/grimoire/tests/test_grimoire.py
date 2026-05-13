@@ -1,6 +1,6 @@
 import pytest
 
-from grimoire.data.entry import Entry
+from grimoire.data.entry import Entry, Filters
 from grimoire.grimoire import open as open_grimoire
 
 
@@ -92,6 +92,35 @@ def test_add_allows_null_group_ref_duplicates(tmp_path, fake_embedder):
     g.add([Entry(None, None, "gandalf", None)])
     g.add([Entry(None, None, "gandalf", None)])
     assert len(g.fetch()) == 4
+
+
+def test_fetch_cursor_returns_entries_after_cursor(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    saved = g.add([Entry(None, None, None, None) for _ in range(5)])
+    ids = [e.id for e in saved]
+
+    page = g.fetch(limit=10, cursor=ids[1])
+    assert [e.id for e in page] == ids[2:]
+
+
+def test_fetch_cursor_past_end_returns_empty(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    saved = g.add([Entry(None, None, None, None) for _ in range(3)])
+
+    page = g.fetch(cursor=saved[-1].id)
+    assert page == []
+
+
+def test_fetch_cursor_combines_with_filters(tmp_path, fake_embedder):
+    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    wizards = g.add([Entry(None, "wizard", str(i), None) for i in range(3)])
+    g.add([Entry(None, "spell", "x", None)])
+
+    page = g.fetch(
+        filters=Filters(group_key=["wizard"]),
+        cursor=wizards[0].id,
+    )
+    assert [e.id for e in page] == [wizards[1].id, wizards[2].id]
 
 
 def test_add_rejects_self_colliding_batch(tmp_path, fake_embedder):

@@ -426,12 +426,24 @@ def fetch_cmd(
         list[str] | None,
         typer.Option("--group-ref", help="Filter to entries with these group refs. Repeatable."),
     ] = None,
+    cursor: Annotated[
+        str | None,
+        typer.Option(
+            "--cursor",
+            help="Return entries with id > this. Pass the id of the last entry from the previous page.",
+        ),
+    ] = None,
     limit: Annotated[
         int,
         typer.Option("--limit", help="Maximum entries to return.", min=0),
     ] = 100,
 ) -> None:
-    """Fetch Grimoire entries matching the given filters."""
+    """Fetch Grimoire entries matching the given filters, ordered chronologically by id.
+
+    For paging, pass `--cursor <id>` where `<id>` is the last entry's id from
+    the previous page. ULIDs sort lexicographically by creation time, so
+    cursor paging walks entries in the order they were added.
+    """
     mnt = _existing_mount(ctx)
 
     try:
@@ -449,7 +461,7 @@ def fetch_cmd(
     )
 
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
-        entries = g.fetch(filters, limit=limit)
+        entries = g.fetch(filters, limit=limit, cursor=cursor)
 
     typer.echo(json.dumps([asdict(e) for e in entries], indent=2, default=str))
 

@@ -53,8 +53,9 @@ class Grimoire:
         self,
         filters: Filters | None = None,
         limit: int = 100,
+        cursor: str | None = None,
     ) -> list[Entry]:
-        return entry.fetch(self._conn, filters, limit)
+        return entry.fetch(self._conn, filters, limit, cursor=cursor)
 
     def keyword_remove(self, ids: list[str]) -> list[str]:
         """Delete entry_fts rows for the given ids. Returns the ids that had rows.
