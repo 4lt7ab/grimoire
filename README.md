@@ -51,15 +51,15 @@ CLI:
 ```sh
 export GRIMOIRE_MOUNT=$PWD/.grimoire
 grimoire mount create
-ID=$(grimoire entry add \
+grimoire entry add \
     --group-key creature --group-ref phoenix-001 \
-    --payload '{"habitat": "volcano"}' | jq -r .id)
-grimoire index keyword "$ID" --text "phoenix fire-bird ashes"
-grimoire index semantic "$ID" --text "A solar phoenix reborn from its own ashes at dawn"
+    --payload '{"habitat": "volcano"}' \
+    --keyword-text "phoenix fire-bird ashes" \
+    --semantic-text "A solar phoenix reborn from its own ashes at dawn"
 grimoire search semantic "creatures that come back from the dead"
 ```
 
-The shape of an entry is the same on both sides: a metadata row that you index for keyword search, semantic search, or both — independently and after the fact.
+The shape of an entry is the same on both sides: a metadata row plus optional keyword and semantic indexes. The library exposes them as separate `keyword()` and `embed()` calls; the CLI rolls them into `entry add`/`entry update` for convenience.
 
 ## Install
 

@@ -40,7 +40,7 @@
 
 - **Mount layout (CLI).** The CLI organizes one or more grimoires under a mount directory: a default `grimoire.db`, optional named subdirectory databases, and a shared `__models__/` embedder cache. Mount resolution: `--mount` > `$GRIMOIRE_MOUNT` > `~/.grimoire`.
 
-- **CLI.** `grimoire {mount, entry, index, search, info, fetch, mcp} ...` mirrors the library's surface plus mount administration. Every command prints pretty-indented JSON.
+- **CLI.** `grimoire {mount, entry, search, info, fetch, mcp} ...` mirrors the library's surface plus mount administration. `entry add` and `entry update` accept `--keyword-text` and `--semantic-text` flags that fold a (re-)index into the same call. Every command prints pretty-indented JSON.
 
 - **MCP server.** `grimoire mcp serve` exposes the read+write surface over stdio as FastMCP tools, scoped to the mount picked at boot. Mount administration stays CLI-only; the MCP server operates on existing databases.
 

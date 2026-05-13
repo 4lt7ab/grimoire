@@ -34,14 +34,6 @@ entry_app = typer.Typer(
 )
 app.add_typer(entry_app)
 
-index_app = typer.Typer(
-    name="index",
-    no_args_is_help=True,
-    add_completion=False,
-    help="Index, re-index, or remove an entry's keyword (FTS5) or semantic (vec) row.",
-)
-app.add_typer(index_app)
-
 search_app = typer.Typer(
     name="search",
     no_args_is_help=True,
@@ -138,9 +130,7 @@ def mount_add_cmd(
     with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)):
         pass
 
-    typer.echo(
-        json.dumps({"db": db_path.parent.name, "path": str(db_path)}, indent=2)
-    )
+    typer.echo(json.dumps({"db": db_path.parent.name, "path": str(db_path)}, indent=2))
 
 
 @mount_app.command(name="ls")
@@ -214,11 +204,56 @@ def entry_add_cmd(
         str | None,
         typer.Option("--payload", help="JSON payload object."),
     ] = None,
+    keyword_text: Annotated[
+        str | None,
+        typer.Option(
+            "--keyword-text", help="Keyword text to index in FTS5 for this entry."
+        ),
+    ] = None,
+    threshold_rank: Annotated[
+        float | None,
+        typer.Option(
+            "--threshold-rank",
+            help="Minimum BM25 score for keyword hits (non-negative).",
+            min=0,
+        ),
+    ] = None,
+    semantic_text: Annotated[
+        str | None,
+        typer.Option(
+            "--semantic-text", help="Semantic text to embed and store on the vec row."
+        ),
+    ] = None,
+    partition: Annotated[
+        str | None,
+        typer.Option(
+            "--partition",
+            help="Vec partition to write into. Omit for the NULL partition.",
+        ),
+    ] = None,
+    threshold_distance: Annotated[
+        float | None,
+        typer.Option(
+            "--threshold-distance",
+            help="Maximum vector distance for semantic hits (non-negative).",
+            min=0,
+        ),
+    ] = None,
 ) -> None:
-    """Create a Grimoire entry.
+    """Create a Grimoire entry, optionally indexing it in one go.
 
-    Add searchable text via `grimoire index keyword` or `grimoire index semantic`.
+    Pass `--keyword-text` to add an FTS5 row and `--semantic-text` to embed
+    a vec row. Either, both, or neither — the entry is always created.
     """
+    if keyword_text is None and threshold_rank is not None:
+        raise typer.BadParameter("--threshold-rank requires --keyword-text.")
+    if semantic_text is None and (
+        partition is not None or threshold_distance is not None
+    ):
+        raise typer.BadParameter(
+            "--partition and --threshold-distance require --semantic-text."
+        )
+
     mnt = _existing_mount(ctx)
 
     try:
@@ -247,6 +282,14 @@ def entry_add_cmd(
                     )
                 ]
             )
+            if keyword_text is not None:
+                g.keyword([(created.id, keyword_text)], threshold_rank=threshold_rank)
+            if semantic_text is not None:
+                g.embed(
+                    [(created.id, semantic_text)],
+                    partition=partition,
+                    threshold_distance=threshold_distance,
+                )
         except ValueError as e:
             raise typer.BadParameter(str(e)) from e
 
@@ -280,6 +323,43 @@ def entry_update_cmd(
         str | None,
         typer.Option("--context", help="Unindexed contextual text."),
     ] = None,
+    keyword_text: Annotated[
+        str | None,
+        typer.Option(
+            "--keyword-text",
+            help="Replace the entry's FTS5 row with this keyword text.",
+        ),
+    ] = None,
+    threshold_rank: Annotated[
+        float | None,
+        typer.Option(
+            "--threshold-rank",
+            help="Minimum BM25 score for keyword hits (non-negative).",
+            min=0,
+        ),
+    ] = None,
+    semantic_text: Annotated[
+        str | None,
+        typer.Option(
+            "--semantic-text",
+            help="Replace the entry's vec row with this semantic text.",
+        ),
+    ] = None,
+    partition: Annotated[
+        str | None,
+        typer.Option(
+            "--partition",
+            help="Vec partition to write into. Omit for the NULL partition.",
+        ),
+    ] = None,
+    threshold_distance: Annotated[
+        float | None,
+        typer.Option(
+            "--threshold-distance",
+            help="Maximum vector distance for semantic hits (non-negative).",
+            min=0,
+        ),
+    ] = None,
     put: Annotated[
         bool,
         typer.Option(
@@ -292,16 +372,25 @@ def entry_update_cmd(
         ),
     ] = False,
 ) -> None:
-    """Update group_key, group_ref, payload, and context on an entry.
+    """Update an entry; optionally (re-)index its keyword or semantic text.
 
-    Default mode is partial-update: unspecified fields are preserved. Pass
-    `--put` to switch to replace mode, where any field not given on the command
-    line is set to NULL.
+    Default mode is partial-update: unspecified entry fields are preserved.
+    Pass `--put` to switch to replace mode for the entry fields (group_key,
+    group_ref, payload, context).
 
-    To change keyword thresholds or semantic thresholds, re-run
-    `grimoire index keyword` or `grimoire index semantic` with the new
-    threshold value.
+    Indexing is decoupled from `--put`: passing `--keyword-text` always
+    replaces the FTS5 row, and `--semantic-text` always replaces the vec row.
+    Leaving them off preserves the existing index rows as-is.
     """
+    if keyword_text is None and threshold_rank is not None:
+        raise typer.BadParameter("--threshold-rank requires --keyword-text.")
+    if semantic_text is None and (
+        partition is not None or threshold_distance is not None
+    ):
+        raise typer.BadParameter(
+            "--partition and --threshold-distance require --semantic-text."
+        )
+
     mnt = _existing_mount(ctx)
 
     try:
@@ -343,6 +432,14 @@ def entry_update_cmd(
 
         try:
             [returned] = g.update([merged])
+            if keyword_text is not None:
+                g.keyword([(returned.id, keyword_text)], threshold_rank=threshold_rank)
+            if semantic_text is not None:
+                g.embed(
+                    [(returned.id, semantic_text)],
+                    partition=partition,
+                    threshold_distance=threshold_distance,
+                )
         except ValueError as e:
             raise typer.BadParameter(str(e)) from e
 
@@ -487,159 +584,6 @@ def fetch_cmd(
         entries = g.fetch(filters, limit=limit, cursor=cursor)
 
     typer.echo(json.dumps([asdict(e) for e in entries], indent=2, default=str))
-
-
-@index_app.command(name="keyword")
-def index_keyword_cmd(
-    ctx: typer.Context,
-    entry_id: Annotated[
-        str,
-        typer.Argument(help="Id of the entry to index."),
-    ],
-    db: Annotated[
-        str | None,
-        typer.Option("--db", "-d", help="Database name (default DB if omitted)."),
-    ] = None,
-    text: Annotated[
-        str | None,
-        typer.Option("--text", help="Keyword text to index in FTS5 for this entry."),
-    ] = None,
-    threshold_rank: Annotated[
-        float | None,
-        typer.Option(
-            "--threshold-rank",
-            help="Minimum BM25 score for keyword hits (non-negative).",
-            min=0,
-        ),
-    ] = None,
-    delete: Annotated[
-        bool,
-        typer.Option(
-            "--delete", help="Remove the entry's FTS5 row instead of indexing it."
-        ),
-    ] = False,
-) -> None:
-    """Index, re-index, or remove an entry's keyword text in FTS5.
-
-    Pass --text to (re-)index, or --delete to remove. The entry itself is not
-    affected by --delete; only the FTS5 row is dropped.
-    """
-    if delete and (text is not None or threshold_rank is not None):
-        raise typer.BadParameter(
-            "--delete cannot be combined with --text or --threshold-rank."
-        )
-    if not delete and text is None:
-        raise typer.BadParameter("Provide --text to index, or --delete to remove.")
-
-    mnt = _existing_mount(ctx)
-
-    try:
-        db_path = mnt.db_path(db)
-    except ValueError as e:
-        raise typer.BadParameter(str(e)) from e
-    if not db_path.exists():
-        target = f"database {db!r}" if db else "default database"
-        raise typer.BadParameter(f"No {target} in the mount.")
-
-    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
-        if delete:
-            removed = g.keyword_remove([entry_id])
-            typer.echo(json.dumps({"id": entry_id, "deleted": bool(removed)}, indent=2))
-        else:
-            try:
-                [indexed] = g.keyword([(entry_id, text)], threshold_rank=threshold_rank)
-            except ValueError as e:
-                raise typer.BadParameter(str(e)) from e
-            result = {
-                "entry": asdict(indexed),
-                "keyword_text": text,
-                "threshold_rank": threshold_rank,
-            }
-            typer.echo(json.dumps(result, indent=2, default=str))
-
-
-@index_app.command(name="semantic")
-def index_semantic_cmd(
-    ctx: typer.Context,
-    entry_id: Annotated[
-        str,
-        typer.Argument(help="Id of the entry to embed."),
-    ],
-    db: Annotated[
-        str | None,
-        typer.Option("--db", "-d", help="Database name (default DB if omitted)."),
-    ] = None,
-    text: Annotated[
-        str | None,
-        typer.Option("--text", help="Semantic text to embed and store on the vec row."),
-    ] = None,
-    partition: Annotated[
-        str | None,
-        typer.Option(
-            "--partition",
-            help="Vec partition to write into. Omit for the NULL partition.",
-        ),
-    ] = None,
-    threshold_distance: Annotated[
-        float | None,
-        typer.Option(
-            "--threshold-distance",
-            help="Maximum vector distance for semantic hits (non-negative).",
-            min=0,
-        ),
-    ] = None,
-    delete: Annotated[
-        bool,
-        typer.Option(
-            "--delete", help="Remove the entry's vec row instead of embedding it."
-        ),
-    ] = False,
-) -> None:
-    """Embed, re-embed, or remove an entry's semantic vector.
-
-    Pass --text to (re-)embed, or --delete to remove. The entry itself is not
-    affected by --delete; only the vec row is dropped.
-    """
-    if delete and (
-        text is not None or partition is not None or threshold_distance is not None
-    ):
-        raise typer.BadParameter(
-            "--delete cannot be combined with --text, --partition, "
-            "or --threshold-distance."
-        )
-    if not delete and text is None:
-        raise typer.BadParameter("Provide --text to embed, or --delete to remove.")
-
-    mnt = _existing_mount(ctx)
-
-    try:
-        db_path = mnt.db_path(db)
-    except ValueError as e:
-        raise typer.BadParameter(str(e)) from e
-    if not db_path.exists():
-        target = f"database {db!r}" if db else "default database"
-        raise typer.BadParameter(f"No {target} in the mount.")
-
-    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
-        if delete:
-            removed = g.embed_remove([entry_id])
-            typer.echo(json.dumps({"id": entry_id, "deleted": bool(removed)}, indent=2))
-        else:
-            try:
-                [embedded] = g.embed(
-                    [(entry_id, text)],
-                    partition=partition,
-                    threshold_distance=threshold_distance,
-                )
-            except ValueError as e:
-                raise typer.BadParameter(str(e)) from e
-            result = {
-                "entry": asdict(embedded),
-                "semantic_text": text,
-                "partition": partition,
-                "threshold_distance": threshold_distance,
-            }
-            typer.echo(json.dumps(result, indent=2, default=str))
 
 
 @search_app.command(name="keyword")

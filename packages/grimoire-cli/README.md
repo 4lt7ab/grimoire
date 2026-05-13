@@ -46,17 +46,15 @@ export GRIMOIRE_MOUNT=$PWD/.grimoire
 # Create the mount + default DB. Idempotent.
 grimoire mount create
 
-# Add an entry (metadata only; not yet searchable).
-ID=$(grimoire entry add \
+# Add an entry. `--keyword-text` and `--semantic-text` are independent —
+# pick one, both, or neither (metadata-only).
+grimoire entry add \
     --group-key creature \
     --group-ref phoenix-001 \
     --payload '{"habitat": "volcano"}' \
     --context "discovered in the southern volcanic chain" \
-  | jq -r .id)
-
-# Make it searchable. Keyword and semantic are independent — pick one or both.
-grimoire index keyword "$ID" --text "phoenix fire-bird ashes"
-grimoire index semantic "$ID" --text "A solar phoenix reborn from its own ashes at dawn"
+    --keyword-text "phoenix fire-bird ashes" \
+    --semantic-text "A solar phoenix reborn from its own ashes at dawn"
 
 # Search.
 grimoire search semantic "creatures that come back from the dead"
@@ -123,7 +121,7 @@ grimoire fetch --limit 100 --cursor "$LAST"
 
 #### `grimoire entry add [options]`
 
-Create an entry. The entry is not searchable until indexed via `grimoire index keyword` or `grimoire index semantic`.
+Create an entry. Pass `--keyword-text` and/or `--semantic-text` to (re-)index in the same call; omit both for a metadata-only record.
 
 | Option | Behavior |
 |---|---|
@@ -132,6 +130,11 @@ Create an entry. The entry is not searchable until indexed via `grimoire index k
 | `--group-ref` | External reference id within the group. |
 | `--context` | Unindexed contextual prose (not searched). |
 | `--payload` | JSON object string. |
+| `--keyword-text` | Text written to the FTS5 row. Triggers a keyword (re-)index. |
+| `--threshold-rank` | Minimum BM25 score for keyword hits (non-negative). Requires `--keyword-text`. |
+| `--semantic-text` | Text written to the vec row. Triggers an embed (re-)index. |
+| `--partition` | Vec partition to write into. Requires `--semantic-text`. |
+| `--threshold-distance` | Maximum vector distance for semantic hits (non-negative). Requires `--semantic-text`. |
 
 `(group_key, group_ref)` collisions raise an error.
 
@@ -139,7 +142,7 @@ Create an entry. The entry is not searchable until indexed via `grimoire index k
 
 Update `group_key`, `group_ref`, `payload`, and `context` on an entry. Default is partial-update: unspecified fields keep their current value. Pass `--put` to switch to replace mode — any field not given on the command line is set to NULL.
 
-Indexing fields (`keyword_text`, `threshold_rank`, `semantic_text`, `partition`, `threshold_distance`) are not entry fields; change them by re-running `grimoire index keyword` or `grimoire index semantic`.
+The same indexing options as `entry add` are accepted: passing `--keyword-text` always replaces the FTS5 row, and `--semantic-text` always replaces the vec row. Leaving them off preserves the existing index rows. Indexing is decoupled from `--put`.
 
 #### `grimoire entry get <id>`
 
@@ -148,24 +151,6 @@ Fetch a single entry by id.
 #### `grimoire entry delete <id> --yes`
 
 Delete an entry, cascading to its FTS and vec rows. `--yes` is required.
-
-### Indexing
-
-#### `grimoire index keyword <id> --text <text> [--threshold-rank <n>]`
-
-Index (or re-index) an entry's keyword text for FTS5 BM25 search. Replaces any existing FTS row on the same id. `--threshold-rank` is stored on the row and surfaced on hits.
-
-#### `grimoire index keyword <id> --delete`
-
-Remove the entry's FTS row. The entry itself is not affected.
-
-#### `grimoire index semantic <id> --text <text> [--partition <p>] [--threshold-distance <n>]`
-
-Embed (or re-embed) an entry's semantic text into the given vec0 partition. Replaces any existing vec row on the same id — useful for moving the entry between partitions. `--threshold-distance` is stored on the row and surfaced on hits.
-
-#### `grimoire index semantic <id> --delete`
-
-Remove the entry's vec row. The entry itself is not affected.
 
 ### Searching
 
@@ -201,7 +186,7 @@ Returns hits with the entry, `semantic_text`, `threshold_distance`, and `distanc
 
 Run a FastMCP server over stdio, scoped to this mount. Wires the same read+write surface as the CLI into MCP tools that an AI client can call directly. Mount administration (`mount create/destroy/add/remove`) stays CLI-only.
 
-Tools exposed: `info`, `fetch`, `entry_get`, `entry_add`, `entry_update`, `entry_delete`, `index_keyword`, `index_semantic`, `search_keyword`, `search_semantic`.
+Tools exposed: `info`, `fetch`, `entry_get`, `entry_add`, `entry_update`, `entry_delete`, `search_keyword`, `search_semantic`. `entry_add` and `entry_update` accept the same `keyword_text`/`semantic_text` (plus thresholds and `partition`) params as their CLI counterparts.
 
 ## Output format
 

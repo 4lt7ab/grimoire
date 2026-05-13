@@ -102,12 +102,26 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         group_ref: str | None = None,
         context: str | None = None,
         payload: dict[str, Any] | None = None,
+        keyword_text: str | None = None,
+        threshold_rank: float | None = None,
+        semantic_text: str | None = None,
+        partition: str | None = None,
+        threshold_distance: float | None = None,
     ) -> dict[str, Any]:
-        """Create a grimoire entry.
+        """Create a grimoire entry, optionally indexing it in one go.
 
-        Add searchable text via `index_keyword` or `index_semantic` after
-        creation; this tool only writes the entry record itself.
+        Pass `keyword_text` to add an FTS5 row and `semantic_text` to embed a
+        vec row. Either, both, or neither — the entry is always created.
         """
+        if keyword_text is None and threshold_rank is not None:
+            raise ValueError("`threshold_rank` requires `keyword_text`.")
+        if semantic_text is None and (
+            partition is not None or threshold_distance is not None
+        ):
+            raise ValueError(
+                "`partition` and `threshold_distance` require `semantic_text`."
+            )
+
         db_path = _resolve_db(mnt, db)
         with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             [created] = g.add(
@@ -121,6 +135,14 @@ def build_server(mnt: mount.Mount) -> FastMCP:
                     )
                 ]
             )
+            if keyword_text is not None:
+                g.keyword([(created.id, keyword_text)], threshold_rank=threshold_rank)
+            if semantic_text is not None:
+                g.embed(
+                    [(created.id, semantic_text)],
+                    partition=partition,
+                    threshold_distance=threshold_distance,
+                )
         return asdict(created)
 
     @mcp.tool
@@ -131,17 +153,32 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         group_ref: str | None = None,
         payload: dict[str, Any] | None = None,
         context: str | None = None,
+        keyword_text: str | None = None,
+        threshold_rank: float | None = None,
+        semantic_text: str | None = None,
+        partition: str | None = None,
+        threshold_distance: float | None = None,
         put: bool = False,
     ) -> dict[str, Any]:
-        """Update group_key, group_ref, payload, and context on an entry.
+        """Update an entry; optionally (re-)index its keyword or semantic text.
 
-        Default mode is partial-update: unspecified fields are preserved. Pass
-        `put=True` to switch to replace mode, where any field not supplied is
-        set to NULL.
+        Default mode is partial-update: unspecified entry fields are preserved.
+        Pass `put=True` to switch to replace mode for the entry fields
+        (group_key, group_ref, payload, context).
 
-        To change keyword thresholds or semantic thresholds, re-run
-        `index_keyword` or `index_semantic` with the new threshold value.
+        Indexing is decoupled from `put`: passing `keyword_text` always
+        replaces the FTS5 row, and `semantic_text` always replaces the vec
+        row. Leaving them off preserves the existing index rows as-is.
         """
+        if keyword_text is None and threshold_rank is not None:
+            raise ValueError("`threshold_rank` requires `keyword_text`.")
+        if semantic_text is None and (
+            partition is not None or threshold_distance is not None
+        ):
+            raise ValueError(
+                "`partition` and `threshold_distance` require `semantic_text`."
+            )
+
         db_path = _resolve_db(mnt, db)
         with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             existing = g.fetch(Filters(id=[entry_id]), limit=1)
@@ -167,6 +204,14 @@ def build_server(mnt: mount.Mount) -> FastMCP:
                 )
 
             [returned] = g.update([merged])
+            if keyword_text is not None:
+                g.keyword([(returned.id, keyword_text)], threshold_rank=threshold_rank)
+            if semantic_text is not None:
+                g.embed(
+                    [(returned.id, semantic_text)],
+                    partition=partition,
+                    threshold_distance=threshold_distance,
+                )
         return asdict(returned)
 
     @mcp.tool
@@ -179,79 +224,6 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             removed = g.remove([entry_id])
         return {"id": entry_id, "deleted": bool(removed)}
-
-    @mcp.tool
-    def index_keyword(
-        entry_id: str,
-        db: str | None = None,
-        text: str | None = None,
-        threshold_rank: float | None = None,
-        delete: bool = False,
-    ) -> dict[str, Any]:
-        """Index, re-index, or remove an entry's keyword text in FTS5.
-
-        Pass `text` to (re-)index, or `delete=True` to remove. The entry itself
-        is not affected by `delete`; only the FTS5 row is dropped.
-        """
-        if delete and (text is not None or threshold_rank is not None):
-            raise ValueError(
-                "`delete` cannot be combined with `text` or `threshold_rank`."
-            )
-        if not delete and text is None:
-            raise ValueError("Provide `text` to index, or `delete=True` to remove.")
-
-        db_path = _resolve_db(mnt, db)
-        with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
-            if delete:
-                removed = g.keyword_remove([entry_id])
-                return {"id": entry_id, "deleted": bool(removed)}
-            [indexed] = g.keyword([(entry_id, text)], threshold_rank=threshold_rank)
-            return {
-                "entry": asdict(indexed),
-                "keyword_text": text,
-                "threshold_rank": threshold_rank,
-            }
-
-    @mcp.tool
-    def index_semantic(
-        entry_id: str,
-        db: str | None = None,
-        text: str | None = None,
-        partition: str | None = None,
-        threshold_distance: float | None = None,
-        delete: bool = False,
-    ) -> dict[str, Any]:
-        """Embed, re-embed, or remove an entry's semantic vector.
-
-        Pass `text` to (re-)embed, or `delete=True` to remove. The entry itself
-        is not affected by `delete`; only the vec row is dropped.
-        """
-        if delete and (
-            text is not None or partition is not None or threshold_distance is not None
-        ):
-            raise ValueError(
-                "`delete` cannot be combined with `text`, `partition`, "
-                "or `threshold_distance`."
-            )
-        if not delete and text is None:
-            raise ValueError("Provide `text` to embed, or `delete=True` to remove.")
-
-        db_path = _resolve_db(mnt, db)
-        with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
-            if delete:
-                removed = g.embed_remove([entry_id])
-                return {"id": entry_id, "deleted": bool(removed)}
-            [embedded] = g.embed(
-                [(entry_id, text)],
-                partition=partition,
-                threshold_distance=threshold_distance,
-            )
-            return {
-                "entry": asdict(embedded),
-                "semantic_text": text,
-                "partition": partition,
-                "threshold_distance": threshold_distance,
-            }
 
     @mcp.tool
     def search_keyword(

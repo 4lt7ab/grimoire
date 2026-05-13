@@ -39,8 +39,6 @@ def test_server_registers_expected_tools(server):
         "entry_add",
         "entry_update",
         "entry_delete",
-        "index_keyword",
-        "index_semantic",
         "search_keyword",
         "search_semantic",
     }
@@ -71,16 +69,13 @@ def test_entry_add_then_fetch_roundtrip(server):
     assert fetched["context"] == "from chapter 3"
 
 
-def test_keyword_index_and_search(server):
+def test_entry_add_with_keyword_text_indexes_for_search(server):
     async def _go():
         async with Client(server) as client:
-            created = await client.call_tool("entry_add", {})
-            entry_id = created.data["id"]
-
-            await client.call_tool(
-                "index_keyword",
-                {"entry_id": entry_id, "text": "phoenix arcane ember"},
+            created = await client.call_tool(
+                "entry_add", {"keyword_text": "phoenix arcane ember"}
             )
+            entry_id = created.data["id"]
 
             hits = await client.call_tool("search_keyword", {"query": "phoenix"})
             return entry_id, hits.data
@@ -89,6 +84,59 @@ def test_keyword_index_and_search(server):
     assert len(hits) == 1
     assert hits[0]["entry"]["id"] == entry_id
     assert hits[0]["keyword_text"] == "phoenix arcane ember"
+
+
+def test_entry_add_with_semantic_text_embeds_for_search(server):
+    async def _go():
+        async with Client(server) as client:
+            created = await client.call_tool(
+                "entry_add", {"semantic_text": "a solar phoenix reborn"}
+            )
+            entry_id = created.data["id"]
+
+            hits = await client.call_tool(
+                "search_semantic", {"query": "creatures from ashes"}
+            )
+            return entry_id, hits.data
+
+    entry_id, hits = _run(_go())
+    assert any(h["entry"]["id"] == entry_id for h in hits)
+    assert any(h["semantic_text"] == "a solar phoenix reborn" for h in hits)
+
+
+def test_entry_update_replaces_keyword_text(server):
+    async def _go():
+        async with Client(server) as client:
+            created = await client.call_tool("entry_add", {"keyword_text": "moon"})
+            entry_id = created.data["id"]
+            await client.call_tool(
+                "entry_update",
+                {"entry_id": entry_id, "keyword_text": "stars"},
+            )
+            moon = await client.call_tool("search_keyword", {"query": "moon"})
+            stars = await client.call_tool("search_keyword", {"query": "stars"})
+            return entry_id, moon.data, stars.data
+
+    entry_id, moon, stars = _run(_go())
+    assert moon == []
+    assert any(h["entry"]["id"] == entry_id for h in stars)
+
+
+def test_entry_update_without_text_preserves_index(server):
+    async def _go():
+        async with Client(server) as client:
+            created = await client.call_tool("entry_add", {"keyword_text": "moon glow"})
+            entry_id = created.data["id"]
+            await client.call_tool(
+                "entry_update", {"entry_id": entry_id, "context": "new ctx"}
+            )
+            hits = await client.call_tool("search_keyword", {"query": "moon"})
+            return entry_id, hits.data
+
+    entry_id, hits = _run(_go())
+    assert any(
+        h["entry"]["id"] == entry_id and h["keyword_text"] == "moon glow" for h in hits
+    )
 
 
 def test_entry_update_partial_preserves_unspecified_fields(server):
