@@ -85,13 +85,15 @@ from grimoire.mount import Mount
 
 ### File lifecycle
 
-#### `grimoire.open(path, *, embedder) -> Grimoire`
+#### `grimoire.open(path, *, embedder, check_same_thread=True) -> Grimoire`
 
 Open a SQLite file at `path`. An empty (or freshly-touched) file gets the schema installed and the embedder lock written. An initialized file is validated against the supplied embedder; `GrimoireMismatch` is raised on a different `model` or `dimension`. Returns a `Grimoire` ready to use as a context manager.
 
-#### `grimoire.peek(path) -> Peek`
+`check_same_thread` is forwarded to `sqlite3.connect`. Pass `False` to use the returned `Grimoire` from a different thread than the one that opened it; the caller is then responsible for serializing access.
 
-Read metadata and counts from a grimoire file without committing to it for use. Loads sqlite-vec to read the vec partition counts but does not require an embedder. Raises `GrimoireNotFound` if the path doesn't exist or the file lacks an embedder lock.
+#### `grimoire.peek(path, *, check_same_thread=True) -> Peek`
+
+Read metadata and counts from a grimoire file without committing to it for use. Loads sqlite-vec to read the vec partition counts but does not require an embedder. Raises `GrimoireNotFound` if the path doesn't exist or the file lacks an embedder lock. `check_same_thread` is forwarded to `sqlite3.connect` with the same semantics as `open`.
 
 #### `Grimoire(conn, embedder)`
 
@@ -295,7 +297,7 @@ All errors derive from `GrimoireError`:
 
 ## Concurrency
 
-`grimoire.open` opens its SQLite connection in WAL mode with `busy_timeout` defaulted to SQLite's standard. Reads coexist with one writer; sustained high-concurrency writes still serialize at the SQLite level. The connection is bound to its constructing thread per Python's stdlib default.
+`grimoire.open` opens its SQLite connection in WAL mode with `busy_timeout` defaulted to SQLite's standard. Reads coexist with one writer; sustained high-concurrency writes still serialize at the SQLite level. The connection is bound to its constructing thread per Python's stdlib default; pass `check_same_thread=False` to lift that restriction (and serialize access yourself).
 
 ## Schema notes
 

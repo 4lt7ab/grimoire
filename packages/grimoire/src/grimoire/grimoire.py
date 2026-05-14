@@ -169,19 +169,23 @@ class Grimoire:
         )
 
 
-def peek(path: str | Path) -> Peek:
+def peek(path: str | Path, *, check_same_thread: bool = True) -> Peek:
     """Inspect a grimoire file without loading an embedder.
 
     Returns model, dimension, schema version, entry count, per-group counts
     (from `entry`), and per-partition counts (from `entry_vec`). Raises
     `GrimoireNotFound` if the file does not exist or has not been
     initialized.
+
+    `check_same_thread` is forwarded to `sqlite3.connect`. Pass `False` to
+    use the returned connection from a different thread than the one that
+    opened it; the caller is then responsible for serializing access.
     """
     p = Path(path)
     if not p.exists():
         raise GrimoireNotFound(f"No grimoire at {p}")
 
-    conn = sqlite3.connect(p)
+    conn = sqlite3.connect(p, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
@@ -220,8 +224,13 @@ def peek(path: str | Path) -> Peek:
         conn.close()
 
 
-def open(path: str | Path, *, embedder: Embedder) -> Grimoire:
-    conn = sqlite3.connect(path)
+def open(
+    path: str | Path,
+    *,
+    embedder: Embedder,
+    check_same_thread: bool = True,
+) -> Grimoire:
+    conn = sqlite3.connect(path, check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
 
     conn.enable_load_extension(True)
