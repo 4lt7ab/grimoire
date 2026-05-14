@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
-from grimoire import grimoire
 from grimoire.data.entry import Entry, Filters
+from grimoire.grimoire import Grimoire
 
 from grimoire_cli import embed, mount
 
@@ -50,7 +50,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         `db` selects a named DB in the mount; omit for the default DB.
         """
         db_path = _resolve_db(mnt, db)
-        peeked = grimoire.peek(db_path)
+        peeked = Grimoire.peek(db_path)
         size_bytes = db_path.stat().st_size
         return {
             "db": db,
@@ -85,7 +85,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
             group_key=group_keys or None,
             group_ref=group_refs or None,
         )
-        with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+        with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             entries = g.fetch(filters, limit=limit, cursor=cursor)
         return [asdict(e) for e in entries]
 
@@ -93,7 +93,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
     def entry_get(entry_id: str, db: str | None = None) -> dict[str, Any]:
         """Fetch a single grimoire entry by id."""
         db_path = _resolve_db(mnt, db)
-        with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+        with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             entries = g.fetch(Filters(id=[entry_id]), limit=1)
         if not entries:
             raise ValueError(f"No entry with id {entry_id!r}.")
@@ -127,7 +127,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
             )
 
         db_path = _resolve_db(mnt, db)
-        with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+        with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             [created] = g.add(
                 [
                     Entry(
@@ -186,7 +186,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
             )
 
         db_path = _resolve_db(mnt, db)
-        with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+        with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             existing = g.fetch(Filters(id=[entry_id]), limit=1)
             if not existing:
                 raise ValueError(f"No entry with id {entry_id!r}.")
@@ -231,7 +231,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         Idempotent — a missing id returns `deleted=false`.
         """
         db_path = _resolve_db(mnt, db)
-        with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+        with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             removed = g.remove([entry_id])
         return {"id": entry_id, "deleted": bool(removed)}
 
@@ -263,7 +263,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         if not fts_query:
             return []
 
-        with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+        with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             hits = g.keyword_search(fts_query, filters=filters, limit=limit)
         return [{"entry": asdict(h.entry), "rank": h.score} for h in hits]
 
@@ -279,7 +279,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         `distance` is the raw vector distance (lower = better, non-negative).
         """
         db_path = _resolve_db(mnt, db)
-        with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+        with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
             hits = g.semantic_search(query, partition=partition, limit=limit)
         return [{"entry": asdict(h.entry), "distance": h.distance} for h in hits]
 

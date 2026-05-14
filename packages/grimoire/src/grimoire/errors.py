@@ -12,3 +12,7 @@ class GrimoireMismatch(GrimoireError):
 
 class GrimoireNotFound(GrimoireError):
     """The path does not exist or is not an initialized grimoire."""
+
+
+class EmbedderRequired(GrimoireError):
+    """A semantic operation was called on a grimoire opened without an embedder."""

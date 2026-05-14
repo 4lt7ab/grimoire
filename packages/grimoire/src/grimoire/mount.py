@@ -72,7 +72,7 @@ def create(mount: Mount) -> None:
     """Create the mount layout on disk. Idempotent.
 
     Touches `default_db` so the file exists; the caller still has to
-    `grimoire.open(mount.default_db, embedder=...)` to install the schema
+    `Grimoire.open(mount.default_db, embedder=...)` to install the schema
     and write the embedder lock.
     """
     Path.mkdir(mount.path, parents=True, exist_ok=True)

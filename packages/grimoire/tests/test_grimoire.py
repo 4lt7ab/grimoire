@@ -1,6 +1,6 @@
 import pytest
 from grimoire.data.entry import Entry, Filters
-from grimoire.grimoire import open as open_grimoire
+from grimoire.grimoire import Grimoire
 
 
 def _has_vec_row(conn, entry_id: str) -> bool:
@@ -26,7 +26,7 @@ def _vec_semantic_text(conn, entry_id: str) -> str | None:
 
 
 def test_add_does_not_call_embedder(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     g.add(
         [
             Entry(None, None, None, None),
@@ -38,13 +38,13 @@ def test_add_does_not_call_embedder(tmp_path, fake_embedder):
 
 
 def test_add_does_not_write_vec_rows(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
     assert not _has_vec_row(g._conn, saved.id)
 
 
 def test_add_empty_does_not_call_embedder(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     assert g.add([]) == []
     assert fake_embedder.embed_many_calls == 0
 
@@ -63,7 +63,7 @@ def test_add_empty_does_not_call_embedder(tmp_path, fake_embedder):
     ],
 )
 def test_add_round_trips_any_json_payload(tmp_path, fake_embedder, payload):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, payload)])
     [fetched] = g.fetch()
     assert saved.payload == payload
@@ -71,21 +71,21 @@ def test_add_round_trips_any_json_payload(tmp_path, fake_embedder, payload):
 
 
 def test_add_rejects_duplicate_group_key_and_ref(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     g.add([Entry(None, "wizard", "gandalf", None)])
     with pytest.raises(ValueError, match="group_key, group_ref"):
         g.add([Entry(None, "wizard", "gandalf", None)])
 
 
 def test_add_allows_same_ref_across_different_keys(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     g.add([Entry(None, "wizard", "gandalf", None)])
     g.add([Entry(None, "spell", "gandalf", None)])
     assert len(g.fetch()) == 2
 
 
 def test_add_allows_null_group_ref_duplicates(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     g.add([Entry(None, "wizard", None, None)])
     g.add([Entry(None, "wizard", None, None)])
     g.add([Entry(None, None, "gandalf", None)])
@@ -94,7 +94,7 @@ def test_add_allows_null_group_ref_duplicates(tmp_path, fake_embedder):
 
 
 def test_fetch_cursor_returns_entries_after_cursor(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     saved = g.add([Entry(None, None, None, None) for _ in range(5)])
     ids = [e.id for e in saved]
 
@@ -103,7 +103,7 @@ def test_fetch_cursor_returns_entries_after_cursor(tmp_path, fake_embedder):
 
 
 def test_fetch_cursor_past_end_returns_empty(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     saved = g.add([Entry(None, None, None, None) for _ in range(3)])
 
     page = g.fetch(cursor=saved[-1].id)
@@ -111,7 +111,7 @@ def test_fetch_cursor_past_end_returns_empty(tmp_path, fake_embedder):
 
 
 def test_fetch_cursor_combines_with_filters(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     wizards = g.add([Entry(None, "wizard", str(i), None) for i in range(3)])
     g.add([Entry(None, "spell", "x", None)])
 
@@ -123,7 +123,7 @@ def test_fetch_cursor_combines_with_filters(tmp_path, fake_embedder):
 
 
 def test_fetch_unindexed_entry_has_null_index_fields(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, "tale", "ref", {"k": "v"}, "ctx")])
 
     [row] = g.fetch()
@@ -137,7 +137,7 @@ def test_fetch_unindexed_entry_has_null_index_fields(tmp_path, fake_embedder):
 
 
 def test_fetch_surfaces_keyword_fields(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
     g.keyword([(saved.id, "moon glow")], threshold_rank=0.5)
 
@@ -150,7 +150,7 @@ def test_fetch_surfaces_keyword_fields(tmp_path, fake_embedder):
 
 
 def test_fetch_surfaces_semantic_fields(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
     g.embed(
         [(saved.id, "the moon glows")],
@@ -168,7 +168,7 @@ def test_fetch_surfaces_semantic_fields(tmp_path, fake_embedder):
 
 
 def test_fetch_surfaces_both_index_sides(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
     g.keyword([(saved.id, "kw")])
     g.embed([(saved.id, "sem")], partition="p")
@@ -181,7 +181,7 @@ def test_fetch_surfaces_both_index_sides(tmp_path, fake_embedder):
 
 
 def test_add_rejects_self_colliding_batch(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     with pytest.raises(ValueError, match="group_key, group_ref"):
         g.add(
             [
@@ -192,7 +192,7 @@ def test_add_rejects_self_colliding_batch(tmp_path, fake_embedder):
 
 
 def test_update_rejects_collision_with_existing_row(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     g.add([Entry(None, "wizard", "gandalf", None)])
     [other] = g.add([Entry(None, "wizard", "saruman", None)])
     with pytest.raises(ValueError, match="group_key, group_ref"):
@@ -200,19 +200,19 @@ def test_update_rejects_collision_with_existing_row(tmp_path, fake_embedder):
 
 
 def test_embed_empty_is_noop(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     assert g.embed([]) == []
     assert fake_embedder.embed_many_calls == 0
 
 
 def test_embed_none_is_noop(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     assert g.embed() == []
     assert fake_embedder.embed_many_calls == 0
 
 
 def test_embed_writes_vec_row(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
 
     g.embed([(saved.id, "hello")])
@@ -221,7 +221,7 @@ def test_embed_writes_vec_row(tmp_path, fake_embedder):
 
 
 def test_embed_writes_to_partition(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
 
     g.embed([(saved.id, "hello")], partition="alpha")
@@ -229,7 +229,7 @@ def test_embed_writes_to_partition(tmp_path, fake_embedder):
 
 
 def test_embed_replaces_existing_vec_row_in_new_partition(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
 
     g.embed([(saved.id, "hello")], partition="alpha")
@@ -245,7 +245,7 @@ def test_embed_replaces_existing_vec_row_in_new_partition(tmp_path, fake_embedde
 def test_semantic_search_without_partition_spans_all_partitions(
     tmp_path, fake_embedder
 ):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [a, b, c] = g.add([Entry(None, None, None, None) for _ in range(3)])
     g.embed([(a.id, "hello")])
     g.embed([(b.id, "hello")], partition="alpha")
@@ -256,7 +256,7 @@ def test_semantic_search_without_partition_spans_all_partitions(
 
 
 def test_embed_replaces_text_on_reembed(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
 
     g.embed([(saved.id, "first")])
@@ -266,7 +266,7 @@ def test_embed_replaces_text_on_reembed(tmp_path, fake_embedder):
 
 
 def test_embed_batches_embed_many(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     saved = g.add([Entry(None, None, None, None) for _ in range(10)])
 
     fake_embedder.embed_many_calls = 0
@@ -275,7 +275,7 @@ def test_embed_batches_embed_many(tmp_path, fake_embedder):
 
 
 def test_embed_returns_entries(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, "g1", None, {"k": "v"})])
 
     [embedded] = g.embed([(saved.id, "hello")])
@@ -285,31 +285,31 @@ def test_embed_returns_entries(tmp_path, fake_embedder):
 
 
 def test_embed_raises_for_unknown_id(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     with pytest.raises(ValueError, match="No entry with id"):
         g.embed([("01MISSINGMISSINGMISSINGMI", "hello")])
 
 
 @pytest.mark.parametrize("text", ["", "   ", "\n\t"])
 def test_embed_rejects_empty_text(tmp_path, fake_embedder, text):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
     with pytest.raises(ValueError, match="semantic_text must be non-empty"):
         g.embed([(saved.id, text)])
 
 
 def test_keyword_empty_is_noop(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     assert g.keyword([]) == []
 
 
 def test_keyword_none_is_noop(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     assert g.keyword() == []
 
 
 def test_keyword_indexes_for_match(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
 
     g.keyword([(saved.id, "the moon glows brightly")])
@@ -320,7 +320,7 @@ def test_keyword_indexes_for_match(tmp_path, fake_embedder):
 
 
 def test_keyword_replaces_text_on_reindex(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
 
     g.keyword([(saved.id, "moon")])
@@ -333,21 +333,21 @@ def test_keyword_replaces_text_on_reindex(tmp_path, fake_embedder):
 
 
 def test_keyword_raises_for_unknown_id(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     with pytest.raises(ValueError, match="No entry with id"):
         g.keyword([("01MISSINGMISSINGMISSINGMI", "hello")])
 
 
 @pytest.mark.parametrize("text", ["", "   ", "\n\t"])
 def test_keyword_rejects_empty_text(tmp_path, fake_embedder, text):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
     with pytest.raises(ValueError, match="keyword_text must be non-empty"):
         g.keyword([(saved.id, text)])
 
 
 def test_keyword_stores_threshold_rank(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
 
     g.keyword([(saved.id, "hello")], threshold_rank=0.25)
@@ -357,7 +357,7 @@ def test_keyword_stores_threshold_rank(tmp_path, fake_embedder):
 
 
 def test_keyword_remove_deletes_fts_row(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
     g.keyword([(saved.id, "hello")])
     assert g.keyword_search("hello") != []
@@ -368,12 +368,12 @@ def test_keyword_remove_deletes_fts_row(tmp_path, fake_embedder):
 
 
 def test_keyword_remove_missing_id_returns_empty(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     assert g.keyword_remove(["01MISSINGMISSINGMISSINGMI"]) == []
 
 
 def test_keyword_remove_leaves_entry_intact(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, "tale", None, {"k": "v"})])
     g.keyword([(saved.id, "hello")])
 
@@ -386,7 +386,7 @@ def test_keyword_remove_leaves_entry_intact(tmp_path, fake_embedder):
 
 
 def test_embed_remove_deletes_vec_row(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
     g.embed([(saved.id, "hello")])
     assert _has_vec_row(g._conn, saved.id)
@@ -397,12 +397,12 @@ def test_embed_remove_deletes_vec_row(tmp_path, fake_embedder):
 
 
 def test_embed_remove_missing_id_returns_empty(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     assert g.embed_remove(["01MISSINGMISSINGMISSINGMI"]) == []
 
 
 def test_embed_remove_leaves_entry_intact(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, "tale", None, {"k": "v"})])
     g.embed([(saved.id, "hello")])
 
@@ -415,7 +415,7 @@ def test_embed_remove_leaves_entry_intact(tmp_path, fake_embedder):
 
 
 def test_embed_stores_threshold_distance(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
 
     g.embed([(saved.id, "hello")], threshold_distance=0.75)
@@ -425,7 +425,7 @@ def test_embed_stores_threshold_distance(tmp_path, fake_embedder):
 
 
 def test_remove_cascades_to_fts_and_vec(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
     g.keyword([(saved.id, "hello")])
     g.embed([(saved.id, "hello")])
@@ -439,12 +439,12 @@ def test_remove_cascades_to_fts_and_vec(tmp_path, fake_embedder):
 
 
 def test_update_empty_is_noop(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     assert g.update([]) == []
 
 
 def test_update_returns_only_existing(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, {"a": 1})])
 
     updated = g.update(
@@ -459,7 +459,7 @@ def test_update_returns_only_existing(tmp_path, fake_embedder):
 
 
 def test_update_does_not_call_embedder(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
     fake_embedder.embed_calls = 0
     fake_embedder.embed_many_calls = 0
@@ -470,7 +470,7 @@ def test_update_does_not_call_embedder(tmp_path, fake_embedder):
 
 
 def test_update_changes_all_metadata_fields(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add(
         [
             Entry(
@@ -501,7 +501,7 @@ def test_update_changes_all_metadata_fields(tmp_path, fake_embedder):
 
 
 def test_update_clears_nullable_fields(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add(
         [
             Entry(
@@ -521,7 +521,7 @@ def test_update_clears_nullable_fields(tmp_path, fake_embedder):
 
 
 def test_semantic_search_surfaces_semantic_text(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [saved] = g.add([Entry(None, None, None, None)])
     g.embed([(saved.id, "the moon glows")])
 
@@ -532,7 +532,7 @@ def test_semantic_search_surfaces_semantic_text(tmp_path, fake_embedder):
 
 
 def test_semantic_search_uses_embed_not_embed_many(tmp_path, fake_embedder):
-    g = open_grimoire(tmp_path / "g.db", embedder=fake_embedder)
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     fake_embedder.embed_calls = 0
     fake_embedder.embed_many_calls = 0
     g.semantic_search("query")

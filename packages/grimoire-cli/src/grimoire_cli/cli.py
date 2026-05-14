@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from grimoire import grimoire
 from grimoire.data.entry import Entry, Filters
+from grimoire.grimoire import Grimoire
 
 from grimoire_cli import embed, mount
 
@@ -99,7 +99,7 @@ def mount_create_cmd(ctx: typer.Context) -> None:
     mnt: mount.Mount = ctx.obj
     mount.create(mnt)
 
-    with grimoire.open(mnt.default_db, embedder=embed.build_embedder(mnt.models_dir)):
+    with Grimoire.open(mnt.default_db, embedder=embed.build_embedder(mnt.models_dir)):
         pass
 
     typer.echo(json.dumps(asdict(mnt), indent=2, default=str))
@@ -143,7 +143,7 @@ def mount_add_cmd(
         raise typer.BadParameter(str(e)) from e
     db_path.parent.mkdir(exist_ok=True)
 
-    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)):
+    with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)):
         pass
 
     typer.echo(json.dumps({"db": db_path.parent.name, "path": str(db_path)}, indent=2))
@@ -285,7 +285,7 @@ def entry_add_cmd(
     except json.JSONDecodeError as e:
         raise typer.BadParameter(f"Invalid JSON payload: {e.msg}") from e
 
-    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+    with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
         try:
             [created] = g.add(
                 [
@@ -425,7 +425,7 @@ def entry_update_cmd(
     except json.JSONDecodeError as e:
         raise typer.BadParameter(f"Invalid JSON payload: {e.msg}") from e
 
-    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+    with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
         existing = g.fetch(Filters(id=[entry_id]), limit=1)
         if not existing:
             raise typer.BadParameter(f"No entry with id {entry_id!r}.")
@@ -491,7 +491,7 @@ def entry_get_cmd(
         target = f"database {db!r}" if db else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
-    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+    with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
         entries = g.fetch(Filters(id=[entry_id]), limit=1)
     if not entries:
         raise typer.BadParameter(f"No entry with id {entry_id!r}.")
@@ -530,7 +530,7 @@ def info_cmd(
         target = f"database {db!r}" if db else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
-    peeked = grimoire.peek(db_path)
+    peeked = Grimoire.peek(db_path)
     size_bytes = db_path.stat().st_size
     result = {
         "db": db,
@@ -602,7 +602,7 @@ def fetch_cmd(
         group_ref=group_refs or None,
     )
 
-    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+    with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
         entries = g.fetch(filters, limit=limit, cursor=cursor)
 
     typer.echo(json.dumps([asdict(e) for e in entries], indent=2, default=str))
@@ -666,7 +666,7 @@ def search_keyword_cmd(
     # match strength.
     fts_query = " OR ".join(f'"{t}"' for t in re.findall(r"\w+", query))
 
-    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+    with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
         hits = (
             g.keyword_search(fts_query, filters=filters, limit=limit)
             if fts_query
@@ -719,7 +719,7 @@ def search_semantic_cmd(
         target = f"database {db!r}" if db else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
-    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+    with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
         hits = g.semantic_search(query, partition=partition, limit=limit)
 
     result = [
@@ -758,7 +758,7 @@ def entry_delete_cmd(
         target = f"database {db!r}" if db else "default database"
         raise typer.BadParameter(f"No {target} in the mount.")
 
-    with grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
+    with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
         removed = g.remove([entry_id])
 
     typer.echo(json.dumps({"id": entry_id, "deleted": bool(removed)}, indent=2))
