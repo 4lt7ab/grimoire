@@ -10,6 +10,7 @@ from grimoire.data.entry import (
     Entry,
     Filters,
     KeywordHit,
+    OrderBy,
     SemanticHit,
 )
 from grimoire.embed import Embedder, NoOpEmbedder
@@ -157,15 +158,30 @@ class Grimoire:
         filters: Filters | None = None,
         limit: int = 100,
         cursor: str | None = None,
+        order_by: OrderBy = "id",
+        descending: bool = False,
     ) -> list[Entry]:
         """Fetch entries with their FTS5 and vec0 index fields populated.
 
         Entries with no keyword or semantic index row come back with the
-        corresponding fields set to None. ULIDs sort lexicographically by
-        creation time, so passing `cursor` set to the last entry's id from
-        the previous page walks entries chronologically.
+        corresponding fields set to None. Defaults to id-ascending order
+        (chronological by creation time); pass `order_by="ordinal"` to sort
+        by the consumer-supplied ordinal column instead, with `descending`
+        flipping the direction. NULL ordinals sort last either way; id is
+        the deterministic tiebreaker.
+
+        `cursor` is id-based (`e.id > cursor`) and pairs cleanly with the
+        default id-ascending order. For ordinal-window paging, use
+        `Filters.ordinal_gte` / `ordinal_lte` instead.
         """
-        return entry.fetch(self._conn, filters, limit, cursor=cursor)
+        return entry.fetch(
+            self._conn,
+            filters,
+            limit,
+            cursor=cursor,
+            order_by=order_by,
+            descending=descending,
+        )
 
     def keyword_remove(self, ids: list[str]) -> list[str]:
         """Delete entry_fts rows for the given ids. Returns the ids that had rows.

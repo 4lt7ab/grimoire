@@ -1251,3 +1251,54 @@ def test_search_keyword_fails_for_unknown_named_db(mounted):
     result = runner.invoke(app, ["search", "keyword", "anything", "-d", "nonesuch"])
     assert result.exit_code != 0
     assert "nonesuch" in result.output
+
+
+def test_entry_add_persists_ordinal(mounted):
+    entry_id = _add("--ordinal", "3.5")
+    result = runner.invoke(app, ["entry", "get", entry_id])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["ordinal"] == 3.5
+
+
+def test_entry_update_partial_preserves_ordinal(mounted):
+    entry_id = _add("--ordinal", "1.0")
+    result = runner.invoke(
+        app, ["entry", "update", entry_id, "--payload", '{"a":2}']
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["ordinal"] == 1.0
+
+
+def test_entry_update_put_clears_unspecified_ordinal(mounted):
+    entry_id = _add("--ordinal", "1.0")
+    result = runner.invoke(app, ["entry", "update", entry_id, "--put"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["ordinal"] is None
+
+
+def test_fetch_filters_ordinal_range_and_orders_by_ordinal(mounted):
+    a = _add("--ordinal", "1.0")
+    b = _add("--ordinal", "5.0")
+    _ = _add("--ordinal", "10.0")
+    result = runner.invoke(
+        app,
+        [
+            "fetch",
+            "--ordinal-gte",
+            "1.0",
+            "--ordinal-lte",
+            "5.0",
+            "--order-by",
+            "ordinal",
+            "--desc",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.output)
+    assert [r["id"] for r in rows] == [b, a]
+
+
+def test_fetch_rejects_unknown_order_by(mounted):
+    result = runner.invoke(app, ["fetch", "--order-by", "bogus"])
+    assert result.exit_code != 0
+    assert "order-by" in result.output.lower() or "ordinal" in result.output.lower()

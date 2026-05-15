@@ -538,3 +538,117 @@ def test_semantic_search_uses_embed_not_embed_many(tmp_path, fake_embedder):
     g.semantic_search("query")
     assert fake_embedder.embed_calls == 1
     assert fake_embedder.embed_many_calls == 0
+
+
+def test_add_round_trips_ordinal(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [saved] = g.add([Entry(None, None, None, None, ordinal=3.5)])
+    assert saved.ordinal == 3.5
+    [fetched] = g.fetch()
+    assert fetched.ordinal == 3.5
+
+
+def test_add_defaults_ordinal_to_none(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [saved] = g.add([Entry(None, None, None, None)])
+    [fetched] = g.fetch()
+    assert saved.ordinal is None
+    assert fetched.ordinal is None
+
+
+def test_update_changes_ordinal(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [saved] = g.add([Entry(None, None, None, None, ordinal=1.0)])
+    g.update([Entry(saved.id, None, None, None, ordinal=42.0)])
+    [fetched] = g.fetch()
+    assert fetched.ordinal == 42.0
+
+
+def test_update_clears_ordinal_with_none(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [saved] = g.add([Entry(None, None, None, None, ordinal=7.0)])
+    g.update([Entry(saved.id, None, None, None, ordinal=None)])
+    [fetched] = g.fetch()
+    assert fetched.ordinal is None
+
+
+def test_fetch_filters_by_ordinal_range(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    saved = g.add(
+        [
+            Entry(None, None, None, None, ordinal=o)
+            for o in [1.0, 2.5, 5.0, 10.0, None]
+        ]
+    )
+    in_window = g.fetch(filters=Filters(ordinal_gte=2.0, ordinal_lte=5.0))
+    expected = {saved[1].id, saved[2].id}
+    assert {e.id for e in in_window} == expected
+    # NULL ordinals fall outside any inclusive range.
+    only_lower = g.fetch(filters=Filters(ordinal_gte=0.0))
+    assert {e.ordinal for e in only_lower} == {1.0, 2.5, 5.0, 10.0}
+
+
+def test_fetch_order_by_ordinal_asc_sorts_nulls_last(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    saved = g.add(
+        [
+            Entry(None, None, None, None, ordinal=5.0),
+            Entry(None, None, None, None, ordinal=None),
+            Entry(None, None, None, None, ordinal=1.0),
+            Entry(None, None, None, None, ordinal=3.0),
+        ]
+    )
+    [a, b, c, d] = saved
+    rows = g.fetch(order_by="ordinal")
+    assert [r.id for r in rows] == [c.id, d.id, a.id, b.id]
+
+
+def test_fetch_order_by_ordinal_desc_sorts_nulls_last(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    saved = g.add(
+        [
+            Entry(None, None, None, None, ordinal=5.0),
+            Entry(None, None, None, None, ordinal=None),
+            Entry(None, None, None, None, ordinal=1.0),
+            Entry(None, None, None, None, ordinal=3.0),
+        ]
+    )
+    [a, b, c, d] = saved
+    rows = g.fetch(order_by="ordinal", descending=True)
+    assert [r.id for r in rows] == [a.id, d.id, c.id, b.id]
+
+
+def test_fetch_order_by_ordinal_tiebreaks_on_id(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    saved = g.add([Entry(None, None, None, None, ordinal=1.0) for _ in range(3)])
+    rows = g.fetch(order_by="ordinal")
+    assert [r.id for r in rows] == [e.id for e in saved]
+
+
+def test_fetch_order_by_id_descending(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    saved = g.add([Entry(None, None, None, None) for _ in range(3)])
+    rows = g.fetch(descending=True)
+    assert [r.id for r in rows] == [e.id for e in reversed(saved)]
+
+
+def test_fetch_rejects_unknown_order_by(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    with pytest.raises(ValueError, match="order_by"):
+        g.fetch(order_by="bogus")  # type: ignore[arg-type]
+
+
+def test_keyword_search_filters_by_ordinal_range(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    saved = g.add(
+        [
+            Entry(None, None, None, None, ordinal=1.0),
+            Entry(None, None, None, None, ordinal=5.0),
+            Entry(None, None, None, None, ordinal=None),
+        ]
+    )
+    for e in saved:
+        g.keyword([(e.id, "phoenix")])
+
+    hits = g.keyword_search("phoenix", filters=Filters(ordinal_gte=2.0))
+    assert {h.entry.id for h in hits} == {saved[1].id}

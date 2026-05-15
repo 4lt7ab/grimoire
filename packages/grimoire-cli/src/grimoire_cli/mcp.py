@@ -66,27 +66,47 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         ids: list[str] | None = None,
         group_keys: list[str] | None = None,
         group_refs: list[str] | None = None,
+        ordinal_gte: float | None = None,
+        ordinal_lte: float | None = None,
         cursor: str | None = None,
+        order_by: str = "id",
+        descending: bool = False,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
-        """Fetch entries matching the given filters, ordered chronologically by id.
+        """Fetch entries matching the given filters.
 
         Each entry carries its FTS5 (`keyword_text`, `threshold_rank`) and
         vec0 (`semantic_text`, `partition`, `threshold_distance`) index
         fields inline — null when the entry isn't indexed on that side.
+        Entries also carry their `ordinal` (a consumer-supplied numeric sort
+        key) inline.
 
-        For paging, pass `cursor` set to the last entry's id from the previous
-        page. ULIDs sort lexicographically by creation time, so cursor paging
-        walks entries in the order they were added.
+        Default order is by id (chronological); pass `order_by="ordinal"` to
+        sort by the ordinal column. NULL ordinals sort last. `descending`
+        reverses direction.
+
+        `cursor` is id-based; pair it with the default id-ascending order.
+        For ordinal-window paging, use `ordinal_gte` / `ordinal_lte`.
         """
+        if order_by not in {"id", "ordinal"}:
+            raise ValueError("`order_by` must be 'id' or 'ordinal'.")
+
         db_path = _resolve_db(mnt, db)
         filters = Filters(
             id=ids or None,
             group_key=group_keys or None,
             group_ref=group_refs or None,
+            ordinal_gte=ordinal_gte,
+            ordinal_lte=ordinal_lte,
         )
         with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
-            entries = g.fetch(filters, limit=limit, cursor=cursor)
+            entries = g.fetch(
+                filters,
+                limit=limit,
+                cursor=cursor,
+                order_by=order_by,  # type: ignore[arg-type]
+                descending=descending,
+            )
         return [asdict(e) for e in entries]
 
     @mcp.tool
@@ -106,6 +126,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         group_ref: str | None = None,
         context: str | None = None,
         payload: dict[str, Any] | None = None,
+        ordinal: float | None = None,
         keyword_text: str | None = None,
         threshold_rank: float | None = None,
         semantic_text: str | None = None,
@@ -116,6 +137,8 @@ def build_server(mnt: mount.Mount) -> FastMCP:
 
         Pass `keyword_text` to add an FTS5 row and `semantic_text` to embed a
         vec row. Either, both, or neither — the entry is always created.
+        `ordinal` stores a consumer-supplied numeric sort key on the entry
+        (timestamps, section numbers, measurements).
         """
         if keyword_text is None and threshold_rank is not None:
             raise ValueError("`threshold_rank` requires `keyword_text`.")
@@ -136,6 +159,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
                         group_ref=group_ref,
                         payload=payload,
                         context=context,
+                        ordinal=ordinal,
                     )
                 ]
             )
@@ -159,6 +183,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         group_ref: str | None = None,
         payload: dict[str, Any] | None = None,
         context: str | None = None,
+        ordinal: float | None = None,
         keyword_text: str | None = None,
         threshold_rank: float | None = None,
         semantic_text: str | None = None,
@@ -170,7 +195,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
 
         Default mode is partial-update: unspecified entry fields are preserved.
         Pass `put=True` to switch to replace mode for the entry fields
-        (group_key, group_ref, payload, context).
+        (group_key, group_ref, payload, context, ordinal).
 
         Indexing is decoupled from `put`: passing `keyword_text` always
         replaces the FTS5 row, and `semantic_text` always replaces the vec
@@ -199,6 +224,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
                     group_ref=group_ref,
                     payload=payload,
                     context=context,
+                    ordinal=ordinal,
                 )
             else:
                 merged = replace(
@@ -207,13 +233,12 @@ def build_server(mnt: mount.Mount) -> FastMCP:
                     group_ref=current.group_ref if group_ref is None else group_ref,
                     payload=current.payload if payload is None else payload,
                     context=current.context if context is None else context,
+                    ordinal=current.ordinal if ordinal is None else ordinal,
                 )
 
             [returned] = g.update([merged])
             if keyword_text is not None:
-                g.keyword(
-                    [(returned.id, keyword_text)], threshold_rank=threshold_rank
-                )
+                g.keyword([(returned.id, keyword_text)], threshold_rank=threshold_rank)
             if semantic_text is not None:
                 g.embed(
                     [(returned.id, semantic_text)],
@@ -242,18 +267,22 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         group_keys: list[str] | None = None,
         group_refs: list[str] | None = None,
         ids: list[str] | None = None,
+        ordinal_gte: float | None = None,
+        ordinal_lte: float | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         """Keyword search via FTS5 BM25.
 
-        Supports filtering by group_key, group_ref, and id. `rank` is the BM25
-        score (higher = better, non-negative).
+        Supports filtering by group_key, group_ref, id, and ordinal range.
+        `rank` is the BM25 score (higher = better, non-negative).
         """
         db_path = _resolve_db(mnt, db)
         filters = Filters(
             id=ids or None,
             group_key=group_keys or None,
             group_ref=group_refs or None,
+            ordinal_gte=ordinal_gte,
+            ordinal_lte=ordinal_lte,
         )
         # Quote-wrap each word token so apostrophes, punctuation, and bareword
         # FTS5 operators (AND/OR/NOT/NEAR/*) can't reach the parser. Join with

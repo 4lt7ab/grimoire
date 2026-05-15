@@ -18,10 +18,13 @@ CREATE TABLE entry (
     group_key TEXT,
     group_ref TEXT,
     payload   TEXT,
-    context   TEXT
+    context   TEXT,
+    ordinal   REAL
 );
 
 CREATE INDEX entry_group_key ON entry(group_key);
+
+CREATE INDEX entry_ordinal ON entry(ordinal);
 
 CREATE UNIQUE INDEX entry_group_ref_unique ON entry(group_key, group_ref)
     WHERE group_key IS NOT NULL AND group_ref IS NOT NULL;

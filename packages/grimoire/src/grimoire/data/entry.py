@@ -3,7 +3,7 @@ import sqlite3
 import struct
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from ulid import ULID
 
@@ -15,6 +15,7 @@ class Entry:
     group_ref: str | None
     payload: dict[str, Any] | None
     context: str | None = None
+    ordinal: float | None = None
     keyword_text: str | None = None
     threshold_rank: float | None = None
     semantic_text: str | None = None
@@ -41,6 +42,7 @@ def _row_to_entry(r: sqlite3.Row) -> Entry:
         group_ref=r["group_ref"],
         payload=json.loads(r["payload"]) if r["payload"] is not None else None,
         context=r["context"],
+        ordinal=r["ordinal"],
         keyword_text=r["keyword_text"],
         threshold_rank=r["threshold_rank"],
         semantic_text=r["semantic_text"],
@@ -67,13 +69,14 @@ def add(
             group_ref=e.group_ref,
             payload=e.payload,
             context=e.context,
+            ordinal=e.ordinal,
         )
         for e in entries
     ]
     try:
         conn.executemany(
-            "INSERT INTO entry (id, group_key, group_ref, payload, context) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO entry (id, group_key, group_ref, payload, context, ordinal) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             [
                 (
                     e.id,
@@ -81,6 +84,7 @@ def add(
                     e.group_ref,
                     json.dumps(e.payload) if e.payload is not None else None,
                     e.context,
+                    e.ordinal,
                 )
                 for e in saved
             ],
@@ -215,9 +219,10 @@ def update(
         try:
             cur = conn.execute(
                 "UPDATE entry "
-                "SET group_key = ?, group_ref = ?, payload = ?, context = ? "
+                "SET group_key = ?, group_ref = ?, payload = ?, context = ?,"
+                "    ordinal = ? "
                 "WHERE id = ?",
-                (e.group_key, e.group_ref, payload_text, e.context, e.id),
+                (e.group_key, e.group_ref, payload_text, e.context, e.ordinal, e.id),
             )
         except sqlite3.IntegrityError as exc:
             raise ValueError(
@@ -261,10 +266,24 @@ class Filters:
     id: list[str] | None = None
     group_key: list[str] | None = None
     group_ref: list[str] | None = None
+    ordinal_gte: float | None = None
+    ordinal_lte: float | None = None
 
+
+OrderBy = Literal["id", "ordinal"]
+
+# NULLS LAST on the keyed column so unindexed entries don't bury the head of the
+# result; id is the deterministic tiebreaker. Cursor pagination uses `e.id >
+# :cursor` and is therefore only meaningful with the id-ASC default.
+_ORDER_CLAUSES: dict[tuple[OrderBy, bool], str] = {
+    ("id", False): "ORDER BY e.id ASC",
+    ("id", True): "ORDER BY e.id DESC",
+    ("ordinal", False): "ORDER BY e.ordinal ASC NULLS LAST, e.id ASC",
+    ("ordinal", True): "ORDER BY e.ordinal DESC NULLS LAST, e.id ASC",
+}
 
 _FETCH_SQL = """
-SELECT e.id, e.group_key, e.group_ref, e.payload, e.context,
+SELECT e.id, e.group_key, e.group_ref, e.payload, e.context, e.ordinal,
        fts.keyword_text AS keyword_text,
        fts.threshold_rank AS threshold_rank,
        v.semantic_text AS semantic_text,
@@ -276,8 +295,10 @@ LEFT JOIN entry_vec v ON v.id = e.id
 WHERE (:ids IS NULL OR e.id IN (SELECT value FROM json_each(:ids)))
   AND (:group_keys IS NULL OR e.group_key IN (SELECT value FROM json_each(:group_keys)))
   AND (:group_refs IS NULL OR e.group_ref IN (SELECT value FROM json_each(:group_refs)))
+  AND (:ordinal_gte IS NULL OR e.ordinal >= :ordinal_gte)
+  AND (:ordinal_lte IS NULL OR e.ordinal <= :ordinal_lte)
   AND (:cursor IS NULL OR e.id > :cursor)
-ORDER BY e.id
+{order_by}
 LIMIT :limit
 """
 
@@ -287,22 +308,39 @@ def fetch(
     filters: Filters | None = None,
     limit: int = 100,
     cursor: str | None = None,
+    order_by: OrderBy = "id",
+    descending: bool = False,
 ) -> list[Entry]:
     """Fetch entries with their FTS5 and vec0 index rows attached.
 
-    Rows come back ordered by id (chronologically, since ids are ULIDs).
+    Default ordering is by id (chronologically, since ids are ULIDs). Pass
+    `order_by="ordinal"` to sort by the consumer-supplied ordinal column;
+    NULL ordinals sort last, with id as a deterministic tiebreaker.
+    `descending=True` reverses the primary key direction.
+
     Entries with no keyword or semantic index row come back with the
     corresponding fields set to None. `cursor`, when given, returns entries
     with `id > cursor` — pass the id of the last entry from the previous
-    page to walk forward.
+    page to walk forward. Cursor is id-based, so it only composes cleanly
+    with the default `order_by="id"`, `descending=False`. For ordinal-window
+    paging, use `Filters.ordinal_gte`/`ordinal_lte`.
     """
+    clause = _ORDER_CLAUSES.get((order_by, descending))
+    if clause is None:
+        raise ValueError(
+            f"order_by must be one of {sorted({k for k, _ in _ORDER_CLAUSES})};"
+            f" got {order_by!r}"
+        )
+
     f = filters or Filters()
     cur = conn.execute(
-        _FETCH_SQL,
+        _FETCH_SQL.format(order_by=clause),
         {
             "ids": json.dumps(f.id) if f.id else None,
             "group_keys": json.dumps(f.group_key) if f.group_key else None,
             "group_refs": json.dumps(f.group_ref) if f.group_ref else None,
+            "ordinal_gte": f.ordinal_gte,
+            "ordinal_lte": f.ordinal_lte,
             "cursor": cursor,
             "limit": limit,
         },
@@ -330,6 +368,8 @@ def keyword_search(
         "       (SELECT value FROM json_each(:group_keys))) "
         "  AND (:group_refs IS NULL OR e.group_ref IN "
         "       (SELECT value FROM json_each(:group_refs))) "
+        "  AND (:ordinal_gte IS NULL OR e.ordinal >= :ordinal_gte) "
+        "  AND (:ordinal_lte IS NULL OR e.ordinal <= :ordinal_lte) "
         "ORDER BY bm25(entry_fts)"
     )
     params: dict[str, Any] = {
@@ -337,6 +377,8 @@ def keyword_search(
         "ids": json.dumps(f.id) if f.id else None,
         "group_keys": json.dumps(f.group_key) if f.group_key else None,
         "group_refs": json.dumps(f.group_ref) if f.group_ref else None,
+        "ordinal_gte": f.ordinal_gte,
+        "ordinal_lte": f.ordinal_lte,
     }
     if limit is not None:
         sql = sql + "\nLIMIT :limit"
@@ -350,9 +392,7 @@ def keyword_search(
     entries_by_id = {
         e.id: e for e in fetch(conn, Filters(id=ids_in_order), limit=len(ids_in_order))
     }
-    return [
-        KeywordHit(entry=entries_by_id[r["id"]], score=r["score"]) for r in matches
-    ]
+    return [KeywordHit(entry=entries_by_id[r["id"]], score=r["score"]) for r in matches]
 
 
 _SEMANTIC_SEARCH_BY_PARTITION_SQL = """

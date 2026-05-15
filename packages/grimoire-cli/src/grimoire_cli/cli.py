@@ -220,6 +220,16 @@ def entry_add_cmd(
         str | None,
         typer.Option("--payload", help="JSON payload object."),
     ] = None,
+    ordinal: Annotated[
+        float | None,
+        typer.Option(
+            "--ordinal",
+            help=(
+                "Numeric sort key for consumer-defined ordering (timestamps,"
+                " section numbers, measurements). Indexed; nullable."
+            ),
+        ),
+    ] = None,
     keyword_text: Annotated[
         str | None,
         typer.Option(
@@ -295,6 +305,7 @@ def entry_add_cmd(
                         group_ref=group_ref,
                         payload=payload_data,
                         context=context,
+                        ordinal=ordinal,
                     )
                 ]
             )
@@ -340,6 +351,16 @@ def entry_update_cmd(
     context: Annotated[
         str | None,
         typer.Option("--context", help="Unindexed contextual text."),
+    ] = None,
+    ordinal: Annotated[
+        float | None,
+        typer.Option(
+            "--ordinal",
+            help=(
+                "Numeric sort key for consumer-defined ordering. In --put mode,"
+                " omit to clear; in partial mode, omit to preserve."
+            ),
+        ),
     ] = None,
     keyword_text: Annotated[
         str | None,
@@ -438,6 +459,7 @@ def entry_update_cmd(
                 group_ref=group_ref,
                 payload=payload_value if payload_provided else None,
                 context=context,
+                ordinal=ordinal,
             )
         else:
             merged = replace(
@@ -446,14 +468,13 @@ def entry_update_cmd(
                 group_ref=current.group_ref if group_ref is None else group_ref,
                 payload=payload_value if payload_provided else current.payload,
                 context=current.context if context is None else context,
+                ordinal=current.ordinal if ordinal is None else ordinal,
             )
 
         try:
             [returned] = g.update([merged])
             if keyword_text is not None:
-                g.keyword(
-                    [(returned.id, keyword_text)], threshold_rank=threshold_rank
-                )
+                g.keyword([(returned.id, keyword_text)], threshold_rank=threshold_rank)
             if semantic_text is not None:
                 g.embed(
                     [(returned.id, semantic_text)],
@@ -565,6 +586,20 @@ def fetch_cmd(
             "--group-ref", help="Filter to entries with these group refs. Repeatable."
         ),
     ] = None,
+    ordinal_gte: Annotated[
+        float | None,
+        typer.Option(
+            "--ordinal-gte",
+            help="Restrict to entries with ordinal >= this value.",
+        ),
+    ] = None,
+    ordinal_lte: Annotated[
+        float | None,
+        typer.Option(
+            "--ordinal-lte",
+            help="Restrict to entries with ordinal <= this value.",
+        ),
+    ] = None,
     cursor: Annotated[
         str | None,
         typer.Option(
@@ -575,17 +610,39 @@ def fetch_cmd(
             ),
         ),
     ] = None,
+    order_by: Annotated[
+        str,
+        typer.Option(
+            "--order-by",
+            help="Sort column: 'id' (chronological) or 'ordinal'.",
+        ),
+    ] = "id",
+    desc: Annotated[
+        bool,
+        typer.Option(
+            "--desc",
+            help="Sort descending instead of ascending.",
+        ),
+    ] = False,
     limit: Annotated[
         int,
         typer.Option("--limit", help="Maximum entries to return.", min=0),
     ] = 100,
 ) -> None:
-    """Fetch Grimoire entries matching the given filters, ordered chronologically by id.
+    """Fetch Grimoire entries matching the given filters.
+
+    Default order is by id (chronological, since ids are ULIDs); pass
+    `--order-by ordinal` to sort by the consumer-supplied ordinal column
+    instead. NULL ordinals sort last. `--desc` reverses direction.
 
     For paging, pass `--cursor <id>` where `<id>` is the last entry's id from
-    the previous page. ULIDs sort lexicographically by creation time, so
-    cursor paging walks entries in the order they were added.
+    the previous page. Cursor is id-based; pair it with the default
+    `--order-by id` (ascending). For ordinal-window paging, use
+    `--ordinal-gte` / `--ordinal-lte`.
     """
+    if order_by not in {"id", "ordinal"}:
+        raise typer.BadParameter("--order-by must be 'id' or 'ordinal'.")
+
     mnt = _existing_mount(ctx)
 
     try:
@@ -600,10 +657,18 @@ def fetch_cmd(
         id=ids or None,
         group_key=group_keys or None,
         group_ref=group_refs or None,
+        ordinal_gte=ordinal_gte,
+        ordinal_lte=ordinal_lte,
     )
 
     with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
-        entries = g.fetch(filters, limit=limit, cursor=cursor)
+        entries = g.fetch(
+            filters,
+            limit=limit,
+            cursor=cursor,
+            order_by=order_by,  # type: ignore[arg-type]
+            descending=desc,
+        )
 
     typer.echo(json.dumps([asdict(e) for e in entries], indent=2, default=str))
 
@@ -635,6 +700,20 @@ def search_keyword_cmd(
         list[str] | None,
         typer.Option("--id", help="Filter to entries with these ids. Repeatable."),
     ] = None,
+    ordinal_gte: Annotated[
+        float | None,
+        typer.Option(
+            "--ordinal-gte",
+            help="Restrict hits to entries with ordinal >= this value.",
+        ),
+    ] = None,
+    ordinal_lte: Annotated[
+        float | None,
+        typer.Option(
+            "--ordinal-lte",
+            help="Restrict hits to entries with ordinal <= this value.",
+        ),
+    ] = None,
     limit: Annotated[
         int,
         typer.Option("--limit", help="Maximum hits.", min=0),
@@ -642,7 +721,7 @@ def search_keyword_cmd(
 ) -> None:
     """Keyword search via FTS5 BM25.
 
-    Supports filtering by group_key, group_ref, and id.
+    Supports filtering by group_key, group_ref, id, and ordinal range.
     `rank` is the BM25 score (higher = better, non-negative).
     """
     mnt = _existing_mount(ctx)
@@ -659,6 +738,8 @@ def search_keyword_cmd(
         id=ids or None,
         group_key=group_keys or None,
         group_ref=group_refs or None,
+        ordinal_gte=ordinal_gte,
+        ordinal_lte=ordinal_lte,
     )
     # Quote-wrap each word token so apostrophes, punctuation, and bareword FTS5
     # operators (AND/OR/NOT/NEAR/*) can't reach the parser. Join with OR so
@@ -673,9 +754,7 @@ def search_keyword_cmd(
             else []
         )
 
-    result = [
-        {"entry": asdict(h.entry), "rank": h.score} for h in hits
-    ]
+    result = [{"entry": asdict(h.entry), "rank": h.score} for h in hits]
     typer.echo(json.dumps(result, indent=2, default=str))
 
 
@@ -722,9 +801,7 @@ def search_semantic_cmd(
     with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)) as g:
         hits = g.semantic_search(query, partition=partition, limit=limit)
 
-    result = [
-        {"entry": asdict(h.entry), "distance": h.distance} for h in hits
-    ]
+    result = [{"entry": asdict(h.entry), "distance": h.distance} for h in hits]
     typer.echo(json.dumps(result, indent=2, default=str))
 
 
