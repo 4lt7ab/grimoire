@@ -13,7 +13,9 @@ uv tool install '4lt7ab-grimoire-cli[fastembed]'
 
 Both install into an isolated venv — clean uninstall, no impact on system Python. The `fastembed` extra pulls the bundled embedder (ONNX-based, no service required).
 
-The `grimoire` command is now on your `PATH`.
+The `grimoire` command is now on your `PATH`. Confirm the install with `grimoire --version`.
+
+The first `grimoire mount create` (and the first time you reuse the mount on a new machine) fetches the default embedder weights (~30 MB) from HuggingFace into the mount's `__models__/` cache. Subsequent runs reuse the cache and stay offline. On macOS, if the fetch stalls on TLS errors, set `HF_HUB_DISABLE_XET=1` once to bypass the xet CDN.
 
 ## Mount model
 
@@ -85,6 +87,14 @@ grimoire info
 Every command prints pretty-indented JSON. Pipe through `jq` for filtering and extraction.
 
 ## Commands
+
+### Global options
+
+| Option | Behavior |
+|---|---|
+| `--mount <dir>` | Override the mount path for this invocation. Precedence: `--mount` > `$GRIMOIRE_MOUNT` > `~/.grimoire`. |
+| `--version` | Print the CLI version and exit. |
+| `--help` | Print help for the command (or subcommand) and exit. |
 
 ### Mount administration
 
