@@ -38,6 +38,18 @@ export GRIMOIRE_MOUNT=$PWD/.grimoire
 
 A mount can hold one **default database** at `<mount>/grimoire.db` plus any number of **named databases** under `<mount>/<name>/grimoire.db`. Pick which one a command targets with `--db <name>` / `-d <name>`; omit `--db` to target the default. Names must match `[a-z0-9_-]+` and cannot begin with `__` (reserved).
 
+## Mental model
+
+A grimoire entry has two layers:
+
+- The **entry** itself: `uniq_id` (library-assigned ULID) + `data` (JSON blob).
+- Three opt-in **sidecars** keyed by that `uniq_id`:
+  - **`entry_idx`** — typed filterable columns: `uniq_ref` (external reference), `nominal_1`/`nominal_2` (categorical labels), `ordinal_1`/`ordinal_2`/`ordinal_3` (sortable numbers).
+  - **`entry_fts`** — FTS5 keyword text.
+  - **`entry_vec`** — semantic vector + source text.
+
+`entry add` creates an entry and optionally writes any subset of the three sidecars in the same call. Sidecar writes are **PUT** — supplying any of `--ref`/`--ord-*`/`--nom-*` wholesale-replaces the `entry_idx` row; supplying `--match` replaces the FTS row; supplying `--search` replaces the vec row. Deleting an entry cascade-cleans every sidecar via a DB trigger.
+
 ## Quickstart
 
 ```sh
@@ -46,24 +58,27 @@ export GRIMOIRE_MOUNT=$PWD/.grimoire
 # Create the mount + default DB. Idempotent.
 grimoire mount create
 
-# Add an entry. `--keyword-text` and `--semantic-text` are independent —
-# pick one, both, or neither (metadata-only).
+# Add an entry with data, idx metadata, keyword text, and semantic text.
+# Each idx/match/search flag is independent — pick any subset.
 grimoire entry add \
-    --group-key creature \
-    --group-ref phoenix-001 \
-    --payload '{"habitat": "volcano"}' \
-    --context "discovered in the southern volcanic chain" \
-    --keyword-text "phoenix fire-bird ashes" \
-    --semantic-text "A solar phoenix reborn from its own ashes at dawn"
+    --data '{"habitat": "volcano"}' \
+    --ref phoenix-001 \
+    --nom-1 creature \
+    --ord-1 1.0 \
+    --match "phoenix fire-bird ashes" \
+    --search "A solar phoenix reborn from its own ashes at dawn"
 
 # Search.
-grimoire search semantic "creatures that come back from the dead"
-grimoire search keyword "phoenix"
+grimoire search "creatures that come back from the dead"
+grimoire match "phoenix"
 
-# Browse chronologically; each id IS its own cursor.
-grimoire fetch --limit 50
+# Browse entry_idx rows with filters.
+grimoire query --equals nominal_1=creature --gte ordinal_1=0.5
 
-# Inspect the database — model, dimension, schema version, counts, file size.
+# Look up entries by external reference.
+grimoire fetch phoenix-001
+
+# Inspect the database — model, dimension, schema version, per-table counts, file size.
 grimoire info
 ```
 
@@ -83,7 +98,7 @@ Wipe the entire mount: every database, the model cache, the registry. There is n
 
 #### `grimoire mount add <name>`
 
-Create a named database in the mount. Errors if the database already exists. The mount itself must already exist (run `mount create` first).
+Create a named database in the mount. The mount itself must already exist (run `mount create` first).
 
 #### `grimoire mount ls`
 
@@ -97,96 +112,94 @@ Delete a single named database file from the mount. The model cache and other da
 
 #### `grimoire info [--db <name>]`
 
-Show metadata for a database: embedder lock (`model`, `dimension`), `schema_version`, `entry_count`, per-group and per-partition counts, file path, file size. Does not load the embedder.
-
-#### `grimoire fetch [filters] [--cursor <id>] [--limit <n>]`
-
-List entries chronologically, with optional filters and ULID-cursor paging.
-
-| Option | Behavior |
-|---|---|
-| `--db`, `-d` | Target a named DB. Omit for the default. |
-| `--id` | Filter to entries with this id. Repeatable. |
-| `--group-key` | Filter to entries with this `group_key`. Repeatable. |
-| `--group-ref` | Filter to entries with this `group_ref`. Repeatable. |
-| `--cursor` | Return entries with `id > <cursor>`. Pass the last id of the previous page. |
-| `--limit` | Maximum entries to return (default 100). |
-
-```sh
-LAST=$(grimoire fetch --limit 100 | jq -r '.[-1].id')
-grimoire fetch --limit 100 --cursor "$LAST"
-```
+Show metadata for a database: embedder lock (`model`, `dimension`), `schema_version`, per-table row counts (`entry_count`, `entry_idx_count`, `entry_fts_count`, `entry_vec_count`), file path, file size. Does not load the embedder.
 
 ### Entry CRUD
 
 #### `grimoire entry add [options]`
 
-Create an entry. Pass `--keyword-text` and/or `--semantic-text` to (re-)index in the same call; omit both for a metadata-only record.
+Create an entry and optionally PUT-index its sidecars in one call.
+
+| Option | Behavior |
+|---|---|
+| `--db`, `-d` | Target a named DB. Omit for the default. |
+| `--data` | JSON value stored in `entry.data` (object, array, scalar, or null). |
+| `--ref` | `entry_idx.uniq_ref` value. |
+| `--nom-1`, `--nom-2` | `entry_idx.nominal_1` / `nominal_2` values. |
+| `--ord-1`, `--ord-2`, `--ord-3` | `entry_idx.ordinal_1` / `ordinal_2` / `ordinal_3` (REAL) values. |
+| `--match` | Text written to the FTS5 row. PUT-replaces the entry's `entry_fts` row. |
+| `--search` | Text embedded via the bundled embedder. PUT-replaces the entry's `entry_vec` row. |
+
+Supplying any of `--ref`, `--nom-*`, `--ord-*` PUT-replaces the entry's `entry_idx` row; omitted columns become NULL. Omit all three to leave `entry_idx` untouched.
+
+#### `grimoire entry update <uniq_id> [options]`
+
+Update entry data and/or PUT-index sidecars. Omit `--data` to leave the data column untouched. Sidecar flags follow the same PUT semantics as `entry add`.
+
+#### `grimoire entry get <uniq_id> [<uniq_id>...]`
+
+Fetch one or more entries by `uniq_id`. Returns a JSON array of entry objects.
+
+#### `grimoire entry remove <uniq_id> --yes`
+
+Remove an entry. Sidecar rows are cascade-cleaned by DB trigger. `--yes` is required. Returns `{"uniq_id": <id>, "removed": <bool>}` — `removed=false` if the id did not exist.
+
+### Reads
+
+All four read commands return paired results: each match is `{"entry": {...}, "<key>": ...}`, where `<key>` is `"index"`, `"score"`, or `"distance"` depending on the command.
+
+#### `grimoire query [filters] [--cursor <id>] [--limit <n>]`
+
+Browse `entry_idx` rows ordered by `uniq_id` ASC, joined to `entry` for the data side. Returns `[{"entry": {...}, "index": {...}}, ...]`.
 
 | Option | Behavior |
 |---|---|
 | `--db`, `-d` | Target a named DB. |
-| `--group-key` | Group key metadata. |
-| `--group-ref` | External reference id within the group. |
-| `--context` | Unindexed contextual prose (not searched). |
-| `--payload` | JSON object string. |
-| `--keyword-text` | Text written to the FTS5 row. Triggers a keyword (re-)index. |
-| `--threshold-rank` | Minimum BM25 score for keyword hits (non-negative). Requires `--keyword-text`. |
-| `--semantic-text` | Text written to the vec row. Triggers an embed (re-)index. |
-| `--partition` | Vec partition to write into. Requires `--semantic-text`. |
-| `--threshold-distance` | Maximum vector distance for semantic hits (non-negative). Requires `--semantic-text`. |
+| `--equals KEY=VAL` | Filter `entry_idx.<KEY> IN (...)`. Repeatable. Valid keys: any of the seven `entry_idx` columns. |
+| `--gte KEY=NUMBER` | Filter `entry_idx.<KEY> >= NUMBER`. Repeatable. Valid keys: `ordinal_1`/`ordinal_2`/`ordinal_3`. |
+| `--lte KEY=NUMBER` | Filter `entry_idx.<KEY> <= NUMBER`. Repeatable. |
+| `--cursor` | Return rows with `uniq_id > <cursor>`. Pass the last id of the previous page. |
+| `--limit` | Maximum rows (default 100). |
 
-`(group_key, group_ref)` collisions raise an error.
+```sh
+LAST=$(grimoire query --limit 100 | jq -r '.[-1].entry.uniq_id')
+grimoire query --limit 100 --cursor "$LAST"
+```
 
-#### `grimoire entry update <id> [options] [--put]`
+#### `grimoire fetch <uniq_ref> [<uniq_ref>...]`
 
-Update `group_key`, `group_ref`, `payload`, and `context` on an entry. Default is partial-update: unspecified fields keep their current value. Pass `--put` to switch to replace mode — any field not given on the command line is set to NULL.
+Fetch entries whose `entry_idx.uniq_ref` is in the given list. Returns `[{"entry": {...}, "index": {...}}, ...]`. `uniq_ref` is non-unique (multiple entries may share one); entries without an `entry_idx` row are invisible to `fetch`.
 
-The same indexing options as `entry add` are accepted: passing `--keyword-text` always replaces the FTS5 row, and `--semantic-text` always replaces the vec row. Leaving them off preserves the existing index rows. Indexing is decoupled from `--put`.
+#### `grimoire match <query> [filters] [--limit <n>]`
 
-#### `grimoire entry get <id>`
-
-Fetch a single entry by id.
-
-#### `grimoire entry delete <id> --yes`
-
-Delete an entry, cascading to its FTS and vec rows. `--yes` is required.
-
-### Searching
-
-#### `grimoire search keyword <query> [filters] [--limit <n>]`
-
-FTS5 BM25 search. Free-form prose is tokenized into safe FTS5 syntax automatically: each word token is quoted and joined with `OR`, so apostrophes, punctuation, and bareword FTS5 operators (`AND`, `OR`, `NOT`, `NEAR`, `*`) in the query can't reach the parser.
+FTS5 BM25 keyword search. Free-form prose is tokenized into safe FTS5 syntax automatically: each word token is quoted and joined with `OR`, so apostrophes, punctuation, and bareword FTS5 operators (`AND`, `OR`, `NOT`, `NEAR`, `*`) in the query can't reach the parser.
 
 | Option | Behavior |
 |---|---|
 | `--db`, `-d` | Target a named DB. |
-| `--id` | Restrict hits to these ids. Repeatable. |
-| `--group-key` | Restrict hits to these group keys. Repeatable. |
-| `--group-ref` | Restrict hits to these group refs. Repeatable. |
+| `--equals KEY=VAL`, `--gte KEY=NUMBER`, `--lte KEY=NUMBER` | Apply `entry_idx` filters via JOIN. Same shape as `query`. |
 | `--limit` | Maximum hits (default 10). |
 
-Returns hits as `{"entry": {...}, "rank": <bm25>}`. `rank` is the BM25 score (higher = better, non-negative); the entry carries its `keyword_text` and `threshold_rank` inline.
+Returns `[{"entry": {...}, "score": <bm25>}, ...]`. `score` is positive (higher = better).
 
-#### `grimoire search semantic <query> [--partition <p>] [--limit <n>]`
+#### `grimoire search <query> [--limit <n>]`
 
-vec0 KNN search. Embeds the query via the bundled embedder, then ranks by vector distance.
+vec0 KNN semantic search. Embeds the query via the bundled embedder, then ranks by vector distance.
 
 | Option | Behavior |
 |---|---|
 | `--db`, `-d` | Target a named DB. |
-| `--partition` | Restrict KNN to this partition. Omit to span every partition. |
 | `--limit` | Maximum hits (default 10). |
 
-Returns hits as `{"entry": {...}, "distance": <float>}`. `distance` is the vec0 distance (lower = better, non-negative); the entry carries its `semantic_text`, `partition`, and `threshold_distance` inline.
+Returns `[{"entry": {...}, "distance": <float>}, ...]`. `distance` is the raw vec0 distance (lower = better, non-negative).
 
 ### MCP server
 
 #### `grimoire mcp serve`
 
-Run a FastMCP server over stdio, scoped to this mount. Wires the same read+write surface as the CLI into MCP tools that an AI client can call directly. Mount administration (`mount create/destroy/add/remove`) stays CLI-only.
+Run a FastMCP server over stdio, scoped to this mount. Wires the library's read+write surface as MCP tools an AI client can call directly. Mount administration (`mount create/destroy/add/remove`) stays CLI-only.
 
-Tools exposed: `info`, `fetch`, `entry_get`, `entry_add`, `entry_update`, `entry_delete`, `search_keyword`, `search_semantic`. `entry_add` and `entry_update` accept the same `keyword_text`/`semantic_text` (plus thresholds and `partition`) params as their CLI counterparts.
+Tools exposed: `info`, `add`, `update`, `get`, `remove`, `query`, `fetch`, `match`, `search`. `add` and `update` both accept the data + idx + match + search kwargs (mirroring the CLI's `entry add`/`entry update`). For MCP `update`, passing `data: null` (or omitting it) leaves the data column alone — there's no way to MCP-update an entry's data to NULL because JSON can't distinguish "passed null" from "not passed."
 
 ## Output format
 

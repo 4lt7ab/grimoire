@@ -3,652 +3,420 @@ from grimoire.data.entry import Entry, Filters
 from grimoire.grimoire import Grimoire
 
 
-def _has_vec_row(conn, entry_id: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM entry_vec WHERE id = ?",
-        (entry_id,),
-    ).fetchone()
-    return row is not None
+# ----------------------------------------------------------------------
+# entry CRUD
+# ----------------------------------------------------------------------
 
 
-def _vec_partition(conn, entry_id: str) -> str | None:
-    return conn.execute(
-        "SELECT partition FROM entry_vec WHERE id = ?",
-        (entry_id,),
-    ).fetchone()["partition"]
-
-
-def _vec_semantic_text(conn, entry_id: str) -> str | None:
-    return conn.execute(
-        "SELECT semantic_text FROM entry_vec WHERE id = ?",
-        (entry_id,),
-    ).fetchone()["semantic_text"]
-
-
-def test_add_does_not_call_embedder(tmp_path, fake_embedder):
+def test_add_assigns_uniq_id(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    g.add(
-        [
-            Entry(None, None, None, None),
-            Entry(None, None, None, {"only": "payload"}),
-        ]
-    )
-    assert fake_embedder.embed_calls == 0
-    assert fake_embedder.embed_many_calls == 0
+    [e] = g.add([Entry(uniq_id=None, data={"k": "v"})])
+    assert e.uniq_id is not None
+    assert e.data == {"k": "v"}
 
 
-def test_add_does_not_write_vec_rows(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-    assert not _has_vec_row(g._conn, saved.id)
-
-
-def test_add_empty_does_not_call_embedder(tmp_path, fake_embedder):
+def test_add_empty_returns_empty(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     assert g.add([]) == []
-    assert fake_embedder.embed_many_calls == 0
 
 
 @pytest.mark.parametrize(
-    "payload",
+    "data",
     [
-        {"order": "Istari", "headmaster": True, "levels": [1, 2, 3]},
+        {"a": 1, "nested": [1, 2]},
         [1, 2, 3],
-        "a scalar string",
+        "scalar string",
         42,
         3.14,
         True,
-        False,
         None,
     ],
 )
-def test_add_round_trips_any_json_payload(tmp_path, fake_embedder, payload):
+def test_add_round_trips_data_payloads(tmp_path, fake_embedder, data):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, payload)])
-    [fetched] = g.fetch()
-    assert saved.payload == payload
-    assert fetched.payload == payload
+    [e] = g.add([Entry(uniq_id=None, data=data)])
+    [fetched] = g.get([e.uniq_id])
+    assert fetched.data == data
 
 
-def test_add_rejects_duplicate_group_key_and_ref(tmp_path, fake_embedder):
+def test_update_replaces_data(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    g.add([Entry(None, "wizard", "gandalf", None)])
-    with pytest.raises(ValueError, match="group_key, group_ref"):
-        g.add([Entry(None, "wizard", "gandalf", None)])
+    [e] = g.add([Entry(None, {"a": 1})])
+    [updated] = g.update([Entry(e.uniq_id, {"a": 2})])
+    assert updated.data == {"a": 2}
+    [fetched] = g.get([e.uniq_id])
+    assert fetched.data == {"a": 2}
 
 
-def test_add_allows_same_ref_across_different_keys(tmp_path, fake_embedder):
+def test_update_unknown_id_silently_skipped(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    g.add([Entry(None, "wizard", "gandalf", None)])
-    g.add([Entry(None, "spell", "gandalf", None)])
-    assert len(g.fetch()) == 2
-
-
-def test_add_allows_null_group_ref_duplicates(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    g.add([Entry(None, "wizard", None, None)])
-    g.add([Entry(None, "wizard", None, None)])
-    g.add([Entry(None, None, "gandalf", None)])
-    g.add([Entry(None, None, "gandalf", None)])
-    assert len(g.fetch()) == 4
-
-
-def test_fetch_cursor_returns_entries_after_cursor(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    saved = g.add([Entry(None, None, None, None) for _ in range(5)])
-    ids = [e.id for e in saved]
-
-    page = g.fetch(limit=10, cursor=ids[1])
-    assert [r.id for r in page] == ids[2:]
-
-
-def test_fetch_cursor_past_end_returns_empty(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    saved = g.add([Entry(None, None, None, None) for _ in range(3)])
-
-    page = g.fetch(cursor=saved[-1].id)
-    assert page == []
-
-
-def test_fetch_cursor_combines_with_filters(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    wizards = g.add([Entry(None, "wizard", str(i), None) for i in range(3)])
-    g.add([Entry(None, "spell", "x", None)])
-
-    page = g.fetch(
-        filters=Filters(group_key=["wizard"]),
-        cursor=wizards[0].id,
-    )
-    assert [r.id for r in page] == [wizards[1].id, wizards[2].id]
-
-
-def test_fetch_unindexed_entry_has_null_index_fields(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, "tale", "ref", {"k": "v"}, "ctx")])
-
-    [row] = g.fetch()
-    assert row.id == saved.id
-    assert row.payload == {"k": "v"}
-    assert row.keyword_text is None
-    assert row.threshold_rank is None
-    assert row.semantic_text is None
-    assert row.partition is None
-    assert row.threshold_distance is None
-
-
-def test_fetch_surfaces_keyword_fields(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-    g.keyword([(saved.id, "moon glow")], threshold_rank=0.5)
-
-    [row] = g.fetch()
-    assert row.id == saved.id
-    assert row.keyword_text == "moon glow"
-    assert row.threshold_rank == 0.5
-    assert row.semantic_text is None
-    assert row.partition is None
-
-
-def test_fetch_surfaces_semantic_fields(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-    g.embed(
-        [(saved.id, "the moon glows")],
-        partition="alpha",
-        threshold_distance=0.75,
-    )
-
-    [row] = g.fetch()
-    assert row.id == saved.id
-    assert row.semantic_text == "the moon glows"
-    assert row.partition == "alpha"
-    assert row.threshold_distance == 0.75
-    assert row.keyword_text is None
-    assert row.threshold_rank is None
-
-
-def test_fetch_surfaces_both_index_sides(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-    g.keyword([(saved.id, "kw")])
-    g.embed([(saved.id, "sem")], partition="p")
-
-    [row] = g.fetch()
-    assert row.id == saved.id
-    assert row.keyword_text == "kw"
-    assert row.semantic_text == "sem"
-    assert row.partition == "p"
-
-
-def test_add_rejects_self_colliding_batch(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    with pytest.raises(ValueError, match="group_key, group_ref"):
-        g.add(
-            [
-                Entry(None, "wizard", "gandalf", None),
-                Entry(None, "wizard", "gandalf", None),
-            ]
-        )
-
-
-def test_update_rejects_collision_with_existing_row(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    g.add([Entry(None, "wizard", "gandalf", None)])
-    [other] = g.add([Entry(None, "wizard", "saruman", None)])
-    with pytest.raises(ValueError, match="group_key, group_ref"):
-        g.update([Entry(other.id, "wizard", "gandalf", None)])
-
-
-def test_embed_empty_is_noop(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    assert g.embed([]) == []
-    assert fake_embedder.embed_many_calls == 0
-
-
-def test_embed_none_is_noop(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    assert g.embed() == []
-    assert fake_embedder.embed_many_calls == 0
-
-
-def test_embed_writes_vec_row(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-
-    g.embed([(saved.id, "hello")])
-    assert _has_vec_row(g._conn, saved.id)
-    assert _vec_semantic_text(g._conn, saved.id) == "hello"
-
-
-def test_embed_writes_to_partition(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-
-    g.embed([(saved.id, "hello")], partition="alpha")
-    assert _vec_partition(g._conn, saved.id) == "alpha"
-
-
-def test_embed_replaces_existing_vec_row_in_new_partition(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-
-    g.embed([(saved.id, "hello")], partition="alpha")
-    g.embed([(saved.id, "hello")], partition="beta")
-
-    assert _vec_partition(g._conn, saved.id) == "beta"
-    new_hits = g.semantic_search("hello", partition="beta")
-    assert [h.entry.id for h in new_hits] == [saved.id]
-    old_hits = g.semantic_search("hello", partition="alpha")
-    assert old_hits == []
-
-
-def test_semantic_search_without_partition_spans_all_partitions(
-    tmp_path, fake_embedder
-):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [a, b, c] = g.add([Entry(None, None, None, None) for _ in range(3)])
-    g.embed([(a.id, "hello")])
-    g.embed([(b.id, "hello")], partition="alpha")
-    g.embed([(c.id, "hello")], partition="beta")
-
-    hits = g.semantic_search("hello")
-    assert {h.entry.id for h in hits} == {a.id, b.id, c.id}
-
-
-def test_embed_replaces_text_on_reembed(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-
-    g.embed([(saved.id, "first")])
-    g.embed([(saved.id, "second")])
-
-    assert _vec_semantic_text(g._conn, saved.id) == "second"
-
-
-def test_embed_batches_embed_many(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    saved = g.add([Entry(None, None, None, None) for _ in range(10)])
-
-    fake_embedder.embed_many_calls = 0
-    g.embed([(s.id, f"text {i}") for i, s in enumerate(saved)])
-    assert fake_embedder.embed_many_calls == 1
-
-
-def test_embed_returns_entries(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, "g1", None, {"k": "v"})])
-
-    [embedded] = g.embed([(saved.id, "hello")])
-    assert embedded.id == saved.id
-    assert embedded.group_key == "g1"
-    assert embedded.payload == {"k": "v"}
-
-
-def test_embed_raises_for_unknown_id(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    with pytest.raises(ValueError, match="No entry with id"):
-        g.embed([("01MISSINGMISSINGMISSINGMI", "hello")])
-
-
-@pytest.mark.parametrize("text", ["", "   ", "\n\t"])
-def test_embed_rejects_empty_text(tmp_path, fake_embedder, text):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-    with pytest.raises(ValueError, match="semantic_text must be non-empty"):
-        g.embed([(saved.id, text)])
-
-
-def test_keyword_empty_is_noop(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    assert g.keyword([]) == []
-
-
-def test_keyword_none_is_noop(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    assert g.keyword() == []
-
-
-def test_keyword_indexes_for_match(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-
-    g.keyword([(saved.id, "the moon glows brightly")])
-
-    hits = g.keyword_search("moon")
-    assert [h.entry.id for h in hits] == [saved.id]
-    assert hits[0].entry.keyword_text == "the moon glows brightly"
-
-
-def test_keyword_replaces_text_on_reindex(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-
-    g.keyword([(saved.id, "moon")])
-    g.keyword([(saved.id, "stars")])
-
-    moon_hits = g.keyword_search("moon")
-    star_hits = g.keyword_search("stars")
-    assert moon_hits == []
-    assert [h.entry.id for h in star_hits] == [saved.id]
-
-
-def test_keyword_raises_for_unknown_id(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    with pytest.raises(ValueError, match="No entry with id"):
-        g.keyword([("01MISSINGMISSINGMISSINGMI", "hello")])
-
-
-@pytest.mark.parametrize("text", ["", "   ", "\n\t"])
-def test_keyword_rejects_empty_text(tmp_path, fake_embedder, text):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-    with pytest.raises(ValueError, match="keyword_text must be non-empty"):
-        g.keyword([(saved.id, text)])
-
-
-def test_keyword_stores_threshold_rank(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-
-    g.keyword([(saved.id, "hello")], threshold_rank=0.25)
-
-    hits = g.keyword_search("hello")
-    assert [h.entry.threshold_rank for h in hits] == [0.25]
-
-
-def test_keyword_remove_deletes_fts_row(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-    g.keyword([(saved.id, "hello")])
-    assert g.keyword_search("hello") != []
-
-    removed = g.keyword_remove([saved.id])
-    assert removed == [saved.id]
-    assert g.keyword_search("hello") == []
-
-
-def test_keyword_remove_missing_id_returns_empty(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    assert g.keyword_remove(["01MISSINGMISSINGMISSINGMI"]) == []
-
-
-def test_keyword_remove_leaves_entry_intact(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, "tale", None, {"k": "v"})])
-    g.keyword([(saved.id, "hello")])
-
-    g.keyword_remove([saved.id])
-
-    [row] = g.fetch()
-    assert row.id == saved.id
-    assert row.group_key == "tale"
-    assert row.payload == {"k": "v"}
-
-
-def test_embed_remove_deletes_vec_row(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-    g.embed([(saved.id, "hello")])
-    assert _has_vec_row(g._conn, saved.id)
-
-    removed = g.embed_remove([saved.id])
-    assert removed == [saved.id]
-    assert not _has_vec_row(g._conn, saved.id)
-
-
-def test_embed_remove_missing_id_returns_empty(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    assert g.embed_remove(["01MISSINGMISSINGMISSINGMI"]) == []
-
-
-def test_embed_remove_leaves_entry_intact(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, "tale", None, {"k": "v"})])
-    g.embed([(saved.id, "hello")])
-
-    g.embed_remove([saved.id])
-
-    [row] = g.fetch()
-    assert row.id == saved.id
-    assert row.group_key == "tale"
-    assert row.payload == {"k": "v"}
-
-
-def test_embed_stores_threshold_distance(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-
-    g.embed([(saved.id, "hello")], threshold_distance=0.75)
-
-    hits = g.semantic_search("hello")
-    assert [h.entry.threshold_distance for h in hits] == [0.75]
-
-
-def test_remove_cascades_to_fts_and_vec(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-    g.keyword([(saved.id, "hello")])
-    g.embed([(saved.id, "hello")])
-    assert _has_vec_row(g._conn, saved.id)
-    assert g.keyword_search("hello") != []
-
-    g.remove([saved.id])
-
-    assert not _has_vec_row(g._conn, saved.id)
-    assert g.keyword_search("hello") == []
-
-
-def test_update_empty_is_noop(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    assert g.update([]) == []
-
-
-def test_update_returns_only_existing(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, {"a": 1})])
-
+    [e] = g.add([Entry(None, {"a": 1})])
     updated = g.update(
         [
-            Entry(saved.id, None, None, {"a": 2}),
-            Entry("01MISSINGMISSINGMISSINGMI", None, None, {"a": 3}),
+            Entry(e.uniq_id, {"a": 2}),
+            Entry("01MISSINGMISSINGMISSINGMI", {"a": 3}),
         ]
     )
     assert len(updated) == 1
-    assert updated[0].id == saved.id
-    assert updated[0].payload == {"a": 2}
+    assert updated[0].uniq_id == e.uniq_id
 
 
-def test_update_does_not_call_embedder(tmp_path, fake_embedder):
+def test_get_returns_only_existing_no_order_guarantee(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
+    [e] = g.add([Entry(None, {"k": "v"})])
+    result = g.get([e.uniq_id, "01MISSINGMISSINGMISSINGMI"])
+    assert {x.uniq_id for x in result} == {e.uniq_id}
+
+
+def test_get_empty_returns_empty(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    assert g.get([]) == []
+
+
+def test_remove_cascades_via_trigger(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [e] = g.add([Entry(None, None)])
+    g.index(e.uniq_id, ref="r", match="text", search="text")
+
+    g.remove([e.uniq_id])
+
+    assert g._conn.execute("SELECT COUNT(*) FROM entry").fetchone()[0] == 0
+    assert g._conn.execute("SELECT COUNT(*) FROM entry_idx").fetchone()[0] == 0
+    assert g._conn.execute("SELECT COUNT(*) FROM entry_fts").fetchone()[0] == 0
+    assert g._conn.execute("SELECT COUNT(*) FROM entry_vec").fetchone()[0] == 0
+
+
+def test_remove_returns_only_actually_deleted(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [e] = g.add([Entry(None, None)])
+    removed = g.remove([e.uniq_id, "01MISSINGMISSINGMISSINGMI"])
+    assert removed == [e.uniq_id]
+
+
+# ----------------------------------------------------------------------
+# index()  — PUT-style sidecar writes
+# ----------------------------------------------------------------------
+
+
+def test_index_writes_all_three_sidecars(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [e] = g.add([Entry(None, None)])
+    g.index(
+        e.uniq_id,
+        ref="X",
+        ord=(1.0, 2.0, 3.0),
+        nom=("a", "b"),
+        match="kw",
+        search="sem",
+    )
+
+    _, indexes = g.query()
+    assert len(indexes) == 1
+    assert indexes[0].uniq_ref == "X"
+    assert indexes[0].nominal_1 == "a"
+    assert indexes[0].ordinal_2 == 2.0
+
+
+def test_index_put_replaces_idx_row(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [e] = g.add([Entry(None, None)])
+    g.index(e.uniq_id, ref="X", ord=(1.0, 2.0, 3.0), nom=("a", "b"))
+    g.index(e.uniq_id, ref="Y")  # PUT: ord/nom should clear
+
+    _, indexes = g.query()
+    assert indexes[0].uniq_ref == "Y"
+    assert indexes[0].nominal_1 is None
+    assert indexes[0].nominal_2 is None
+    assert indexes[0].ordinal_1 is None
+
+
+def test_index_match_only_does_not_touch_idx(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [e] = g.add([Entry(None, None)])
+    g.index(e.uniq_id, ref="X", nom=("a", "b"))
+    g.index(e.uniq_id, match="hello")
+
+    _, indexes = g.query()
+    assert indexes[0].uniq_ref == "X"
+    assert indexes[0].nominal_1 == "a"
+
+
+def test_index_replaces_match(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [e] = g.add([Entry(None, None)])
+    g.index(e.uniq_id, match="moon")
+    g.index(e.uniq_id, match="stars")
+
+    moon, _ = g.match("moon")
+    stars, _ = g.match("stars")
+    assert moon == []
+    assert [x.uniq_id for x in stars] == [e.uniq_id]
+
+
+def test_index_validates_ord_tuple_length(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [e] = g.add([Entry(None, None)])
+    with pytest.raises(ValueError, match="ord"):
+        g.index(e.uniq_id, ord=(1.0, 2.0))  # type: ignore[arg-type]
+
+
+def test_index_validates_nom_tuple_length(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [e] = g.add([Entry(None, None)])
+    with pytest.raises(ValueError, match="nom"):
+        g.index(e.uniq_id, nom=("a",))  # type: ignore[arg-type]
+
+
+def test_index_requires_existing_entry(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    with pytest.raises(ValueError, match="No entry"):
+        g.index("01MISSINGMISSINGMISSINGMI", ref="X")
+
+
+def test_index_with_no_kwargs_is_noop(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [e] = g.add([Entry(None, None)])
+    g.index(e.uniq_id)
+    _, indexes = g.query()
+    assert indexes == []
+
+
+def test_index_partial_nom_writes_null_for_omitted(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [e] = g.add([Entry(None, None)])
+    g.index(e.uniq_id, nom=("a", None))
+
+    _, indexes = g.query()
+    assert indexes[0].nominal_1 == "a"
+    assert indexes[0].nominal_2 is None
+
+
+# ----------------------------------------------------------------------
+# query()
+# ----------------------------------------------------------------------
+
+
+def test_query_returns_parallel_entries_indexes(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [a] = g.add([Entry(None, {"x": 1})])
+    [b] = g.add([Entry(None, {"x": 2})])
+    g.index(a.uniq_id, nom=("alpha", None))
+    g.index(b.uniq_id, nom=("beta", None))
+
+    entries, indexes = g.query()
+    assert len(entries) == len(indexes) == 2
+    for e, i in zip(entries, indexes, strict=True):
+        assert e.uniq_id == i.uniq_id
+
+
+def test_query_excludes_entries_without_idx(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    g.add([Entry(None, None)])
+    [b] = g.add([Entry(None, None)])
+    g.index(b.uniq_id, ref="r")
+
+    entries, _ = g.query()
+    assert [e.uniq_id for e in entries] == [b.uniq_id]
+
+
+def test_query_filters_by_equals(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [a] = g.add([Entry(None, None)])
+    [b] = g.add([Entry(None, None)])
+    g.index(a.uniq_id, nom=("alpha", None))
+    g.index(b.uniq_id, nom=("beta", None))
+
+    _, indexes = g.query(Filters(equals={"nominal_1": ["alpha"]}))
+    assert [i.uniq_id for i in indexes] == [a.uniq_id]
+
+
+def test_query_filters_by_ordinal_range(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    saved = []
+    for v in [1.0, 5.0, 10.0]:
+        [e] = g.add([Entry(None, None)])
+        g.index(e.uniq_id, ord=(v, None, None))
+        saved.append((e.uniq_id, v))
+
+    _, indexes = g.query(
+        Filters(gte={"ordinal_1": 2.0}, lte={"ordinal_1": 7.0})
+    )
+    assert {i.ordinal_1 for i in indexes} == {5.0}
+
+
+def test_query_cursor_paginates_by_uniq_id(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    added = []
+    for i in range(5):
+        [e] = g.add([Entry(None, None)])
+        g.index(e.uniq_id, ref=f"r-{i}")
+        added.append(e.uniq_id)
+
+    _, page1 = g.query(limit=2)
+    ids1 = [i.uniq_id for i in page1]
+    assert ids1 == added[:2]
+
+    _, page2 = g.query(limit=2, cursor=ids1[-1])
+    assert [i.uniq_id for i in page2] == added[2:4]
+
+
+def test_query_invalid_filter_column_raises(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    with pytest.raises(ValueError, match="equals filter column"):
+        g.query(Filters(equals={"bogus": ["x"]}))
+
+
+def test_query_gte_rejects_non_ordinal_column(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    with pytest.raises(ValueError, match="gte filter column"):
+        g.query(Filters(gte={"nominal_1": 5.0}))
+
+
+# ----------------------------------------------------------------------
+# fetch()
+# ----------------------------------------------------------------------
+
+
+def test_fetch_returns_entries_matching_uniq_ref(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [a] = g.add([Entry(None, {"k": "a"})])
+    [b] = g.add([Entry(None, {"k": "b"})])
+    g.index(a.uniq_id, ref="ext-1")
+    g.index(b.uniq_id, ref="ext-2")
+
+    entries, indexes = g.fetch(["ext-1"])
+    assert [e.uniq_id for e in entries] == [a.uniq_id]
+    assert [i.uniq_ref for i in indexes] == ["ext-1"]
+
+
+def test_fetch_allows_multiple_entries_per_ref(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [a] = g.add([Entry(None, None)])
+    [b] = g.add([Entry(None, None)])
+    g.index(a.uniq_id, ref="shared")
+    g.index(b.uniq_id, ref="shared")
+
+    entries, _ = g.fetch(["shared"])
+    assert {e.uniq_id for e in entries} == {a.uniq_id, b.uniq_id}
+
+
+def test_fetch_excludes_entries_without_idx(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    g.add([Entry(None, None)])  # no index
+    [b] = g.add([Entry(None, None)])
+    g.index(b.uniq_id, ref="r")
+
+    entries, _ = g.fetch(["r"])
+    assert [e.uniq_id for e in entries] == [b.uniq_id]
+
+
+def test_fetch_empty_returns_empty_tuple(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    entries, indexes = g.fetch([])
+    assert entries == [] and indexes == []
+
+
+# ----------------------------------------------------------------------
+# match()
+# ----------------------------------------------------------------------
+
+
+def test_match_returns_entry_with_score(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [a] = g.add([Entry(None, {"k": "a"})])
+    g.index(a.uniq_id, match="phoenix arcane ember")
+
+    entries, hits = g.match("phoenix")
+    assert [e.uniq_id for e in entries] == [a.uniq_id]
+    assert hits[0].uniq_id == a.uniq_id
+    assert hits[0].score > 0
+
+
+def test_match_filters_via_idx_join(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [a] = g.add([Entry(None, None)])
+    [b] = g.add([Entry(None, None)])
+    g.index(a.uniq_id, nom=("alpha", None), match="phoenix")
+    g.index(b.uniq_id, nom=("beta", None), match="phoenix")
+
+    entries, _ = g.match(
+        "phoenix", filters=Filters(equals={"nominal_1": ["alpha"]})
+    )
+    assert [e.uniq_id for e in entries] == [a.uniq_id]
+
+
+def test_match_orders_by_bm25_desc(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [a] = g.add([Entry(None, None)])
+    [b] = g.add([Entry(None, None)])
+    g.index(a.uniq_id, match="phoenix phoenix phoenix")
+    g.index(b.uniq_id, match="phoenix")
+
+    _, hits = g.match("phoenix")
+    scores = [h.score for h in hits]
+    assert scores == sorted(scores, reverse=True)
+    assert all(s >= 0 for s in scores)
+
+
+def test_match_rejects_empty_query(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    with pytest.raises(ValueError, match="non-empty"):
+        g.match("")
+
+
+# ----------------------------------------------------------------------
+# search()
+# ----------------------------------------------------------------------
+
+
+def test_search_returns_entry_with_distance(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [a] = g.add([Entry(None, {"k": "v"})])
+    g.index(a.uniq_id, search="phoenix")
+
+    entries, hits = g.search("phoenix")
+    assert [e.uniq_id for e in entries] == [a.uniq_id]
+    assert hits[0].uniq_id == a.uniq_id
+    assert hits[0].distance >= 0
+
+
+def test_search_orders_by_distance_asc(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    saved = g.add([Entry(None, None) for _ in range(3)])
+    for s in saved:
+        g.index(s.uniq_id, search="text")
+
+    _, hits = g.search("anything")
+    distances = [h.distance for h in hits]
+    assert distances == sorted(distances)
+
+
+def test_search_empty_returns_empty(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    entries, hits = g.search("anything")
+    assert entries == [] and hits == []
+
+
+def test_search_uses_embed_not_embed_many(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     fake_embedder.embed_calls = 0
     fake_embedder.embed_many_calls = 0
-
-    g.update([Entry(saved.id, None, None, {"new": "payload"})])
-    assert fake_embedder.embed_calls == 0
-    assert fake_embedder.embed_many_calls == 0
-
-
-def test_update_changes_all_metadata_fields(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add(
-        [
-            Entry(
-                None,
-                group_key="g1",
-                group_ref=None,
-                payload={"a": 1},
-                context="orig",
-            )
-        ]
-    )
-
-    [updated] = g.update(
-        [
-            Entry(
-                saved.id,
-                group_key="g2",
-                group_ref="ref-1",
-                payload={"a": 2},
-                context="new",
-            )
-        ]
-    )
-    assert updated.group_key == "g2"
-    assert updated.group_ref == "ref-1"
-    assert updated.payload == {"a": 2}
-    assert updated.context == "new"
-
-
-def test_update_clears_nullable_fields(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add(
-        [
-            Entry(
-                None,
-                group_key=None,
-                group_ref="ref-1",
-                payload={"a": 1},
-                context="some context",
-            )
-        ]
-    )
-
-    [cleared] = g.update([Entry(saved.id, None, None, None)])
-    assert cleared.group_ref is None
-    assert cleared.payload is None
-    assert cleared.context is None
-
-
-def test_semantic_search_surfaces_semantic_text(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-    g.embed([(saved.id, "the moon glows")])
-
-    hits = g.semantic_search("moon")
-    assert len(hits) == 1
-    assert hits[0].entry.id == saved.id
-    assert hits[0].entry.semantic_text == "the moon glows"
-
-
-def test_semantic_search_uses_embed_not_embed_many(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    fake_embedder.embed_calls = 0
-    fake_embedder.embed_many_calls = 0
-    g.semantic_search("query")
+    g.search("query")
     assert fake_embedder.embed_calls == 1
     assert fake_embedder.embed_many_calls == 0
 
 
-def test_add_round_trips_ordinal(tmp_path, fake_embedder):
+# ----------------------------------------------------------------------
+# Cascade-by-trigger details
+# ----------------------------------------------------------------------
+
+
+def test_remove_cleans_match_so_search_is_empty(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None, ordinal=3.5)])
-    assert saved.ordinal == 3.5
-    [fetched] = g.fetch()
-    assert fetched.ordinal == 3.5
+    [e] = g.add([Entry(None, None)])
+    g.index(e.uniq_id, match="phoenix")
+    assert g.match("phoenix")[0] != []
 
-
-def test_add_defaults_ordinal_to_none(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None)])
-    [fetched] = g.fetch()
-    assert saved.ordinal is None
-    assert fetched.ordinal is None
-
-
-def test_update_changes_ordinal(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None, ordinal=1.0)])
-    g.update([Entry(saved.id, None, None, None, ordinal=42.0)])
-    [fetched] = g.fetch()
-    assert fetched.ordinal == 42.0
-
-
-def test_update_clears_ordinal_with_none(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [saved] = g.add([Entry(None, None, None, None, ordinal=7.0)])
-    g.update([Entry(saved.id, None, None, None, ordinal=None)])
-    [fetched] = g.fetch()
-    assert fetched.ordinal is None
-
-
-def test_fetch_filters_by_ordinal_range(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    saved = g.add(
-        [
-            Entry(None, None, None, None, ordinal=o)
-            for o in [1.0, 2.5, 5.0, 10.0, None]
-        ]
-    )
-    in_window = g.fetch(filters=Filters(ordinal_gte=2.0, ordinal_lte=5.0))
-    expected = {saved[1].id, saved[2].id}
-    assert {e.id for e in in_window} == expected
-    # NULL ordinals fall outside any inclusive range.
-    only_lower = g.fetch(filters=Filters(ordinal_gte=0.0))
-    assert {e.ordinal for e in only_lower} == {1.0, 2.5, 5.0, 10.0}
-
-
-def test_fetch_order_by_ordinal_asc_sorts_nulls_last(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    saved = g.add(
-        [
-            Entry(None, None, None, None, ordinal=5.0),
-            Entry(None, None, None, None, ordinal=None),
-            Entry(None, None, None, None, ordinal=1.0),
-            Entry(None, None, None, None, ordinal=3.0),
-        ]
-    )
-    [a, b, c, d] = saved
-    rows = g.fetch(order_by="ordinal")
-    assert [r.id for r in rows] == [c.id, d.id, a.id, b.id]
-
-
-def test_fetch_order_by_ordinal_desc_sorts_nulls_last(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    saved = g.add(
-        [
-            Entry(None, None, None, None, ordinal=5.0),
-            Entry(None, None, None, None, ordinal=None),
-            Entry(None, None, None, None, ordinal=1.0),
-            Entry(None, None, None, None, ordinal=3.0),
-        ]
-    )
-    [a, b, c, d] = saved
-    rows = g.fetch(order_by="ordinal", descending=True)
-    assert [r.id for r in rows] == [a.id, d.id, c.id, b.id]
-
-
-def test_fetch_order_by_ordinal_tiebreaks_on_id(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    saved = g.add([Entry(None, None, None, None, ordinal=1.0) for _ in range(3)])
-    rows = g.fetch(order_by="ordinal")
-    assert [r.id for r in rows] == [e.id for e in saved]
-
-
-def test_fetch_order_by_id_descending(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    saved = g.add([Entry(None, None, None, None) for _ in range(3)])
-    rows = g.fetch(descending=True)
-    assert [r.id for r in rows] == [e.id for e in reversed(saved)]
-
-
-def test_fetch_rejects_unknown_order_by(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    with pytest.raises(ValueError, match="order_by"):
-        g.fetch(order_by="bogus")  # type: ignore[arg-type]
-
-
-def test_keyword_search_filters_by_ordinal_range(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    saved = g.add(
-        [
-            Entry(None, None, None, None, ordinal=1.0),
-            Entry(None, None, None, None, ordinal=5.0),
-            Entry(None, None, None, None, ordinal=None),
-        ]
-    )
-    for e in saved:
-        g.keyword([(e.id, "phoenix")])
-
-    hits = g.keyword_search("phoenix", filters=Filters(ordinal_gte=2.0))
-    assert {h.entry.id for h in hits} == {saved[1].id}
+    g.remove([e.uniq_id])
+    entries, _ = g.match("phoenix")
+    assert entries == []

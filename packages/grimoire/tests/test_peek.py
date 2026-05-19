@@ -16,27 +16,45 @@ def test_peek_uninitialized_file_raises(tmp_path):
         Grimoire.peek(stub)
 
 
-def test_peek_reports_lock_and_counts(tmp_path, fake_embedder):
+def test_peek_reports_lock_and_per_table_counts(tmp_path, fake_embedder):
     db = tmp_path / "g.db"
-    g = Grimoire.open(db, embedder=fake_embedder)
-    saved = g.add(
-        [
-            Entry(None, "spell", None, None),
-            Entry(None, "spell", None, None),
-            Entry(None, "item", None, None),
-            Entry(None, None, None, None),
-        ]
-    )
-    g.embed([(saved[0].id, "a"), (saved[1].id, "b")], partition="alpha")
-    g.embed([(saved[2].id, "c")], partition="beta")
-    # saved[3] is unembedded
-    g._conn.commit()
-    g._conn.close()
+    with Grimoire.open(db, embedder=fake_embedder) as g:
+        a, b, c = g.add([Entry(None, None) for _ in range(3)])
+        g.index(a.uniq_id, ref="r", match="text")
+        g.index(b.uniq_id, search="text")
+        # c has no sidecars
 
     info = Grimoire.peek(db)
     assert info.model == fake_embedder.model
     assert info.dimension == fake_embedder.dimension
     assert info.schema_version == 1
-    assert info.entry_count == 4
-    assert info.group_counts == {"item": 1, "spell": 2, None: 1}
-    assert info.partition_counts == {"alpha": 2, "beta": 1}
+    assert info.entry_count == 3
+    assert info.entry_idx_count == 1
+    assert info.entry_fts_count == 1
+    assert info.entry_vec_count == 1
+
+
+def test_peek_empty_database_has_zero_counts(tmp_path, fake_embedder):
+    db = tmp_path / "g.db"
+    with Grimoire.open(db, embedder=fake_embedder):
+        pass
+
+    info = Grimoire.peek(db)
+    assert info.entry_count == 0
+    assert info.entry_idx_count == 0
+    assert info.entry_fts_count == 0
+    assert info.entry_vec_count == 0
+
+
+def test_peek_after_delete_reflects_trigger_cleanup(tmp_path, fake_embedder):
+    db = tmp_path / "g.db"
+    with Grimoire.open(db, embedder=fake_embedder) as g:
+        [e] = g.add([Entry(None, None)])
+        g.index(e.uniq_id, ref="r", match="t", search="t")
+        g.remove([e.uniq_id])
+
+    info = Grimoire.peek(db)
+    assert info.entry_count == 0
+    assert info.entry_idx_count == 0
+    assert info.entry_fts_count == 0
+    assert info.entry_vec_count == 0

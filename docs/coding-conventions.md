@@ -19,11 +19,11 @@ Monorepo layout under `packages/<name>/...`. Each package owns its own source tr
 
 ## Naming
 
-Short names, PEP 8 conventions throughout. The library's primary surface is the `Grimoire` class plus module-level `grimoire.open(...)` and `grimoire.peek(...)` functions.
+Short names, PEP 8 conventions throughout. The library's primary surface is the `Grimoire` class; lifecycle entry points are the `Grimoire.open(...)` and `Grimoire.peek(...)` staticmethods.
 
 ## Data structures
 
-Use `@dataclass(frozen=True, slots=True)` for plain data structures (`Entry`, `Filters`, `KeywordHit`, `SemanticHit`, `Peek`, `Mount`). Avoid hand-rolled `__init__` boilerplate.
+Use `@dataclass(frozen=True, slots=True)` for plain data structures (`Entry`, `EntryIndex`, `Filters`, `KeywordHit`, `SemanticHit`, `Peek`, `Mount`). Avoid hand-rolled `__init__` boilerplate.
 
 ## Error handling
 

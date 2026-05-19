@@ -34,175 +34,246 @@ def test_server_registers_expected_tools(server):
     names = set(_run(_list()))
     assert names == {
         "info",
+        "add",
+        "update",
+        "get",
+        "remove",
+        "query",
         "fetch",
-        "entry_get",
-        "entry_add",
-        "entry_update",
-        "entry_delete",
-        "search_keyword",
-        "search_semantic",
+        "match",
+        "search",
     }
 
 
-def test_entry_add_then_fetch_roundtrip(server):
+def test_add_then_get_roundtrip(server):
+    async def _go():
+        async with Client(server) as client:
+            created = await client.call_tool("add", {"data": {"k": "v"}})
+            uniq_id = created.data["uniq_id"]
+            fetched = await client.call_tool("get", {"uniq_ids": [uniq_id]})
+            return uniq_id, fetched.data
+
+    uniq_id, fetched = _run(_go())
+    assert len(fetched) == 1
+    assert fetched[0]["uniq_id"] == uniq_id
+    assert fetched[0]["data"] == {"k": "v"}
+
+
+def test_add_with_index_kwargs_writes_sidecars(server):
     async def _go():
         async with Client(server) as client:
             created = await client.call_tool(
-                "entry_add",
+                "add",
                 {
-                    "group_key": "notes",
-                    "group_ref": "note-001",
-                    "context": "from chapter 3",
-                    "payload": {"author": "merlin"},
+                    "data": {"k": "v"},
+                    "ref": "book-1",
+                    "nom": ["novel", None],
+                    "ord": [1954.0, None, None],
+                    "match": "phoenix",
+                    "search": "an epic quest",
                 },
             )
-            entry_id = created.data["id"]
+            uniq_id = created.data["uniq_id"]
+            fetched = await client.call_tool("fetch", {"uniq_refs": ["book-1"]})
+            kw_hits = await client.call_tool("match", {"query": "phoenix"})
+            return uniq_id, fetched.data, kw_hits.data
 
-            fetched = await client.call_tool("entry_get", {"entry_id": entry_id})
-            return created.data, fetched.data
-
-    created, fetched = _run(_go())
-    assert fetched == created
-    assert fetched["group_key"] == "notes"
-    assert fetched["group_ref"] == "note-001"
-    assert fetched["payload"] == {"author": "merlin"}
-    assert fetched["context"] == "from chapter 3"
+    uniq_id, fetched, kw_hits = _run(_go())
+    assert fetched[0]["entry"]["uniq_id"] == uniq_id
+    assert fetched[0]["index"]["nominal_1"] == "novel"
+    assert fetched[0]["index"]["ordinal_1"] == 1954.0
+    assert any(h["entry"]["uniq_id"] == uniq_id for h in kw_hits)
 
 
-def test_entry_add_with_keyword_text_indexes_for_search(server):
+def test_update_replaces_data(server):
     async def _go():
         async with Client(server) as client:
-            created = await client.call_tool(
-                "entry_add", {"keyword_text": "phoenix arcane ember"}
-            )
-            entry_id = created.data["id"]
-
-            hits = await client.call_tool("search_keyword", {"query": "phoenix"})
-            return entry_id, hits.data
-
-    entry_id, hits = _run(_go())
-    assert len(hits) == 1
-    assert hits[0]["entry"]["id"] == entry_id
-    assert hits[0]["entry"]["keyword_text"] == "phoenix arcane ember"
-
-
-def test_entry_add_with_semantic_text_embeds_for_search(server):
-    async def _go():
-        async with Client(server) as client:
-            created = await client.call_tool(
-                "entry_add", {"semantic_text": "a solar phoenix reborn"}
-            )
-            entry_id = created.data["id"]
-
-            hits = await client.call_tool(
-                "search_semantic", {"query": "creatures from ashes"}
-            )
-            return entry_id, hits.data
-
-    entry_id, hits = _run(_go())
-    assert any(h["entry"]["id"] == entry_id for h in hits)
-    assert any(h["entry"]["semantic_text"] == "a solar phoenix reborn" for h in hits)
-
-
-def test_entry_update_replaces_keyword_text(server):
-    async def _go():
-        async with Client(server) as client:
-            created = await client.call_tool("entry_add", {"keyword_text": "moon"})
-            entry_id = created.data["id"]
-            await client.call_tool(
-                "entry_update",
-                {"entry_id": entry_id, "keyword_text": "stars"},
-            )
-            moon = await client.call_tool("search_keyword", {"query": "moon"})
-            stars = await client.call_tool("search_keyword", {"query": "stars"})
-            return entry_id, moon.data, stars.data
-
-    entry_id, moon, stars = _run(_go())
-    assert moon == []
-    assert any(h["entry"]["id"] == entry_id for h in stars)
-
-
-def test_entry_update_without_text_preserves_index(server):
-    async def _go():
-        async with Client(server) as client:
-            created = await client.call_tool("entry_add", {"keyword_text": "moon glow"})
-            entry_id = created.data["id"]
-            await client.call_tool(
-                "entry_update", {"entry_id": entry_id, "context": "new ctx"}
-            )
-            hits = await client.call_tool("search_keyword", {"query": "moon"})
-            return entry_id, hits.data
-
-    entry_id, hits = _run(_go())
-    assert any(
-        h["entry"]["id"] == entry_id and h["entry"]["keyword_text"] == "moon glow" for h in hits
-    )
-
-
-def test_entry_update_partial_preserves_unspecified_fields(server):
-    async def _go():
-        async with Client(server) as client:
-            created = await client.call_tool(
-                "entry_add",
-                {"group_key": "notes", "context": "original context"},
-            )
-            entry_id = created.data["id"]
-
+            created = await client.call_tool("add", {"data": {"v": 1}})
+            uniq_id = created.data["uniq_id"]
             updated = await client.call_tool(
-                "entry_update",
-                {"entry_id": entry_id, "context": "new context"},
+                "update", {"uniq_id": uniq_id, "data": {"v": 2}}
             )
             return updated.data
 
     updated = _run(_go())
-    assert updated["context"] == "new context"
-    assert updated["group_key"] == "notes"
+    assert updated["data"] == {"v": 2}
 
 
-def test_fetch_surfaces_keyword_and_semantic_index_fields(server):
+def test_update_unknown_id_errors(server):
     async def _go():
         async with Client(server) as client:
-            indexed = await client.call_tool(
-                "entry_add",
-                {
-                    "group_ref": "indexed",
-                    "keyword_text": "moon glow",
-                    "threshold_rank": 0.5,
-                    "semantic_text": "the moon glows",
-                    "partition": "night",
-                    "threshold_distance": 0.75,
-                },
+            await client.call_tool(
+                "update",
+                {"uniq_id": "01MISSINGMISSINGMISSINGMI", "data": {}},
             )
-            await client.call_tool("entry_add", {"group_ref": "bare"})
-            rows = await client.call_tool("fetch", {})
-            return indexed.data["id"], rows.data
 
-    indexed_id, rows = _run(_go())
-    by_ref = {r["group_ref"]: r for r in rows}
-
-    indexed = by_ref["indexed"]
-    assert indexed["id"] == indexed_id
-    assert indexed["keyword_text"] == "moon glow"
-    assert indexed["threshold_rank"] == 0.5
-    assert indexed["semantic_text"] == "the moon glows"
-    assert indexed["partition"] == "night"
-    assert indexed["threshold_distance"] == 0.75
-
-    bare = by_ref["bare"]
-    assert bare["keyword_text"] is None
-    assert bare["threshold_rank"] is None
-    assert bare["semantic_text"] is None
-    assert bare["partition"] is None
-    assert bare["threshold_distance"] is None
+    with pytest.raises(Exception, match="No entry"):
+        _run(_go())
 
 
-def test_entry_delete_idempotent(server):
+def test_update_idx_put_replaces_idx(server):
     async def _go():
         async with Client(server) as client:
-            first = await client.call_tool(
-                "entry_delete", {"entry_id": "01HZZZZZZZZZZZZZZZZZZZZZZZ"}
+            created = await client.call_tool("add", {})
+            uniq_id = created.data["uniq_id"]
+            await client.call_tool(
+                "update",
+                {"uniq_id": uniq_id, "ref": "X", "nom": ["a", "b"]},
             )
-            return first.data
+            await client.call_tool("update", {"uniq_id": uniq_id, "ref": "Y"})
+            pairs = await client.call_tool("query", {})
+            return pairs.data
 
-    result = _run(_go())
-    assert result == {"id": "01HZZZZZZZZZZZZZZZZZZZZZZZ", "deleted": False}
+    pairs = _run(_go())
+    assert pairs[0]["index"]["uniq_ref"] == "Y"
+    assert pairs[0]["index"]["nominal_1"] is None
+
+
+def test_update_rejects_bad_ord_length(server):
+    async def _go():
+        async with Client(server) as client:
+            created = await client.call_tool("add", {})
+            uniq_id = created.data["uniq_id"]
+            await client.call_tool(
+                "update", {"uniq_id": uniq_id, "ord": [1.0, 2.0]}
+            )
+
+    with pytest.raises(Exception, match="ord"):
+        _run(_go())
+
+
+def test_update_combined_data_and_idx(server):
+    async def _go():
+        async with Client(server) as client:
+            created = await client.call_tool("add", {"data": {"v": 1}})
+            uniq_id = created.data["uniq_id"]
+            updated = await client.call_tool(
+                "update",
+                {"uniq_id": uniq_id, "data": {"v": 2}, "ref": "X"},
+            )
+            pairs = await client.call_tool("query", {})
+            return updated.data, pairs.data
+
+    updated, pairs = _run(_go())
+    assert updated["data"] == {"v": 2}
+    assert pairs[0]["index"]["uniq_ref"] == "X"
+
+
+def test_update_data_only_leaves_idx_alone(server):
+    async def _go():
+        async with Client(server) as client:
+            created = await client.call_tool(
+                "add", {"data": {"v": 1}, "ref": "X"}
+            )
+            uniq_id = created.data["uniq_id"]
+            await client.call_tool(
+                "update", {"uniq_id": uniq_id, "data": {"v": 2}}
+            )
+            pairs = await client.call_tool("query", {})
+            return pairs.data
+
+    pairs = _run(_go())
+    assert pairs[0]["entry"]["data"] == {"v": 2}
+    assert pairs[0]["index"]["uniq_ref"] == "X"
+
+
+def test_remove_returns_ids(server):
+    async def _go():
+        async with Client(server) as client:
+            created = await client.call_tool("add", {})
+            uniq_id = created.data["uniq_id"]
+            removed = await client.call_tool(
+                "remove", {"uniq_ids": [uniq_id]}
+            )
+            return uniq_id, removed.data
+
+    uniq_id, removed = _run(_go())
+    assert removed == [uniq_id]
+
+
+def test_remove_missing_returns_empty_list(server):
+    async def _go():
+        async with Client(server) as client:
+            removed = await client.call_tool(
+                "remove", {"uniq_ids": ["01MISSINGMISSINGMISSINGMI"]}
+            )
+            return removed.data
+
+    removed = _run(_go())
+    assert removed == []
+
+
+def test_query_filters_by_equals(server):
+    async def _go():
+        async with Client(server) as client:
+            await client.call_tool(
+                "add", {"ref": "a", "nom": ["alpha", None]}
+            )
+            await client.call_tool(
+                "add", {"ref": "b", "nom": ["beta", None]}
+            )
+            pairs = await client.call_tool(
+                "query", {"equals": {"nominal_1": ["alpha"]}}
+            )
+            return pairs.data
+
+    pairs = _run(_go())
+    assert [p["index"]["uniq_ref"] for p in pairs] == ["a"]
+
+
+def test_fetch_by_uniq_ref(server):
+    async def _go():
+        async with Client(server) as client:
+            await client.call_tool(
+                "add", {"data": {"k": "v"}, "ref": "book-1"}
+            )
+            pairs = await client.call_tool("fetch", {"uniq_refs": ["book-1"]})
+            return pairs.data
+
+    pairs = _run(_go())
+    assert len(pairs) == 1
+    assert pairs[0]["entry"]["data"] == {"k": "v"}
+
+
+def test_match_returns_score(server):
+    async def _go():
+        async with Client(server) as client:
+            created = await client.call_tool(
+                "add", {"match": "phoenix arcane ember"}
+            )
+            uniq_id = created.data["uniq_id"]
+            hits = await client.call_tool("match", {"query": "phoenix"})
+            return uniq_id, hits.data
+
+    uniq_id, hits = _run(_go())
+    assert any(h["entry"]["uniq_id"] == uniq_id for h in hits)
+    assert all("score" in h for h in hits)
+
+
+def test_search_returns_distance(server):
+    async def _go():
+        async with Client(server) as client:
+            created = await client.call_tool("add", {"search": "phoenix"})
+            uniq_id = created.data["uniq_id"]
+            hits = await client.call_tool("search", {"query": "phoenix"})
+            return uniq_id, hits.data
+
+    uniq_id, hits = _run(_go())
+    assert any(h["entry"]["uniq_id"] == uniq_id for h in hits)
+    assert all("distance" in h for h in hits)
+
+
+def test_info_reports_per_table_counts(server):
+    async def _go():
+        async with Client(server) as client:
+            await client.call_tool(
+                "add", {"ref": "r", "match": "text"}
+            )
+            info = await client.call_tool("info", {})
+            return info.data
+
+    info = _run(_go())
+    assert info["entry_count"] == 1
+    assert info["entry_idx_count"] == 1
+    assert info["entry_fts_count"] == 1
+    assert info["entry_vec_count"] == 0

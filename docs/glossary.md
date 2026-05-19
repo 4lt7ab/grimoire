@@ -4,28 +4,46 @@ Terms used across grimoire's code and docs, alphabetical.
 
 ---
 
-**Database.** The SQLite file holding one grimoire — schema, entries, FTS5 index, vec0 index, embedder lock. A mount can hold multiple databases.
+**Database.** The SQLite file holding one grimoire — schema, entries, idx, FTS5 index, vec0 index, embedder lock. A mount can hold multiple databases.
 
 **Embedder lock.** The `(model, dimension)` pair written into the file's `meta` table at create time. Validated against the supplied embedder on every reopen; mismatches raise `GrimoireMismatch`.
 
-**Entry.** The metadata row: `(id, group_key, group_ref, payload, context)`. No searchable text lives on the entry — that's what the keyword and semantic indexes are for.
+**Entry.** The identity row in `entry`: `(uniq_id, data)`. No filterable or searchable text lives on the entry — those are sidecars.
 
-**FTS5.** SQLite's bundled full-text search extension. Powers `entry_fts` and `keyword_search`. Ranks by BM25.
+**`entry_idx`.** The typed filterable/sortable metadata sidecar. One row per indexed entry. Columns: `uniq_id` (PK), `uniq_ref`, `nominal_1`, `nominal_2`, `ordinal_1`, `ordinal_2`, `ordinal_3`. Written by `index(uniq_id, ref=..., nom=..., ord=...)`; cleaned by the entry-delete trigger.
 
-**`group_key` / `group_ref`.** Consumer-set labels on an entry. `(group_key, group_ref)` is enforced unique when both are set; nulls coexist freely. The same `group_ref` is allowed across different `group_key`s.
+**`entry_fts`.** The FTS5 keyword sidecar. One row per FTS-indexed entry holding `(uniq_id, text)`. Written by `index(uniq_id, match=...)`; cleaned by the entry-delete trigger. An entry without an `entry_fts` row is invisible to `match`.
 
-**Keyword index.** The `entry_fts` row holding the keyword text and `threshold_rank` for an entry. Written by `keyword()`, removed by `keyword_remove()`. An entry without a keyword index row is invisible to `keyword_search`.
+**`entry_vec`.** The vec0 semantic sidecar. One row per embedded entry holding `(uniq_id, text, embedding)`. Written by `index(uniq_id, search=...)`; cleaned by the entry-delete trigger. An entry without an `entry_vec` row is invisible to `search`.
+
+**`entry_delete_cascade`.** The `AFTER DELETE ON entry FOR EACH ROW` SQLite trigger that removes matching `uniq_id` rows from `entry_idx`, `entry_fts`, and `entry_vec`. Deleting an entry is the only public way to drop sidecar rows.
+
+**Fetch.** `Grimoire.fetch(uniq_refs)`. Looks up entries by `entry_idx.uniq_ref` (external reference). Returns parallel `(entries, indexes)` lists. `uniq_ref` is non-unique, so the result may include more entries than refs.
+
+**FTS5.** SQLite's bundled full-text search extension. Powers `entry_fts` and `match`. Ranks by BM25.
+
+**Index.** `Grimoire.index(uniq_id, *, ref, ord, nom, match, search)`. The combined sidecar writer. PUT-style: each supplied kwarg wholesale-replaces the corresponding sidecar row; omitted kwargs leave that side alone.
+
+**Match.** `Grimoire.match(query, filters=None, limit=None)`. FTS5 BM25 keyword search. Returns parallel `(entries, hits)` lists in rank order. `KeywordHit.score` is `-bm25` so higher = better.
 
 **Mount.** Directory holding one default `grimoire.db`, optional named-subdirectory databases, a shared `__models__/` embedder cache, and a reserved `grimoire.toml` registry. The library publishes the convention via `grimoire.mount.Mount`; the CLI resolves a mount path from `--mount`, `$GRIMOIRE_MOUNT`, or `~/.grimoire`.
 
-**Partition.** A vec0 partition key on the semantic index row. Lets `semantic_search(partition=...)` narrow KNN to a slice without scanning the rest. Distinct from `group_key` — `group_key` lives on the entry, `partition` lives on the vec row. The same id can move partitions by re-embedding.
+**`nominal_1` / `nominal_2`.** Two consumer-defined TEXT columns on `entry_idx`. Used for categorical labels (e.g., type, status, owner). Indexed; nullable. Filterable via `Filters.equals`.
 
-**Peek.** A read-only inspection of a database that returns model, dimension, schema version, and counts without loading sqlite-vec or requiring an embedder. Exposed as `grimoire.peek(path)`.
+**`ordinal_1` / `ordinal_2` / `ordinal_3`.** Three consumer-defined REAL columns on `entry_idx`. Used for sortable numerics (e.g., timestamps, scores, measurements). Indexed; nullable. Filterable via `Filters.equals`, `Filters.gte`, `Filters.lte`.
+
+**Peek.** A read-only inspection of a database that returns model, dimension, schema version, and per-table row counts without binding an embedder. Exposed as `Grimoire.peek(path)`.
+
+**Query.** `Grimoire.query(filters=None, limit=100, cursor=None)`. Browses `entry_idx` rows ordered by `uniq_id` ASC, joined to `entry`. Returns parallel `(entries, indexes)` lists. Pages by `uniq_id` cursor; for ordinal-window paging, use `Filters.gte` / `Filters.lte`.
 
 **Schema version.** Stored in the file's `PRAGMA user_version`, validated against the library's `SCHEMA_VERSION` on open. Pre-v1, mismatches raise `SchemaVersionError`; recreate the file.
 
-**Semantic index.** The `entry_vec` row holding the embedding, source text, partition, and `threshold_distance` for an entry. Written by `embed()`, removed by `embed_remove()`. An entry without a semantic index row is invisible to `semantic_search`.
+**Search.** `Grimoire.search(query, limit=10)`. vec0 KNN semantic search. Returns parallel `(entries, hits)` lists nearest-first. `SemanticHit.distance` is the raw vec0 distance, non-negative.
 
-**`threshold_rank` / `threshold_distance`.** Per-row similarity gates stored alongside an index row. Surfaced on the `Entry` returned with each hit (`hit.entry.threshold_rank` for keyword, `hit.entry.threshold_distance` for semantic); the library does not auto-filter by them.
+**Sidecar.** A table keyed by `entry.uniq_id` that holds opt-in per-entry data (`entry_idx`, `entry_fts`, `entry_vec`). Sidecars don't have foreign keys to `entry` (virtual tables don't support FKs); the entry-delete trigger keeps them in sync.
 
-**ULID.** The id format grimoire assigns to every entry. Lexicographically sortable by creation time, which is how `fetch(cursor=...)` walks pages chronologically without a separate cursor column.
+**ULID.** The id format grimoire assigns to every entry. Lexicographically sortable by creation time, which is how `query(cursor=...)` walks pages chronologically without a separate cursor column.
+
+**`uniq_id`.** Primary key on `entry` and on all three sidecars. Library-assigned ULID at `add()` time.
+
+**`uniq_ref`.** Indexed (but non-unique) TEXT column on `entry_idx` for external reference. Looked up by `Grimoire.fetch(uniq_refs)`.

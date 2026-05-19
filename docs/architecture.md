@@ -1,6 +1,6 @@
 # Architecture
 
-**TL;DR:** A core Python library wraps SQLite, sqlite-vec, and FTS5. Entries hold metadata; keyword and semantic indexing are independent, opt-in operations against the same entry id. A CLI and an MCP server sit on top.
+**TL;DR:** A core Python library wraps SQLite, sqlite-vec, and FTS5. Entries are bare identity rows; three opt-in sidecars (typed metadata, FTS keyword, vec semantic) attach to each entry's `uniq_id`. A CLI and an MCP server sit on top.
 
 **When to read this:** Before making any change that crosses a component boundary.
 
@@ -27,21 +27,23 @@ The CLI imports the library directly. There is no IPC, RPC, or daemon. The MCP s
 
 ## Data model
 
-Three tables back every grimoire:
+One identity table, three sidecars, one meta table:
 
-- **`entry`** — `(id, group_key, group_ref, payload, context)`. The identity row. `id` is a ULID. `payload` is a JSON object. `context` is unindexed prose. No searchable text lives here.
-- **`entry_fts`** — virtual FTS5 table holding `(entry_id, keyword_text, threshold_rank)`. One row per indexed entry.
-- **`entry_vec`** — virtual vec0 table holding `(id, partition, semantic_text, threshold_distance, embedding)`. One row per embedded entry. `partition` is the vec0 partition key.
+- **`entry`** — `(uniq_id, data)`. The identity row. `uniq_id` is a ULID; `data` is a JSON-serialized value (object, array, scalar, or null), library-encoded on write and decoded on read.
+- **`entry_idx`** — typed filterable/sortable metadata. Columns: `uniq_id` (PK), `uniq_ref` (TEXT), `nominal_1`, `nominal_2` (TEXT), `ordinal_1`, `ordinal_2`, `ordinal_3` (REAL). All columns except `uniq_id` are nullable; each non-PK column is indexed.
+- **`entry_fts`** — virtual FTS5 table holding `(uniq_id, text)`. One row per FTS-indexed entry.
+- **`entry_vec`** — virtual vec0 table holding `(uniq_id, text, embedding)`. One row per semantically-indexed entry.
+- **`meta`** — key/value pairs recording the embedder lock (`model`, `dimension`) at create time.
 
-An entry can have a row in zero, one, or both of the index tables. Indexing is **not** a side-effect of `add()` — callers explicitly call `keyword()` or `embed()` against an existing entry id. This means an entry's searchable text can change after creation by re-indexing without touching the entry row.
+The three sidecars are independent and opt-in. An entry can have rows in zero, one, two, or all three of them.
 
-A `meta` table records the embedder lock (`model`, `dimension`) at create time.
+Indexing is decoupled from `add()`. The library's combined writer `Grimoire.index(uniq_id, *, ref, ord, nom, match, search)` PUT-replaces whichever sidecars its kwargs touch. The sidecars never reference the entry table via foreign key (virtual tables don't support FKs); instead, the trigger `entry_delete_cascade` fires `AFTER DELETE ON entry FOR EACH ROW` and removes any matching `uniq_id` from all three sidecars. There are no `*_remove` helpers — deleting the entry is the only way to drop sidecar rows.
 
 ## Lifecycle
 
-- `grimoire.open(path, *, embedder)` opens (or initializes) a SQLite file. Empty files get the schema installed and the embedder lock written. Existing files validate that the supplied embedder matches the locked `model` and `dimension` and raise `GrimoireMismatch` on disagreement.
+- `Grimoire.open(path, *, embedder=None)` opens or initializes a SQLite file. Empty files get the schema installed and the embedder lock written. Existing files validate that the supplied embedder matches the locked `model` and `dimension` and raise `GrimoireMismatch` on disagreement. Without an embedder, an empty file locks to NoOp sentinel values; semantic operations later raise `EmbedderRequired`.
 - `Grimoire` is a context manager. `__exit__` commits on a clean exit and rolls back on an unhandled exception.
-- `grimoire.peek(path)` reads metadata and counts (entries, per-group, per-partition) without requiring an embedder. Safe to call against any file path.
+- `Grimoire.peek(path)` reads `model`, `dimension`, `schema_version`, and per-table row counts without requiring an embedder. Safe to call against any file path.
 
 ## Mount layout (CLI convention)
 
@@ -58,4 +60,4 @@ The library publishes the `Mount` dataclass and the layout convention; the CLI d
 
 ## Data flow
 
-Data enters and exits exclusively through the library. The CLI and MCP server are thin adapters: they translate command-line arguments or MCP tool calls into library calls, then serialize the returned dataclasses as JSON.
+Data enters and exits exclusively through the library. The CLI and MCP server are thin adapters: they translate command-line arguments or MCP tool calls into library calls, then serialize the returned dataclasses as JSON. Read commands that come back as paired `(entries, indexes|hits)` tuples are flattened to `[{"entry": ..., "<key>": ...}, ...]` for downstream `jq` / consumer use.

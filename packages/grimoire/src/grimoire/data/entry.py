@@ -3,51 +3,94 @@ import sqlite3
 import struct
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from ulid import ULID
+
+_ENTRY_IDX_COLUMNS: frozenset[str] = frozenset(
+    {
+        "uniq_id",
+        "uniq_ref",
+        "nominal_1",
+        "nominal_2",
+        "ordinal_1",
+        "ordinal_2",
+        "ordinal_3",
+    }
+)
+
+_ORDINAL_COLUMNS: frozenset[str] = frozenset({"ordinal_1", "ordinal_2", "ordinal_3"})
 
 
 @dataclass(frozen=True, slots=True)
 class Entry:
-    id: str | None
-    group_key: str | None
-    group_ref: str | None
-    payload: dict[str, Any] | None
-    context: str | None = None
-    ordinal: float | None = None
-    keyword_text: str | None = None
-    threshold_rank: float | None = None
-    semantic_text: str | None = None
-    partition: str | None = None
-    threshold_distance: float | None = None
+    """Identity row: a uniq_id and a JSON-serializable data blob."""
+
+    uniq_id: str | None
+    data: Any = None
+
+
+@dataclass(frozen=True, slots=True)
+class EntryIndex:
+    """Filterable/searchable metadata sidecar keyed by uniq_id.
+
+    All slots except `uniq_id` are optional. Library writes/reads them
+    verbatim; semantics (what nominal_1 means, what ordinal_2 measures)
+    are the caller's to define.
+    """
+
+    uniq_id: str | None
+    uniq_ref: str | None = None
+    nominal_1: str | None = None
+    nominal_2: str | None = None
+    ordinal_1: float | None = None
+    ordinal_2: float | None = None
+    ordinal_3: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Filters:
+    """Generic, dict-driven filters over `entry_idx` columns.
+
+    `equals` keys may name any of the seven entry_idx columns and apply
+    `column IN (values...)`. `gte` / `lte` keys must name one of the three
+    `ordinal_*` columns and apply `>= value` / `<= value`. Empty value
+    lists in `equals` skip the filter (no-op).
+    """
+
+    equals: dict[str, list[Any]] | None = None
+    gte: dict[str, float] | None = None
+    lte: dict[str, float] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class KeywordHit:
-    entry: Entry
+    uniq_id: str
     score: float
 
 
 @dataclass(frozen=True, slots=True)
 class SemanticHit:
-    entry: Entry
+    uniq_id: str
     distance: float
 
 
 def _row_to_entry(r: sqlite3.Row) -> Entry:
     return Entry(
-        id=r["id"],
-        group_key=r["group_key"],
-        group_ref=r["group_ref"],
-        payload=json.loads(r["payload"]) if r["payload"] is not None else None,
-        context=r["context"],
-        ordinal=r["ordinal"],
-        keyword_text=r["keyword_text"],
-        threshold_rank=r["threshold_rank"],
-        semantic_text=r["semantic_text"],
-        partition=r["vec_partition"],
-        threshold_distance=r["threshold_distance"],
+        uniq_id=r["uniq_id"],
+        data=json.loads(r["data"]) if r["data"] is not None else None,
+    )
+
+
+def _row_to_entry_idx(r: sqlite3.Row) -> EntryIndex:
+    return EntryIndex(
+        uniq_id=r["uniq_id"],
+        uniq_ref=r["uniq_ref"],
+        nominal_1=r["nominal_1"],
+        nominal_2=r["nominal_2"],
+        ordinal_1=r["ordinal_1"],
+        ordinal_2=r["ordinal_2"],
+        ordinal_3=r["ordinal_3"],
     )
 
 
@@ -55,297 +98,290 @@ def _serialize_vec(v: Sequence[float]) -> bytes:
     return struct.pack(f"<{len(v)}f", *v)
 
 
-def add(
-    conn: sqlite3.Connection,
-    entries: list[Entry],
-) -> list[Entry]:
+def _build_where(
+    filters: Filters | None, alias: str = "i"
+) -> tuple[list[str], dict[str, Any]]:
+    """Compile a Filters into WHERE-clause fragments + named params.
+
+    Caller joins the fragments with ' AND '. Returns ([], {}) for None or
+    an empty Filters. Raises ValueError for unknown filter columns.
+    """
+    if filters is None:
+        return [], {}
+
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+
+    if filters.equals:
+        for i, (col, values) in enumerate(filters.equals.items()):
+            if col not in _ENTRY_IDX_COLUMNS:
+                raise ValueError(
+                    f"equals filter column {col!r} must be one of "
+                    f"{sorted(_ENTRY_IDX_COLUMNS)}"
+                )
+            if not values:
+                continue
+            key = f"eq_{i}"
+            clauses.append(
+                f"{alias}.{col} IN (SELECT value FROM json_each(:{key}))"
+            )
+            params[key] = json.dumps(list(values))
+
+    if filters.gte:
+        for i, (col, value) in enumerate(filters.gte.items()):
+            if col not in _ORDINAL_COLUMNS:
+                raise ValueError(
+                    f"gte filter column {col!r} must be one of "
+                    f"{sorted(_ORDINAL_COLUMNS)}"
+                )
+            key = f"gte_{i}"
+            clauses.append(f"{alias}.{col} >= :{key}")
+            params[key] = value
+
+    if filters.lte:
+        for i, (col, value) in enumerate(filters.lte.items()):
+            if col not in _ORDINAL_COLUMNS:
+                raise ValueError(
+                    f"lte filter column {col!r} must be one of "
+                    f"{sorted(_ORDINAL_COLUMNS)}"
+                )
+            key = f"lte_{i}"
+            clauses.append(f"{alias}.{col} <= :{key}")
+            params[key] = value
+
+    return clauses, params
+
+
+def _check_ids_exist(conn: sqlite3.Connection, ids: list[str]) -> None:
+    """Raise ValueError if any id is missing from `entry` (the identity table)."""
+    existing = conn.execute(
+        "SELECT uniq_id FROM entry "
+        "WHERE uniq_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(ids),),
+    ).fetchall()
+    known = {r["uniq_id"] for r in existing}
+    for uniq_id in ids:
+        if uniq_id not in known:
+            raise ValueError(f"No entry with uniq_id {uniq_id!r}")
+
+
+# ----------------------------------------------------------------------
+# entry  (identity table)
+# ----------------------------------------------------------------------
+
+
+def add(conn: sqlite3.Connection, entries: list[Entry]) -> list[Entry]:
+    """Insert entries with freshly-minted ULIDs. Returns entries with assigned ids."""
     if not entries:
         return []
 
-    saved = [
-        Entry(
-            id=str(ULID()),
-            group_key=e.group_key,
-            group_ref=e.group_ref,
-            payload=e.payload,
-            context=e.context,
-            ordinal=e.ordinal,
-        )
-        for e in entries
-    ]
-    try:
-        conn.executemany(
-            "INSERT INTO entry (id, group_key, group_ref, payload, context, ordinal) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            [
-                (
-                    e.id,
-                    e.group_key,
-                    e.group_ref,
-                    json.dumps(e.payload) if e.payload is not None else None,
-                    e.context,
-                    e.ordinal,
-                )
-                for e in saved
-            ],
-        )
-    except sqlite3.IntegrityError as exc:
-        raise ValueError(
-            "duplicate (group_key, group_ref); each (key, ref) pair must be unique"
-        ) from exc
+    saved = [Entry(uniq_id=str(ULID()), data=e.data) for e in entries]
+    conn.executemany(
+        "INSERT INTO entry (uniq_id, data) VALUES (?, ?)",
+        [
+            (e.uniq_id, json.dumps(e.data) if e.data is not None else None)
+            for e in saved
+        ],
+    )
     return saved
 
 
-def keyword_remove(conn: sqlite3.Connection, ids: list[str]) -> list[str]:
-    """Delete entry_fts rows for the given ids. Returns the ids that had rows.
+def update(
+    conn: sqlite3.Connection, entries: list[Entry]
+) -> list[Entry]:
+    """Rewrite the `data` column on existing rows, keyed by `uniq_id`.
 
-    Entries themselves are not affected.
+    Unknown ids are silently skipped; the returned list contains only the
+    entries that matched a row.
     """
-    if not ids:
+    if not entries:
         return []
 
-    ids_json = json.dumps(ids)
-    existing = conn.execute(
-        "SELECT entry_id FROM entry_fts "
-        "WHERE entry_id IN (SELECT value FROM json_each(?))",
-        (ids_json,),
-    ).fetchall()
-    removed = [r["entry_id"] for r in existing]
-
-    conn.execute(
-        "DELETE FROM entry_fts WHERE entry_id IN (SELECT value FROM json_each(?))",
-        (ids_json,),
-    )
-    return removed
+    saved: list[Entry] = []
+    for e in entries:
+        cur = conn.execute(
+            "UPDATE entry SET data = ? WHERE uniq_id = ?",
+            (json.dumps(e.data) if e.data is not None else None, e.uniq_id),
+        )
+        if cur.rowcount > 0:
+            saved.append(e)
+    return saved
 
 
-def embed_remove(conn: sqlite3.Connection, ids: list[str]) -> list[str]:
-    """Delete entry_vec rows for the given ids. Returns the ids that had rows.
+def remove(conn: sqlite3.Connection, uniq_ids: list[str]) -> list[str]:
+    """Delete entries by uniq_id. Sidecar rows are cascade-cleaned by trigger.
 
-    Entries themselves are not affected.
+    Returns the ids that were actually removed (existed in `entry`).
     """
-    if not ids:
+    if not uniq_ids:
         return []
 
-    ids_json = json.dumps(ids)
-    existing = conn.execute(
-        "SELECT id FROM entry_vec WHERE id IN (SELECT value FROM json_each(?))",
-        (ids_json,),
-    ).fetchall()
-    removed = [r["id"] for r in existing]
+    cur = conn.execute(
+        "DELETE FROM entry "
+        "WHERE uniq_id IN (SELECT value FROM json_each(?)) "
+        "RETURNING uniq_id",
+        (json.dumps(uniq_ids),),
+    )
+    return [r["uniq_id"] for r in cur]
+
+
+def get(conn: sqlite3.Connection, uniq_ids: list[str]) -> list[Entry]:
+    """Fetch entries by uniq_id. Returns only the ones that exist, no order guarantee."""
+    if not uniq_ids:
+        return []
+    cur = conn.execute(
+        "SELECT uniq_id, data FROM entry "
+        "WHERE uniq_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(uniq_ids),),
+    )
+    return [_row_to_entry(r) for r in cur]
+
+
+def fetch_by_uniq_ref(
+    conn: sqlite3.Connection, uniq_refs: list[str]
+) -> tuple[list[Entry], list[EntryIndex]]:
+    """Fetch entries whose entry_idx row has uniq_ref in the given list.
+
+    Returns parallel `(entries, indexes)` lists — `entries[i]` and
+    `indexes[i]` describe the same row. Joins entry to entry_idx;
+    entries without an entry_idx row are excluded (no idx, no ref to
+    match). Multiple entries may share a uniq_ref since there is no
+    uniqueness constraint, so the result may contain more rows than
+    refs were passed.
+    """
+    if not uniq_refs:
+        return [], []
+    cur = conn.execute(
+        "SELECT e.uniq_id, e.data, "
+        "       i.uniq_ref, i.nominal_1, i.nominal_2, "
+        "       i.ordinal_1, i.ordinal_2, i.ordinal_3 "
+        "FROM entry e "
+        "JOIN entry_idx i ON i.uniq_id = e.uniq_id "
+        "WHERE i.uniq_ref IN (SELECT value FROM json_each(?))",
+        (json.dumps(uniq_refs),),
+    )
+    entries: list[Entry] = []
+    indexes: list[EntryIndex] = []
+    for r in cur:
+        entries.append(_row_to_entry(r))
+        indexes.append(_row_to_entry_idx(r))
+    return entries, indexes
+
+
+# ----------------------------------------------------------------------
+# entry_idx  (filterable metadata sidecar)
+# ----------------------------------------------------------------------
+
+
+def entry_idx_set(
+    conn: sqlite3.Connection, indexes: list[EntryIndex]
+) -> list[str]:
+    """Insert or replace entry_idx rows. Each uniq_id must exist in `entry`.
+
+    Returns the list of ids that were written.
+    """
+    if not indexes:
+        return []
+
+    ids = [i.uniq_id for i in indexes if i.uniq_id is not None]
+    if len(ids) != len(indexes):
+        raise ValueError("EntryIndex.uniq_id is required for entry_idx_set")
+    _check_ids_exist(conn, ids)
 
     conn.execute(
-        "DELETE FROM entry_vec WHERE id IN (SELECT value FROM json_each(?))",
-        (ids_json,),
+        "DELETE FROM entry_idx WHERE uniq_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(ids),),
     )
-    return removed
+    conn.executemany(
+        "INSERT INTO entry_idx "
+        "(uniq_id, uniq_ref, nominal_1, nominal_2, "
+        " ordinal_1, ordinal_2, ordinal_3) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                i.uniq_id,
+                i.uniq_ref,
+                i.nominal_1,
+                i.nominal_2,
+                i.ordinal_1,
+                i.ordinal_2,
+                i.ordinal_3,
+            )
+            for i in indexes
+        ],
+    )
+    return ids
+
+
+def fetch_idx(
+    conn: sqlite3.Connection,
+    filters: Filters | None = None,
+    limit: int = 100,
+    cursor: str | None = None,
+) -> tuple[list[Entry], list[EntryIndex]]:
+    """Walk entry_idx rows ordered by `uniq_id` ASC.
+
+    Returns parallel `(entries, indexes)` lists. `cursor`, if given,
+    returns rows with `uniq_id > cursor`. For ordinal-window paging,
+    pass `Filters(gte={...}, lte={...})`.
+    """
+    clauses, params = _build_where(filters, alias="i")
+    if cursor is not None:
+        clauses.append("i.uniq_id > :cursor")
+        params["cursor"] = cursor
+
+    sql = (
+        "SELECT i.uniq_id, i.uniq_ref, i.nominal_1, i.nominal_2, "
+        "       i.ordinal_1, i.ordinal_2, i.ordinal_3, "
+        "       e.data "
+        "FROM entry_idx i "
+        "JOIN entry e ON e.uniq_id = i.uniq_id"
+    )
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY i.uniq_id ASC LIMIT :limit"
+    params["limit"] = limit
+
+    entries: list[Entry] = []
+    indexes: list[EntryIndex] = []
+    for r in conn.execute(sql, params):
+        entries.append(_row_to_entry(r))
+        indexes.append(_row_to_entry_idx(r))
+    return entries, indexes
+
+
+# ----------------------------------------------------------------------
+# entry_fts  (FTS5 keyword sidecar)
+# ----------------------------------------------------------------------
 
 
 def keyword(
-    conn: sqlite3.Connection,
-    items: list[tuple[str, str]],
-    *,
-    threshold_rank: float | None = None,
-) -> list[Entry]:
-    """Write (or replace) entry_fts rows for the given (id, keyword_text) pairs.
+    conn: sqlite3.Connection, items: list[tuple[str, str]]
+) -> list[str]:
+    """Write (or replace) entry_fts rows for (uniq_id, text) pairs.
 
-    Existing fts rows for these ids are deleted first so the text or threshold
-    can change freely. `threshold_rank` applies to every row in this batch.
+    Each id must exist in `entry`; text must be non-empty. Returns the
+    ids that were written.
     """
     if not items:
         return []
 
     for _, text in items:
         if not text.strip():
-            raise ValueError("keyword_text must be non-empty")
+            raise ValueError("text must be non-empty")
 
     ids = [i for i, _ in items]
+    _check_ids_exist(conn, ids)
+
     conn.execute(
-        "DELETE FROM entry_fts WHERE entry_id IN (SELECT value FROM json_each(?))",
+        "DELETE FROM entry_fts WHERE uniq_id IN (SELECT value FROM json_each(?))",
         (json.dumps(ids),),
     )
     conn.executemany(
-        "INSERT INTO entry_fts(entry_id, keyword_text, threshold_rank)"
-        " VALUES (?, ?, ?)",
-        [(id_, text, threshold_rank) for id_, text in items],
+        "INSERT INTO entry_fts(uniq_id, text) VALUES (?, ?)",
+        items,
     )
-
-    return fetch(conn, Filters(id=ids), limit=len(ids))
-
-
-def embed(
-    conn: sqlite3.Connection,
-    indexed: list[tuple[str, str, Sequence[float]]],
-    *,
-    partition: str | None = None,
-    threshold_distance: float | None = None,
-) -> list[Entry]:
-    """Write (or replace) entry_vec rows for the given triples.
-
-    Existing vec rows for these ids are deleted first so the partition,
-    threshold, or text can change freely.
-    """
-    if not indexed:
-        return []
-
-    ids = [i for i, _, _ in indexed]
-    conn.execute(
-        "DELETE FROM entry_vec WHERE id IN (SELECT value FROM json_each(?))",
-        (json.dumps(ids),),
-    )
-    conn.executemany(
-        "INSERT INTO entry_vec"
-        "(id, partition, semantic_text, threshold_distance, embedding) "
-        "VALUES (?, ?, ?, ?, ?)",
-        [
-            (id_, partition, text, threshold_distance, _serialize_vec(vec))
-            for id_, text, vec in indexed
-        ],
-    )
-
-    return fetch(conn, Filters(id=ids), limit=len(ids))
-
-
-def update(
-    conn: sqlite3.Connection,
-    entries: list[Entry],
-) -> list[Entry]:
-    if not entries:
-        return []
-
-    saved: list[Entry] = []
-    for e in entries:
-        payload_text = json.dumps(e.payload) if e.payload is not None else None
-        try:
-            cur = conn.execute(
-                "UPDATE entry "
-                "SET group_key = ?, group_ref = ?, payload = ?, context = ?,"
-                "    ordinal = ? "
-                "WHERE id = ?",
-                (e.group_key, e.group_ref, payload_text, e.context, e.ordinal, e.id),
-            )
-        except sqlite3.IntegrityError as exc:
-            raise ValueError(
-                "duplicate (group_key, group_ref); each (key, ref) pair must be unique"
-            ) from exc
-        if cur.rowcount > 0:
-            saved.append(e)
-    return saved
-
-
-def remove(conn: sqlite3.Connection, ids: list[str]) -> list[str]:
-    if not ids:
-        return []
-
-    ids_json = json.dumps(ids)
-    cur = conn.execute(
-        """
-        DELETE FROM entry
-        WHERE id IN (SELECT value FROM json_each(?))
-        RETURNING id
-        """,
-        (ids_json,),
-    )
-    removed = [r["id"] for r in cur]
-
-    # Cascade cleanup to virtual tables; FKs don't reach across to fts5/vec0.
-    conn.execute(
-        "DELETE FROM entry_fts WHERE entry_id IN (SELECT value FROM json_each(?))",
-        (ids_json,),
-    )
-    conn.execute(
-        "DELETE FROM entry_vec WHERE id IN (SELECT value FROM json_each(?))",
-        (ids_json,),
-    )
-
-    return removed
-
-
-@dataclass(frozen=True, slots=True)
-class Filters:
-    id: list[str] | None = None
-    group_key: list[str] | None = None
-    group_ref: list[str] | None = None
-    ordinal_gte: float | None = None
-    ordinal_lte: float | None = None
-
-
-OrderBy = Literal["id", "ordinal"]
-
-# NULLS LAST on the keyed column so unindexed entries don't bury the head of the
-# result; id is the deterministic tiebreaker. Cursor pagination uses `e.id >
-# :cursor` and is therefore only meaningful with the id-ASC default.
-_ORDER_CLAUSES: dict[tuple[OrderBy, bool], str] = {
-    ("id", False): "ORDER BY e.id ASC",
-    ("id", True): "ORDER BY e.id DESC",
-    ("ordinal", False): "ORDER BY e.ordinal ASC NULLS LAST, e.id ASC",
-    ("ordinal", True): "ORDER BY e.ordinal DESC NULLS LAST, e.id ASC",
-}
-
-_FETCH_SQL = """
-SELECT e.id, e.group_key, e.group_ref, e.payload, e.context, e.ordinal,
-       fts.keyword_text AS keyword_text,
-       fts.threshold_rank AS threshold_rank,
-       v.semantic_text AS semantic_text,
-       v.partition AS vec_partition,
-       v.threshold_distance AS threshold_distance
-FROM entry e
-LEFT JOIN entry_fts fts ON fts.entry_id = e.id
-LEFT JOIN entry_vec v ON v.id = e.id
-WHERE (:ids IS NULL OR e.id IN (SELECT value FROM json_each(:ids)))
-  AND (:group_keys IS NULL OR e.group_key IN (SELECT value FROM json_each(:group_keys)))
-  AND (:group_refs IS NULL OR e.group_ref IN (SELECT value FROM json_each(:group_refs)))
-  AND (:ordinal_gte IS NULL OR e.ordinal >= :ordinal_gte)
-  AND (:ordinal_lte IS NULL OR e.ordinal <= :ordinal_lte)
-  AND (:cursor IS NULL OR e.id > :cursor)
-{order_by}
-LIMIT :limit
-"""
-
-
-def fetch(
-    conn: sqlite3.Connection,
-    filters: Filters | None = None,
-    limit: int = 100,
-    cursor: str | None = None,
-    order_by: OrderBy = "id",
-    descending: bool = False,
-) -> list[Entry]:
-    """Fetch entries with their FTS5 and vec0 index rows attached.
-
-    Default ordering is by id (chronologically, since ids are ULIDs). Pass
-    `order_by="ordinal"` to sort by the consumer-supplied ordinal column;
-    NULL ordinals sort last, with id as a deterministic tiebreaker.
-    `descending=True` reverses the primary key direction.
-
-    Entries with no keyword or semantic index row come back with the
-    corresponding fields set to None. `cursor`, when given, returns entries
-    with `id > cursor` — pass the id of the last entry from the previous
-    page to walk forward. Cursor is id-based, so it only composes cleanly
-    with the default `order_by="id"`, `descending=False`. For ordinal-window
-    paging, use `Filters.ordinal_gte`/`ordinal_lte`.
-    """
-    clause = _ORDER_CLAUSES.get((order_by, descending))
-    if clause is None:
-        raise ValueError(
-            f"order_by must be one of {sorted({k for k, _ in _ORDER_CLAUSES})};"
-            f" got {order_by!r}"
-        )
-
-    f = filters or Filters()
-    cur = conn.execute(
-        _FETCH_SQL.format(order_by=clause),
-        {
-            "ids": json.dumps(f.id) if f.id else None,
-            "group_keys": json.dumps(f.group_key) if f.group_key else None,
-            "group_refs": json.dumps(f.group_ref) if f.group_ref else None,
-            "ordinal_gte": f.ordinal_gte,
-            "ordinal_lte": f.ordinal_lte,
-            "cursor": cursor,
-            "limit": limit,
-        },
-    )
-    return [_row_to_entry(r) for r in cur]
+    return ids
 
 
 def keyword_search(
@@ -353,98 +389,99 @@ def keyword_search(
     query: str,
     filters: Filters | None = None,
     limit: int | None = None,
-) -> list[KeywordHit]:
+) -> tuple[list[Entry], list[KeywordHit]]:
+    """FTS5 BM25 search. Filters apply via JOIN to entry_idx.
+
+    Returns parallel `(entries, hits)` lists in BM25 rank order.
+    """
     if not query.strip():
         raise ValueError("search query must be non-empty")
 
-    f = filters or Filters()
+    clauses, params = _build_where(filters, alias="i")
     sql = (
-        "SELECT entry_fts.entry_id AS id, -bm25(entry_fts) AS score "
+        "SELECT entry_fts.uniq_id AS uniq_id, -bm25(entry_fts) AS score, "
+        "       e.data "
         "FROM entry_fts "
-        "JOIN entry e ON e.id = entry_fts.entry_id "
-        "WHERE entry_fts MATCH :query "
-        "  AND (:ids IS NULL OR e.id IN (SELECT value FROM json_each(:ids))) "
-        "  AND (:group_keys IS NULL OR e.group_key IN "
-        "       (SELECT value FROM json_each(:group_keys))) "
-        "  AND (:group_refs IS NULL OR e.group_ref IN "
-        "       (SELECT value FROM json_each(:group_refs))) "
-        "  AND (:ordinal_gte IS NULL OR e.ordinal >= :ordinal_gte) "
-        "  AND (:ordinal_lte IS NULL OR e.ordinal <= :ordinal_lte) "
-        "ORDER BY bm25(entry_fts)"
+        "JOIN entry e ON e.uniq_id = entry_fts.uniq_id "
     )
-    params: dict[str, Any] = {
-        "query": query,
-        "ids": json.dumps(f.id) if f.id else None,
-        "group_keys": json.dumps(f.group_key) if f.group_key else None,
-        "group_refs": json.dumps(f.group_ref) if f.group_ref else None,
-        "ordinal_gte": f.ordinal_gte,
-        "ordinal_lte": f.ordinal_lte,
-    }
+    if clauses:
+        sql += "JOIN entry_idx i ON i.uniq_id = entry_fts.uniq_id "
+    sql += "WHERE entry_fts MATCH :query"
+    if clauses:
+        sql += " AND " + " AND ".join(clauses)
+    sql += " ORDER BY bm25(entry_fts)"
+    params["query"] = query
     if limit is not None:
-        sql = sql + "\nLIMIT :limit"
+        sql += " LIMIT :limit"
         params["limit"] = limit
 
-    matches = conn.execute(sql, params).fetchall()
-    if not matches:
+    entries: list[Entry] = []
+    hits: list[KeywordHit] = []
+    for r in conn.execute(sql, params):
+        entries.append(_row_to_entry(r))
+        hits.append(KeywordHit(uniq_id=r["uniq_id"], score=r["score"]))
+    return entries, hits
+
+
+# ----------------------------------------------------------------------
+# entry_vec  (vec0 semantic sidecar)
+# ----------------------------------------------------------------------
+
+
+def embed(
+    conn: sqlite3.Connection,
+    indexed: list[tuple[str, str, Sequence[float]]],
+) -> list[str]:
+    """Write (or replace) entry_vec rows for (uniq_id, text, embedding) triples.
+
+    Each id must exist in `entry`; text must be non-empty. Returns the
+    ids that were written.
+    """
+    if not indexed:
         return []
 
-    ids_in_order = [r["id"] for r in matches]
-    entries_by_id = {
-        e.id: e for e in fetch(conn, Filters(id=ids_in_order), limit=len(ids_in_order))
-    }
-    return [KeywordHit(entry=entries_by_id[r["id"]], score=r["score"]) for r in matches]
+    for _, text, _ in indexed:
+        if not text.strip():
+            raise ValueError("text must be non-empty")
 
+    ids = [i for i, _, _ in indexed]
+    _check_ids_exist(conn, ids)
 
-_SEMANTIC_SEARCH_BY_PARTITION_SQL = """
-SELECT v.id AS id, v.distance AS distance
-FROM entry_vec v
-WHERE v.embedding MATCH :query
-  AND v.partition = :partition
-  AND k = :k
-ORDER BY v.distance
-"""
-
-_SEMANTIC_SEARCH_ANY_PARTITION_SQL = """
-SELECT v.id AS id, v.distance AS distance
-FROM entry_vec v
-WHERE v.embedding MATCH :query
-  AND k = :k
-ORDER BY v.distance
-"""
+    conn.execute(
+        "DELETE FROM entry_vec WHERE uniq_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(ids),),
+    )
+    conn.executemany(
+        "INSERT INTO entry_vec(uniq_id, text, embedding) VALUES (?, ?, ?)",
+        [(id_, text, _serialize_vec(vec)) for id_, text, vec in indexed],
+    )
+    return ids
 
 
 def semantic_search(
     conn: sqlite3.Connection,
     embedding: Sequence[float],
-    partition: str | None,
     limit: int = 10,
-) -> list[SemanticHit]:
+) -> tuple[list[Entry], list[SemanticHit]]:
+    """vec0 KNN search. Returns parallel `(entries, hits)` lists,
+    nearest-first by vector distance."""
     if not embedding:
         raise ValueError("embedding must be non-empty")
 
-    if partition is None:
-        sql = _SEMANTIC_SEARCH_ANY_PARTITION_SQL
-        params: dict[str, Any] = {
+    entries: list[Entry] = []
+    hits: list[SemanticHit] = []
+    cur = conn.execute(
+        "SELECT v.uniq_id AS uniq_id, v.distance AS distance, e.data "
+        "FROM entry_vec v "
+        "JOIN entry e ON e.uniq_id = v.uniq_id "
+        "WHERE v.embedding MATCH :query AND k = :k "
+        "ORDER BY v.distance",
+        {
             "query": _serialize_vec(embedding),
             "k": limit,
-        }
-    else:
-        sql = _SEMANTIC_SEARCH_BY_PARTITION_SQL
-        params = {
-            "query": _serialize_vec(embedding),
-            "partition": partition,
-            "k": limit,
-        }
-
-    matches = conn.execute(sql, params).fetchall()
-    if not matches:
-        return []
-
-    ids_in_order = [r["id"] for r in matches]
-    entries_by_id = {
-        e.id: e for e in fetch(conn, Filters(id=ids_in_order), limit=len(ids_in_order))
-    }
-    return [
-        SemanticHit(entry=entries_by_id[r["id"]], distance=r["distance"])
-        for r in matches
-    ]
+        },
+    )
+    for r in cur:
+        entries.append(_row_to_entry(r))
+        hits.append(SemanticHit(uniq_id=r["uniq_id"], distance=r["distance"]))
+    return entries, hits

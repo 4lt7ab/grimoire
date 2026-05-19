@@ -1,4 +1,5 @@
-import json
+from __future__ import annotations
+
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,9 +9,9 @@ import sqlite_vec
 from grimoire.data import entry, meta, schema
 from grimoire.data.entry import (
     Entry,
+    EntryIndex,
     Filters,
     KeywordHit,
-    OrderBy,
     SemanticHit,
 )
 from grimoire.embed import Embedder, NoOpEmbedder
@@ -23,12 +24,15 @@ from grimoire.errors import (
 
 @dataclass(frozen=True, slots=True)
 class Peek:
+    """Lightweight snapshot of a grimoire file: lock + per-table row counts."""
+
     model: str
     dimension: int
     schema_version: int
     entry_count: int
-    group_counts: dict[str | None, int]
-    partition_counts: dict[str | None, int]
+    entry_idx_count: int
+    entry_fts_count: int
+    entry_vec_count: int
 
 
 class Grimoire:
@@ -40,13 +44,28 @@ class Grimoire:
         self._conn = conn
         self.embedder = embedder
 
+    # ------------------------------------------------------------------
+    # File lifecycle
+    # ------------------------------------------------------------------
+
     @staticmethod
     def open(
         path: str | Path,
         *,
         embedder: Embedder | None = None,
         check_same_thread: bool = True,
-    ) -> "Grimoire":
+    ) -> Grimoire:
+        """Open or initialize a grimoire file at `path`.
+
+        An empty file gets the schema installed and the embedder lock
+        written. An initialized file is validated against the supplied
+        embedder; mismatched model or dimension raises `GrimoireMismatch`.
+
+        Without an embedder, an empty file locks to NoOp sentinel values
+        (model="noop", dimension=1). The lock is sticky: reopening with a
+        real embedder later raises `GrimoireMismatch`. Semantic operations
+        on a NoOp-locked grimoire raise `EmbedderRequired`.
+        """
         conn = sqlite3.connect(path, check_same_thread=check_same_thread)
         conn.row_factory = sqlite3.Row
 
@@ -55,11 +74,6 @@ class Grimoire:
         conn.enable_load_extension(False)
 
         if schema.read_version(conn) == 0:
-            # Empty file: the schema's vec0 table needs a dimension up front,
-            # so without an embedder we lock the file to NoOp sentinel values.
-            # The lock is sticky — reopening with a real embedder later raises
-            # GrimoireMismatch; semantic ops raise EmbedderRequired in the
-            # meantime instead of writing zero-vector noise.
             lock = embedder if embedder is not None else NoOpEmbedder()
             schema.create(conn, model=lock.model, dimension=lock.dimension)
         else:
@@ -82,16 +96,11 @@ class Grimoire:
 
     @staticmethod
     def peek(path: str | Path, *, check_same_thread: bool = True) -> Peek:
-        """Inspect a grimoire file without loading an embedder.
+        """Inspect a grimoire file without binding an embedder.
 
-        Returns model, dimension, schema version, entry count, per-group counts
-        (from `entry`), and per-partition counts (from `entry_vec`). Raises
-        `GrimoireNotFound` if the file does not exist or has not been
-        initialized.
-
-        `check_same_thread` is forwarded to `sqlite3.connect`. Pass `False` to
-        use the returned connection from a different thread than the one that
-        opened it; the caller is then responsible for serializing access.
+        Returns model, dimension, schema version, and per-sidecar row
+        counts. Raises `GrimoireNotFound` if the file does not exist or
+        has not been initialized.
         """
         p = Path(path)
         if not p.exists():
@@ -114,28 +123,24 @@ class Grimoire:
             if model is None or dimension_str is None:
                 raise GrimoireNotFound(f"{p} is missing its embedder lock")
 
-            entry_count = conn.execute("SELECT COUNT(*) FROM entry").fetchone()[0]
-            group_rows = conn.execute(
-                "SELECT group_key, COUNT(*) AS n FROM entry GROUP BY group_key "
-                "ORDER BY group_key IS NULL, group_key"
-            ).fetchall()
-            partition_rows = conn.execute(
-                "SELECT partition, COUNT(*) AS n FROM entry_vec GROUP BY partition "
-                "ORDER BY partition IS NULL, partition"
-            ).fetchall()
+            counts = {
+                t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                for t in ("entry", "entry_idx", "entry_fts", "entry_vec")
+            }
 
             return Peek(
                 model=model,
                 dimension=int(dimension_str),
                 schema_version=schema.read_version(conn),
-                entry_count=entry_count,
-                group_counts={r["group_key"]: r["n"] for r in group_rows},
-                partition_counts={r["partition"]: r["n"] for r in partition_rows},
+                entry_count=counts["entry"],
+                entry_idx_count=counts["entry_idx"],
+                entry_fts_count=counts["entry_fts"],
+                entry_vec_count=counts["entry_vec"],
             )
         finally:
             conn.close()
 
-    def __enter__(self) -> "Grimoire":
+    def __enter__(self) -> Grimoire:
         return self
 
     def __exit__(self, exc_type, *_) -> None:
@@ -144,156 +149,153 @@ class Grimoire:
         else:
             self._conn.rollback()
 
+    # ------------------------------------------------------------------
+    # entry  (identity table)
+    # ------------------------------------------------------------------
+
     def add(self, entries: list[Entry]) -> list[Entry]:
+        """Insert entries with freshly-minted ULIDs."""
         return entry.add(self._conn, entries)
 
     def update(self, entries: list[Entry]) -> list[Entry]:
+        """Rewrite the `data` column on existing rows, keyed by `uniq_id`."""
         return entry.update(self._conn, entries)
 
-    def remove(self, ids: list[str]) -> list[str]:
-        return entry.remove(self._conn, ids)
+    def remove(self, uniq_ids: list[str]) -> list[str]:
+        """Delete entries. Sidecar rows are cascade-cleaned by DB trigger."""
+        return entry.remove(self._conn, uniq_ids)
+
+    def get(self, uniq_ids: list[str]) -> list[Entry]:
+        """Fetch entries by uniq_id. Returns only the ones that exist."""
+        return entry.get(self._conn, uniq_ids)
 
     def fetch(
+        self, uniq_refs: list[str]
+    ) -> tuple[list[Entry], list[EntryIndex]]:
+        """Fetch entries whose entry_idx row has uniq_ref in the given list.
+
+        Returns parallel `(entries, indexes)` lists. Entries without an
+        entry_idx row are excluded. Multiple entries may share a uniq_ref
+        (no uniqueness constraint), so the result may contain more rows
+        than refs were passed.
+        """
+        return entry.fetch_by_uniq_ref(self._conn, uniq_refs)
+
+    # ------------------------------------------------------------------
+    # entry_idx  (filterable metadata sidecar)
+    # ------------------------------------------------------------------
+
+    def query(
         self,
         filters: Filters | None = None,
         limit: int = 100,
         cursor: str | None = None,
-        order_by: OrderBy = "id",
-        descending: bool = False,
-    ) -> list[Entry]:
-        """Fetch entries with their FTS5 and vec0 index fields populated.
+    ) -> tuple[list[Entry], list[EntryIndex]]:
+        """Walk entry_idx rows ordered by `uniq_id` ASC.
 
-        Entries with no keyword or semantic index row come back with the
-        corresponding fields set to None. Defaults to id-ascending order
-        (chronological by creation time); pass `order_by="ordinal"` to sort
-        by the consumer-supplied ordinal column instead, with `descending`
-        flipping the direction. NULL ordinals sort last either way; id is
-        the deterministic tiebreaker.
-
-        `cursor` is id-based (`e.id > cursor`) and pairs cleanly with the
-        default id-ascending order. For ordinal-window paging, use
-        `Filters.ordinal_gte` / `ordinal_lte` instead.
+        Returns parallel `(entries, indexes)` lists. `cursor`, if given,
+        returns rows with `uniq_id > cursor`. For ordinal-window paging,
+        pass `Filters(gte={...}, lte={...})`.
         """
-        return entry.fetch(
-            self._conn,
-            filters,
-            limit,
-            cursor=cursor,
-            order_by=order_by,
-            descending=descending,
-        )
+        return entry.fetch_idx(self._conn, filters, limit, cursor=cursor)
 
-    def keyword_remove(self, ids: list[str]) -> list[str]:
-        """Delete entry_fts rows for the given ids. Returns the ids that had rows.
+    # ------------------------------------------------------------------
+    # entry_fts  (FTS5 keyword sidecar)
+    # ------------------------------------------------------------------
 
-        Entries themselves are not affected. Empty `ids` is a no-op.
-        """
-        return entry.keyword_remove(self._conn, ids)
-
-    def embed_remove(self, ids: list[str]) -> list[str]:
-        """Delete entry_vec rows for the given ids. Returns the ids that had rows.
-
-        Entries themselves are not affected. Empty `ids` is a no-op.
-        """
-        return entry.embed_remove(self._conn, ids)
-
-    def keyword(
-        self,
-        items: list[tuple[str, str]] | None = None,
-        *,
-        threshold_rank: float | None = None,
-    ) -> list[Entry]:
-        """Index (or re-index) entries' keyword text from (id, keyword_text) pairs.
-
-        Empty or None `items` is a no-op. Each id must refer to an existing
-        entry. Existing fts rows for these ids are replaced. `threshold_rank`
-        is stored on every row written in this call.
-        """
-        if not items:
-            return []
-
-        ids = [i for i, _ in items]
-        existing = self._conn.execute(
-            "SELECT id FROM entry WHERE id IN (SELECT value FROM json_each(?))",
-            (json.dumps(ids),),
-        ).fetchall()
-        known = {r["id"] for r in existing}
-        for entry_id in ids:
-            if entry_id not in known:
-                raise ValueError(f"No entry with id {entry_id!r}")
-
-        return entry.keyword(self._conn, items, threshold_rank=threshold_rank)
-
-    def embed(
-        self,
-        items: list[tuple[str, str]] | None = None,
-        *,
-        partition: str | None = None,
-        threshold_distance: float | None = None,
-    ) -> list[Entry]:
-        """Embed (or re-embed) entries from (id, semantic_text) pairs.
-
-        Each pair is written into the given partition. Empty or None `items`
-        is a no-op. Each id must refer to an existing entry; the given text
-        is embedded and stored on the vec row. Existing vec rows for these
-        ids are replaced. `threshold_distance` is stored on every row written
-        in this call.
-        """
-        if not items:
-            return []
-
-        if self.embedder is None:
-            raise EmbedderRequired(
-                "This grimoire was opened without an embedder; "
-                "pass embedder=... to Grimoire.open() to enable semantic indexing."
-            )
-
-        ids = [i for i, _ in items]
-        texts = [t for _, t in items]
-
-        for text in texts:
-            if not text.strip():
-                raise ValueError("semantic_text must be non-empty")
-
-        existing = self._conn.execute(
-            "SELECT id FROM entry WHERE id IN (SELECT value FROM json_each(?))",
-            (json.dumps(ids),),
-        ).fetchall()
-        known = {r["id"] for r in existing}
-        for entry_id in ids:
-            if entry_id not in known:
-                raise ValueError(f"No entry with id {entry_id!r}")
-
-        embeddings = self.embedder.embed_many(texts)
-        return entry.embed(
-            self._conn,
-            [(i, t, v) for (i, t), v in zip(items, embeddings, strict=True)],
-            partition=partition,
-            threshold_distance=threshold_distance,
-        )
-
-    def keyword_search(
+    def match(
         self,
         query: str,
         filters: Filters | None = None,
         limit: int | None = None,
-    ) -> list[KeywordHit]:
+    ) -> tuple[list[Entry], list[KeywordHit]]:
+        """FTS5 BM25 search. Filters apply via JOIN to entry_idx.
+
+        Returns parallel `(entries, hits)` lists in BM25 rank order.
+        """
         return entry.keyword_search(self._conn, query, filters, limit)
 
-    def semantic_search(
-        self,
-        query: str,
-        partition: str | None = None,
-        limit: int = 10,
-    ) -> list[SemanticHit]:
+    # ------------------------------------------------------------------
+    # entry_vec  (vec0 semantic sidecar)
+    # ------------------------------------------------------------------
+
+    def search(
+        self, query: str, limit: int = 10
+    ) -> tuple[list[Entry], list[SemanticHit]]:
+        """Embed `query` via the bound embedder and run vec0 KNN.
+
+        Returns parallel `(entries, hits)` lists, nearest-first by distance.
+        """
         if self.embedder is None:
             raise EmbedderRequired(
                 "This grimoire was opened without an embedder; "
                 "pass embedder=... to Grimoire.open() to enable semantic search."
             )
         return entry.semantic_search(
-            self._conn,
-            self.embedder.embed(query),
-            partition,
-            limit,
+            self._conn, self.embedder.embed(query), limit
         )
+
+    # ------------------------------------------------------------------
+    # Combined PUT-style indexing
+    # ------------------------------------------------------------------
+
+    def index(
+        self,
+        uniq_id: str,
+        *,
+        ref: str | None = None,
+        ord: tuple[float | None, float | None, float | None] | None = None,
+        nom: tuple[str | None, str | None] | None = None,
+        match: str | None = None,
+        search: str | None = None,
+    ) -> None:
+        """One-shot index across the three sidecars for a single entry, PUT-style.
+
+        Each kwarg writes wholesale; no reads, no merging.
+
+        - `ref`, `ord`, `nom` together describe the `entry_idx` row. If any
+          one of the three is supplied, the row is fully replaced from the
+          given kwargs; columns mapped to unsupplied or in-tuple `None`
+          positions become NULL. If all three are omitted, `entry_idx` is
+          untouched. A 3-tuple is expected for `ord`, a 2-tuple for `nom`.
+        - `match` replaces the `entry_fts` row.
+        - `search` embeds the text via the bound embedder and replaces the
+          `entry_vec` row. Raises `EmbedderRequired` if the grimoire was
+          opened without one.
+
+        The entry referenced by `uniq_id` must already exist in `entry`;
+        otherwise the underlying sidecar writes raise `ValueError`.
+        """
+        if ord is not None and len(ord) != 3:
+            raise ValueError("`ord` must be a 3-tuple")
+        if nom is not None and len(nom) != 2:
+            raise ValueError("`nom` must be a 2-tuple")
+
+        if ref is not None or ord is not None or nom is not None:
+            entry.entry_idx_set(
+                self._conn,
+                [
+                    EntryIndex(
+                        uniq_id=uniq_id,
+                        uniq_ref=ref,
+                        nominal_1=nom[0] if nom else None,
+                        nominal_2=nom[1] if nom else None,
+                        ordinal_1=ord[0] if ord else None,
+                        ordinal_2=ord[1] if ord else None,
+                        ordinal_3=ord[2] if ord else None,
+                    )
+                ],
+            )
+
+        if match is not None:
+            entry.keyword(self._conn, [(uniq_id, match)])
+
+        if search is not None:
+            if self.embedder is None:
+                raise EmbedderRequired(
+                    "This grimoire was opened without an embedder; "
+                    "pass embedder=... to Grimoire.open() to enable "
+                    "semantic indexing."
+                )
+            vec = self.embedder.embed(search)
+            entry.embed(self._conn, [(uniq_id, search, vec)])

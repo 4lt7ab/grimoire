@@ -14,34 +14,46 @@ CREATE TABLE meta (
 );
 
 CREATE TABLE entry (
-    id        TEXT PRIMARY KEY,
-    group_key TEXT,
-    group_ref TEXT,
-    payload   TEXT,
-    context   TEXT,
-    ordinal   REAL
+    uniq_id TEXT PRIMARY KEY,
+    data    TEXT
 );
 
-CREATE INDEX entry_group_key ON entry(group_key);
+CREATE TABLE entry_idx (
+    uniq_id   TEXT PRIMARY KEY,
+    uniq_ref  TEXT,
+    nominal_1 TEXT,
+    nominal_2 TEXT,
+    ordinal_1 REAL,
+    ordinal_2 REAL,
+    ordinal_3 REAL
+);
 
-CREATE INDEX entry_ordinal ON entry(ordinal);
-
-CREATE UNIQUE INDEX entry_group_ref_unique ON entry(group_key, group_ref)
-    WHERE group_key IS NOT NULL AND group_ref IS NOT NULL;
+CREATE INDEX entry_idx_uniq_ref  ON entry_idx(uniq_ref);
+CREATE INDEX entry_idx_nominal_1 ON entry_idx(nominal_1);
+CREATE INDEX entry_idx_nominal_2 ON entry_idx(nominal_2);
+CREATE INDEX entry_idx_ordinal_1 ON entry_idx(ordinal_1);
+CREATE INDEX entry_idx_ordinal_2 ON entry_idx(ordinal_2);
+CREATE INDEX entry_idx_ordinal_3 ON entry_idx(ordinal_3);
 
 CREATE VIRTUAL TABLE entry_fts USING fts5(
-    entry_id UNINDEXED,
-    keyword_text,
-    threshold_rank UNINDEXED
+    uniq_id UNINDEXED,
+    text
 );
 
 CREATE VIRTUAL TABLE entry_vec USING vec0(
-    id TEXT PRIMARY KEY,
-    partition TEXT PARTITION KEY,
-    +semantic_text TEXT,
-    +threshold_distance FLOAT,
+    uniq_id TEXT PRIMARY KEY,
+    +text TEXT,
     embedding float[{dimension}]
 );
+
+CREATE TRIGGER entry_delete_cascade
+AFTER DELETE ON entry
+FOR EACH ROW
+BEGIN
+    DELETE FROM entry_idx WHERE uniq_id = OLD.uniq_id;
+    DELETE FROM entry_fts WHERE uniq_id = OLD.uniq_id;
+    DELETE FROM entry_vec WHERE uniq_id = OLD.uniq_id;
+END;
 """
 
 

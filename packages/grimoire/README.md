@@ -1,6 +1,6 @@
 # 4lt7ab-grimoire
 
-The Python library behind grimoire — a single-file semantic datastore backed by SQLite and [`sqlite-vec`](https://github.com/asg017/sqlite-vec). Entries hold metadata; keyword (FTS5) and semantic (vec0) indexing are independent, opt-in operations against the same entry id.
+The Python library behind grimoire — a single-file semantic datastore backed by SQLite and [`sqlite-vec`](https://github.com/asg017/sqlite-vec). Entries are bare `(uniq_id, data)` rows; three opt-in sidecars attach typed filterable metadata, FTS5 keyword search, and vec0 semantic search.
 
 For the standalone CLI, see [`4lt7ab-grimoire-cli`](https://pypi.org/project/4lt7ab-grimoire-cli/).
 
@@ -14,70 +14,61 @@ The `fastembed` extra pulls the bundled `FastembedEmbedder` (ONNX-based, no serv
 
 ## Mental model
 
-A grimoire is a single SQLite file with three tables:
+A grimoire is a single SQLite file with four tables plus a meta row:
 
-- `entry` — metadata: `(id, group_key, group_ref, payload, context)`. No searchable text lives here.
-- `entry_fts` — FTS5 row holding `keyword_text` + `threshold_rank` for one entry.
-- `entry_vec` — vec0 row holding `embedding` + `semantic_text` + `partition` + `threshold_distance` for one entry.
+- **`entry`** — `(uniq_id, data)`. Identity row. `uniq_id` is a ULID; `data` is a JSON-serializable value (object, array, scalar, or null).
+- **`entry_idx`** — typed filterable/sortable metadata sidecar keyed by `uniq_id`: `uniq_ref` (TEXT), `nominal_1`, `nominal_2` (TEXT), `ordinal_1`, `ordinal_2`, `ordinal_3` (REAL). All columns nullable.
+- **`entry_fts`** — FTS5 keyword text sidecar keyed by `uniq_id`.
+- **`entry_vec`** — vec0 semantic sidecar keyed by `uniq_id`: source text + embedding.
 
 Plus a `meta` table that records the embedder's `model` and `dimension` at create time. Reopening with a mismatched embedder raises `GrimoireMismatch`.
 
-**Indexing is decoupled from creation.** You `add()` an entry first, then `keyword()` and/or `embed()` it to make it searchable. An entry can have a row in zero, one, or both of the index tables. Re-indexing is explicit — call `keyword()` or `embed()` again on the same id and the existing row is replaced. The entry row is untouched.
+**Sidecars are decoupled from entry creation.** `add()` writes only the entry row. To make an entry searchable or filterable, call `index()` with the kwargs for the sides you want populated. An entry can have a row in zero, one, two, or all three of the sidecars.
 
-This means:
-- Searchable text can change after an entry is created without affecting its id, group, or payload.
-- An entry can carry only a payload (no FTS, no vec) and still be addressable by id or `(group_key, group_ref)`.
-- The same entry can move semantic partitions or change its FTS text without losing its identity.
+**Deletion cascades automatically.** Removing an entry fires an `AFTER DELETE` trigger that cleans up any rows in `entry_idx`, `entry_fts`, and `entry_vec` for that `uniq_id`. No `*_remove` helpers — the entry's identity row is the only thing to delete.
+
+**Re-indexing is wholesale (PUT-style).** `index()` replaces the sidecar rows you touch. Omit a kwarg and that sidecar is left alone; pass it and the sidecar is overwritten end-to-end. For the entry_idx side, that means passing `ref="X"` alone wipes any existing `nominal_*`/`ordinal_*` columns.
 
 ## Quickstart
 
 ```python
-from grimoire import grimoire
+from grimoire.grimoire import Grimoire
 from grimoire.data.entry import Entry, Filters
 from grimoire.embed import FastembedEmbedder
 
-with grimoire.open("grimoire.db", embedder=FastembedEmbedder()) as g:
-    [entry] = g.add([
-        Entry(
-            id=None,
-            group_key="creature",
-            group_ref="phoenix-001",
-            payload={"habitat": "volcano"},
-            context="discovered in the southern volcanic chain",
-        ),
-    ])
+with Grimoire.open("grimoire.db", embedder=FastembedEmbedder()) as g:
+    [entry] = g.add([Entry(uniq_id=None, data={"habitat": "volcano"})])
 
-    g.keyword([(entry.id, "phoenix fire-bird ashes")])
-    g.embed([(entry.id, "A solar phoenix reborn from its own ashes at dawn")])
+    g.index(
+        entry.uniq_id,
+        ref="phoenix-001",
+        nom=("creature", None),
+        ord=(1.0, None, None),
+        match="phoenix fire-bird ashes",
+        search="A solar phoenix reborn from its own ashes at dawn",
+    )
 
-    for hit in g.semantic_search("creatures that come back from the dead"):
-        print(hit.entry.id, hit.distance, hit.entry.semantic_text)
+    # Browse the idx side with filters; each entry comes back with its idx row.
+    entries, indexes = g.query(Filters(equals={"nominal_1": ["creature"]}))
+    for e, i in zip(entries, indexes, strict=True):
+        print(e.uniq_id, e.data, i.uniq_ref)
 
-    for hit in g.keyword_search("phoenix"):
-        print(hit.entry.id, hit.score, hit.entry.keyword_text)
+    # Semantic search; each hit comes back with its entry.
+    entries, hits = g.search("creatures that come back from the dead")
+    for e, h in zip(entries, hits, strict=True):
+        print(h.distance, e.data)
 ```
 
 ## Imports
 
-The library's surface lives across a few modules. Two common patterns:
-
 ```python
-# Module-style: pulls in `grimoire.open` and `grimoire.peek`.
-from grimoire import grimoire
-g = grimoire.open("grimoire.db", embedder=...)
-stats = grimoire.peek("grimoire.db")
-
-# Direct: useful when only one helper is needed.
-from grimoire.grimoire import open as open_grimoire
-g = open_grimoire("grimoire.db", embedder=...)
-```
-
-Data types and embedders are imported from their own modules:
-
-```python
-from grimoire.data.entry import Entry, Filters, KeywordHit, SemanticHit
+from grimoire.grimoire import Grimoire
+from grimoire.data.entry import Entry, EntryIndex, Filters, KeywordHit, SemanticHit
 from grimoire.embed import Embedder, FastembedEmbedder, NoOpEmbedder
-from grimoire.errors import GrimoireError, GrimoireMismatch, GrimoireNotFound, SchemaVersionError
+from grimoire.errors import (
+    GrimoireError, GrimoireMismatch, GrimoireNotFound,
+    EmbedderRequired, SchemaVersionError,
+)
 from grimoire.mount import Mount
 ```
 
@@ -85,91 +76,86 @@ from grimoire.mount import Mount
 
 ### File lifecycle
 
-#### `grimoire.open(path, *, embedder, check_same_thread=True) -> Grimoire`
+#### `Grimoire.open(path, *, embedder=None, check_same_thread=True) -> Grimoire`
 
-Open a SQLite file at `path`. An empty (or freshly-touched) file gets the schema installed and the embedder lock written. An initialized file is validated against the supplied embedder; `GrimoireMismatch` is raised on a different `model` or `dimension`. Returns a `Grimoire` ready to use as a context manager.
+Open or initialize a SQLite file at `path`. An empty file gets the schema installed and the embedder lock written. An initialized file is validated against the supplied embedder; mismatched `model` or `dimension` raises `GrimoireMismatch`.
 
-`check_same_thread` is forwarded to `sqlite3.connect`. Pass `False` to use the returned `Grimoire` from a different thread than the one that opened it; the caller is then responsible for serializing access.
+Without an embedder, an empty file locks to NoOp sentinel values (`model="noop"`, `dimension=1`). The lock is sticky: reopening with a real embedder later raises `GrimoireMismatch`. Semantic operations on a NoOp-locked grimoire raise `EmbedderRequired`.
 
-#### `grimoire.peek(path, *, check_same_thread=True) -> Peek`
+`check_same_thread` is forwarded to `sqlite3.connect`. Pass `False` to use the returned `Grimoire` from a different thread (you serialize access).
 
-Read metadata and counts from a grimoire file without committing to it for use. Loads sqlite-vec to read the vec partition counts but does not require an embedder. Raises `GrimoireNotFound` if the path doesn't exist or the file lacks an embedder lock. `check_same_thread` is forwarded to `sqlite3.connect` with the same semantics as `open`.
+#### `Grimoire.peek(path, *, check_same_thread=True) -> Peek`
 
-#### `Grimoire(conn, embedder)`
+Inspect a file without binding an embedder. Returns `model`, `dimension`, `schema_version`, and per-sidecar row counts. Raises `GrimoireNotFound` if the path doesn't exist or has no embedder lock.
 
-Direct constructor over an open SQLite connection. `grimoire.open()` is the normal entry point — this is exposed for callers that need to manage the connection themselves.
+#### `Grimoire(conn, embedder=None)`
+
+Direct constructor over an open SQLite connection. `Grimoire.open()` is the normal entry point.
 
 #### Context manager
 
-`__enter__` returns self; `__exit__` commits on a clean exit and rolls back on an unhandled exception. The idiomatic form is:
+`__enter__` returns self; `__exit__` commits on a clean exit and rolls back on an unhandled exception.
 
 ```python
-with grimoire.open(path, embedder=...) as g:
+with Grimoire.open(path, embedder=...) as g:
     ...
 ```
 
-### Writing entries
+### entry  (identity table)
 
 #### `add(entries: list[Entry]) -> list[Entry]`
 
-Insert entries. `id` on the input is ignored — a fresh ULID is assigned to each row. Returns the inserted entries with their assigned ids. Raises `ValueError` on a `(group_key, group_ref)` collision with an existing row or within the batch itself.
-
-The embedder is **not** invoked. To make entries searchable, call `keyword()` or `embed()` after `add`.
+Insert entries. `uniq_id` on input is ignored — a fresh ULID is assigned to each row. Returns the inserted entries with their assigned ids. The embedder is **not** invoked — to make entries searchable, call `index()` after.
 
 #### `update(entries: list[Entry]) -> list[Entry]`
 
-Rewrite `group_key`, `group_ref`, `payload`, and `context` on existing rows, identified by `id`. Wholesale: every supplied field replaces the stored value, including with `None`. Returns the entries that matched a row (silently skips ids that didn't). Raises `ValueError` on a `(group_key, group_ref)` collision.
+Rewrite the `data` column on existing rows, keyed by `uniq_id`. Returns the entries that matched a row (silently skips unknown ids). Sidecars are untouched — use `index()` for those.
 
-For partial updates, fetch the entry first and replace only the fields you intend to change.
+#### `remove(uniq_ids: list[str]) -> list[str]`
 
-#### `remove(ids: list[str]) -> list[str]`
+Delete entries. The `AFTER DELETE` trigger cascade-cleans any matching rows in `entry_idx`, `entry_fts`, and `entry_vec`. Returns the ids that were actually deleted.
 
-Delete entries and cascade to their FTS and vec rows. Returns the ids that were actually removed.
+#### `get(uniq_ids: list[str]) -> list[Entry]`
 
-### Indexing
+Fetch entries by `uniq_id`. Returns only the ones that exist; no order guarantee.
 
-#### `keyword(items, *, threshold_rank=None) -> list[Entry]`
+#### `fetch(uniq_refs: list[str]) -> tuple[list[Entry], list[EntryIndex]]`
 
-Index (or re-index) entries for FTS5 keyword search. `items` is a list of `(entry_id, keyword_text)` tuples. An existing FTS row on the same id is replaced. `threshold_rank` is stored on every row written by this call.
+Fetch entries whose `entry_idx` row has `uniq_ref` in the given list. Returns parallel `(entries, indexes)` lists; `entries[i]` corresponds to `indexes[i]`. Entries without an `entry_idx` row are invisible to `fetch()` (no idx, no ref to match). Multiple entries may share a `uniq_ref` (no uniqueness constraint).
 
-Raises `ValueError` for unknown ids or for empty/whitespace keyword text.
+### index  (combined sidecar writer)
 
-#### `embed(items, *, partition=None, threshold_distance=None) -> list[Entry]`
+#### `index(uniq_id, *, ref=None, ord=None, nom=None, match=None, search=None) -> None`
 
-Embed (or re-embed) entries for semantic search. `items` is a list of `(entry_id, semantic_text)` tuples. Issues one `embed_many` call across the batch. An existing vec row on the same id is replaced — useful for moving an entry to a different partition or updating its source text. `threshold_distance` is stored on every row written by this call.
+One-shot PUT across the three sidecars for a single entry. Each kwarg writes wholesale; no reads, no merging.
 
-Raises `ValueError` for unknown ids or for empty/whitespace semantic text.
+- `ref`, `ord`, `nom` together describe the `entry_idx` row. If any one is supplied, the row is fully replaced; columns mapped to unsupplied positions (or `None` inside a tuple) become NULL. Omit all three to leave `entry_idx` untouched. `ord` is a 3-tuple, `nom` is a 2-tuple.
+- `match` replaces the `entry_fts` row with this text.
+- `search` embeds the text via the bound embedder and replaces the `entry_vec` row. Raises `EmbedderRequired` if the grimoire was opened without one.
 
-#### `keyword_remove(ids: list[str]) -> list[str]`
+`uniq_id` must reference an existing entry; otherwise the underlying sidecar writes raise `ValueError`.
 
-Drop FTS rows for the given ids. Entries themselves are not affected. Returns the ids that had FTS rows.
+### query  (entry_idx browse)
 
-#### `embed_remove(ids: list[str]) -> list[str]`
+#### `query(filters=None, limit=100, cursor=None) -> tuple[list[Entry], list[EntryIndex]]`
 
-Drop vec rows for the given ids. Entries themselves are not affected. Returns the ids that had vec rows.
+Walk entry_idx rows ordered by `uniq_id` ASC, joined to entry for the data side. Returns parallel `(entries, indexes)` lists.
 
-### Reading
+`cursor`, if given, returns rows with `uniq_id > cursor`. For ordinal-window paging, use `Filters(gte={...}, lte={...})`.
 
-#### `fetch(filters=None, limit=100, cursor=None) -> list[Entry]`
+### match  (FTS5 keyword search)
 
-Walk entries ordered by id (i.e. chronologically, since ids are ULIDs). `filters` is a `Filters` instance restricting by sets of `id`, `group_key`, and/or `group_ref`. `cursor`, if given, returns entries with `id > cursor` — pass the last id of the previous page to walk forward.
+#### `match(query, filters=None, limit=None) -> tuple[list[Entry], list[KeywordHit]]`
 
-Each returned `Entry` carries its FTS5 fields (`keyword_text`, `threshold_rank`) and vec0 fields (`semantic_text`, `partition`, `threshold_distance`) inline, populated from a left join. Entries without an index row on either side come back with the corresponding fields set to `None`.
+FTS5 BM25 search. `query` is passed straight to FTS5 — phrases (`"exact phrase"`), prefix (`fire*`), boolean operators (`phoenix OR wyrm NOT egg`). Malformed queries surface as `sqlite3.OperationalError`. Filters apply via JOIN to `entry_idx`. Empty/whitespace queries raise `ValueError`.
 
-```python
-saved = g.fetch(limit=100)
-next_page = g.fetch(limit=100, cursor=saved[-1].id)
-```
+Returns parallel `(entries, hits)` lists in BM25 rank order. `KeywordHit.score` is positive (higher = better).
 
-#### `keyword_search(query, filters=None, limit=None) -> list[KeywordHit]`
+### search  (vec0 semantic KNN)
 
-Run an FTS5 BM25 search against `entry_fts`. `query` is passed straight to FTS5 — phrases (`"exact phrase"`), prefix (`fire*`), boolean operators (`phoenix OR wyrm NOT egg`). Malformed queries surface as `sqlite3.OperationalError`. Filters apply on the joined entry row. Empty/whitespace queries raise `ValueError`.
+#### `search(query, limit=10) -> tuple[list[Entry], list[SemanticHit]]`
 
-Returns `KeywordHit`s carrying the matched `entry` and a positive `score` (higher = better). The indexed `keyword_text` and stored `threshold_rank` are available as `hit.entry.keyword_text` and `hit.entry.threshold_rank`.
-
-#### `semantic_search(query, partition=None, limit=10) -> list[SemanticHit]`
-
-Embed `query` via `embedder.embed`, then run vec0 KNN. Pass `partition` to narrow KNN to one partition; omit it (or pass `None`) to span every partition. Returns `SemanticHit`s carrying the matched `entry` and a `distance` (lower = better). The indexed `semantic_text`, `partition`, and stored `threshold_distance` are available as `hit.entry.semantic_text`, `hit.entry.partition`, and `hit.entry.threshold_distance`.
+Embed `query` via the bound embedder, then run vec0 KNN. Returns parallel `(entries, hits)` lists nearest-first by distance. `SemanticHit.distance` is the raw vec0 distance (lower = better). Raises `EmbedderRequired` if the grimoire was opened without an embedder.
 
 ## Data shapes
 
@@ -178,41 +164,44 @@ Embed `query` via `embedder.embed`, then run vec0 KNN. Pass `partition` to narro
 ```python
 @dataclass(frozen=True, slots=True)
 class Entry:
-    id: str | None        # None on input to `add`; assigned by the library
-    group_key: str | None
-    group_ref: str | None
-    payload: dict[str, Any] | None
-    context: str | None = None
-    # Index fields, populated by `fetch`, `keyword_search`, `semantic_search`.
-    # All None on input to `add`/`update` and ignored — write them via
-    # `keyword()` / `embed()` instead.
-    keyword_text: str | None = None
-    threshold_rank: float | None = None
-    semantic_text: str | None = None
-    partition: str | None = None
-    threshold_distance: float | None = None
+    uniq_id: str | None    # None on input to `add`; assigned by the library
+    data: Any = None       # any JSON-serializable value
 ```
 
-The five trailing fields are *read-side conveniences*. The entry row in SQLite still holds only the first five fields; the rest are pulled in from `entry_fts` and `entry_vec` via a left join whenever an `Entry` is returned. They're ignored on the way into `add()` and `update()` — use `keyword()` and `embed()` to (re-)write the underlying index rows.
+### `EntryIndex`
+
+```python
+@dataclass(frozen=True, slots=True)
+class EntryIndex:
+    uniq_id: str | None
+    uniq_ref: str | None = None
+    nominal_1: str | None = None
+    nominal_2: str | None = None
+    ordinal_1: float | None = None
+    ordinal_2: float | None = None
+    ordinal_3: float | None = None
+```
+
+Read-side type returned by `query` and `fetch`. The library writes via `index(uniq_id, ref=..., ord=(...), nom=(...))`; you only construct `EntryIndex` instances yourself if you're reaching past the public surface.
 
 ### `Filters`
 
 ```python
 @dataclass(frozen=True, slots=True)
 class Filters:
-    id: list[str] | None = None
-    group_key: list[str] | None = None
-    group_ref: list[str] | None = None
+    equals: dict[str, list[Any]] | None = None
+    gte: dict[str, float] | None = None
+    lte: dict[str, float] | None = None
 ```
 
-Each list, when given, restricts to entries whose field matches one of the listed values. Missing/None means no filter on that field.
+`equals` keys may name any of the seven `entry_idx` columns. `gte` / `lte` keys must name one of `ordinal_1`/`ordinal_2`/`ordinal_3`. Unknown columns raise `ValueError`. Empty lists in `equals` skip the filter (no-op).
 
 ### `KeywordHit`
 
 ```python
 @dataclass(frozen=True, slots=True)
 class KeywordHit:
-    entry: Entry       # carries `keyword_text` and `threshold_rank` inline
+    uniq_id: str
     score: float       # -bm25, so higher = better and non-negative
 ```
 
@@ -221,8 +210,8 @@ class KeywordHit:
 ```python
 @dataclass(frozen=True, slots=True)
 class SemanticHit:
-    entry: Entry       # carries `semantic_text`, `partition`, and `threshold_distance` inline
-    distance: float    # vec0 distance, lower = better
+    uniq_id: str
+    distance: float    # vec0 distance, lower = better, non-negative
 ```
 
 ### `Peek`
@@ -234,8 +223,9 @@ class Peek:
     dimension: int
     schema_version: int
     entry_count: int
-    group_counts: dict[str | None, int]       # by entry.group_key
-    partition_counts: dict[str | None, int]   # by entry_vec.partition
+    entry_idx_count: int
+    entry_fts_count: int
+    entry_vec_count: int
 ```
 
 ## Mount
@@ -260,7 +250,7 @@ m.db_path("notes")              # named DB path; validates name (lowercase alnum
 destroy(m)                      # `rm -rf` the entire mount, no undo
 ```
 
-Names are normalized to lowercase and must match `[a-z0-9_-]+`. Names beginning with `__` are reserved for grimoire's internal directories (`__models__`).
+Names are normalized to lowercase and must match `[a-z0-9_-]+`. Names beginning with `__` are reserved.
 
 ## Custom embedders
 
@@ -276,14 +266,14 @@ class MyEmbedder:
     def embed_many(self, texts: list[str]) -> list[list[float]]: ...
 ```
 
-`embed` handles single-record paths (`semantic_search`). `embed_many` handles bulk paths (`embed(items=...)`) and is expected to amortize tokenization, model dispatch, or device transfers across the batch.
+`embed` handles single-record paths (`search`, `index(..., search=...)`). `embed_many` is reserved for future batch paths.
 
 The `model` and `dimension` are written into the file on first create and locked. Reopening with a different `model` or `dimension` raises `GrimoireMismatch`.
 
 ### Bundled embedders
 
 - **`FastembedEmbedder(model="BAAI/bge-small-en-v1.5", *, cache_folder=None)`** — ONNX-based local inference via `fastembed`. Requires the `fastembed` extra.
-- **`NoOpEmbedder`** — produces zero vectors with `model="noop"`, `dimension=1`. For grimoires used only for keyword search, payload storage, or structured browsing — `semantic_search` against a NoOp grimoire returns entries in arbitrary order with distance near zero. The contract is satisfied structurally, but the result has no ranking value.
+- **`NoOpEmbedder`** — produces zero vectors with `model="noop"`, `dimension=1`. For grimoires used only for keyword search or structured data — `search` against a NoOp grimoire returns entries in arbitrary order with distance near zero. The contract is satisfied structurally, but the result has no ranking value.
 
 ## Errors
 
@@ -293,12 +283,13 @@ All errors derive from `GrimoireError`:
 |---|---|
 | `GrimoireMismatch` | The provided embedder's `model` or `dimension` disagrees with the file's lock. |
 | `GrimoireNotFound` | A path was expected to be a grimoire and isn't (missing file, or a SQLite file without an embedder lock). |
+| `EmbedderRequired` | A semantic operation (`search` or `index(..., search=...)`) ran on a grimoire opened without an embedder. |
 | `SchemaVersionError` | The file's `PRAGMA user_version` doesn't match the library's `SCHEMA_VERSION`. Pre-v1, recreate the file. |
 
 ## Concurrency
 
-`grimoire.open` opens its SQLite connection in WAL mode with `busy_timeout` defaulted to SQLite's standard. Reads coexist with one writer; sustained high-concurrency writes still serialize at the SQLite level. The connection is bound to its constructing thread per Python's stdlib default; pass `check_same_thread=False` to lift that restriction (and serialize access yourself).
+`Grimoire.open` opens its SQLite connection with `busy_timeout` defaulted to SQLite's standard. Reads coexist with one writer; sustained high-concurrency writes serialize at the SQLite level. The connection is bound to its constructing thread per Python's stdlib default; pass `check_same_thread=False` to lift that restriction (and serialize access yourself).
 
 ## Schema notes
 
-Pre-v1, schema changes are not migrated in place. The library checks `PRAGMA user_version` against its expected `SCHEMA_VERSION` on every open; mismatches raise `SchemaVersionError`. The intended response is to recreate the file. Migration ergonomics get designed once v1 is on the table.
+Pre-v1, schema changes are not migrated in place. The library checks `PRAGMA user_version` against its expected `SCHEMA_VERSION` on every open; mismatches raise `SchemaVersionError`. Recreate the file when this happens. Migration ergonomics get designed once v1 is on the table.
