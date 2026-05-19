@@ -60,6 +60,17 @@ grimoire search "creatures that come back from the dead"
 
 The library exposes `add()` for the bare row and `index()` for the sidecars; the CLI rolls them into a single `entry add` for convenience. Reads (`query`, `fetch`, `match`, `search`) return parallel `(entries, indexes|hits)` tuples — the entry's `data` rides along with every hit, no follow-up call needed.
 
+## Examples
+
+Four runnable scripts under [`examples/`](examples/) — each one is a single `uv run examples/<name>/app.py`. The first three put one sidecar in the spotlight at a time; the fourth turns semantic search into a runtime dispatcher.
+
+| Example | Primary facet | What it shows |
+|---|---|---|
+| [`ai-journal/`](examples/ai-journal/) | semantic memory (`entry_vec`) | Natural-language recall over personal log entries. |
+| [`snippet-vault/`](examples/snippet-vault/) | keyword search (`entry_fts`) | FTS5 BM25 search across code snippets — phrases, prefix, boolean. |
+| [`reading-list/`](examples/reading-list/) | filterable catalog (`entry_idx`) | Status / priority / date filters plus URL lookup over reading-list items. |
+| [`spellweaver/`](examples/spellweaver/) | semantic dispatch (`entry_vec`) | Interactive combat REPL — free-form incantations are matched to canonical spells. |
+
 ## Install
 
 ```sh
@@ -77,6 +88,7 @@ The `fastembed` extra pulls the bundled `FastembedEmbedder` (ONNX-based, no serv
 
 - [Library reference](packages/grimoire/README.md) — full Python API, embedder protocol, mount type, errors.
 - [CLI reference](packages/grimoire-cli/README.md) — every command, every flag, MCP server.
+- [Examples](examples/README.md) — four runnable scripts, one per facet.
 - [Architecture](docs/architecture.md)
 - [Feature set](docs/feature-set.md)
 - [Coding conventions](docs/coding-conventions.md)
