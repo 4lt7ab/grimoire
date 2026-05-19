@@ -42,6 +42,8 @@ Terms used across grimoire's code and docs, alphabetical.
 
 **Sidecar.** A table keyed by `entry.uniq_id` that holds opt-in per-entry data (`entry_idx`, `entry_fts`, `entry_vec`). Sidecars don't have foreign keys to `entry` (virtual tables don't support FKs); the entry-delete trigger keeps them in sync.
 
+**Telemetry.** Optional observability sink passed to `Grimoire.open(..., telemetry=...)`. A `Protocol` with two methods: `span(name, **attrs)` (context manager wrapping a block of work) and `event(name, **attrs)` (one-shot occurrence). Bundled: `NoOpTelemetry` (default — drops everything) and `LoggingTelemetry` (writes via stdlib `logging`, attaching structured fields under `extra={"grimoire": {...}}`). The CLI picks the sink via `$GRIMOIRE_TELEMETRY` (`off` | `logging`).
+
 **ULID.** The id format grimoire assigns to every entry. Lexicographically sortable by creation time, which is how `query(cursor=...)` walks pages chronologically without a separate cursor column.
 
 **`uniq_id`.** Primary key on `entry` and on all three sidecars. Library-assigned ULID at `add()` time.

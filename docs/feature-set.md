@@ -12,7 +12,7 @@
 
 - **Entry/sidecar separation.** Entries are pure identity: `uniq_id` + `data`. To make an entry searchable or filterable, call `index()` with the kwargs for the sides you want populated. An entry can have rows in zero, one, two, or all three sidecars — useful for data-only records, filter-only catalogs, keyword-only memory, vector-only embeddings, or any combination.
 
-- **One-shot indexing.** `index(uniq_id, *, ref, ord, nom, match, search)` PUT-replaces whichever sidecars its kwargs touch in a single call. Omit a kwarg to leave that side alone; pass it to overwrite end-to-end.
+- **One-shot indexing.** `index(uniq_id, *, ref, ord, match, search)` PUT-replaces whichever sidecars its kwargs touch in a single call. Omit a kwarg to leave that side alone; pass it to overwrite end-to-end.
 
 - **Filterable metadata.** `entry_idx` holds six nullable columns: `uniq_ref` (TEXT — external reference) and five symmetric `ordinal_1`..`ordinal_5` columns. The ordinals carry no declared type (BLOB-affinity) — store any JSON-serializable scalar; SQLite preserves the native storage class on the way in and out, and comparison follows class precedence. Each non-PK column is indexed. Library reads/writes them verbatim; semantics (what `ordinal_2` measures, what `ordinal_4` discriminates) are the caller's to define.
 
@@ -39,6 +39,8 @@
 - **Peek without opening.** `Grimoire.peek(path)` returns `model`, `dimension`, `schema_version`, and per-table row counts (`entry_count`, `entry_idx_count`, `entry_fts_count`, `entry_vec_count`). Does not require an embedder.
 
 - **Planner-stats refresh.** `Grimoire.analyze()` (and `grimoire analyze` from the CLI) runs SQLite's `ANALYZE` to refresh `sqlite_stat1`. Run after bulk loads or distribution shifts so the planner can pick among the rotation composite indexes on `entry_idx` by selectivity.
+
+- **Telemetry hook.** `Grimoire.open(..., telemetry=...)` accepts any object satisfying the `Telemetry` protocol (`span(name, **attrs)` context manager + `event(name, **attrs)` one-shot). Every public operation is wrapped in a span and key lifecycle moments emit events. Two implementations ship — `NoOpTelemetry` (default — drops everything) and `LoggingTelemetry` (writes via stdlib `logging` with structured fields). The CLI selects the sink via `$GRIMOIRE_TELEMETRY` (`off` | `logging`).
 
 - **Mount layout (CLI).** The CLI organizes one or more grimoires under a mount directory: a default `grimoire.db`, optional named subdirectory databases, and a shared `__models__/` embedder cache. Mount resolution: `--mount` > `$GRIMOIRE_MOUNT` > `~/.grimoire`.
 

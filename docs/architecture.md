@@ -37,13 +37,19 @@ One identity table, three sidecars, one meta table:
 
 The three sidecars are independent and opt-in. An entry can have rows in zero, one, two, or all three of them.
 
-Indexing is decoupled from `add()`. The library's combined writer `Grimoire.index(uniq_id, *, ref, ord, nom, match, search)` PUT-replaces whichever sidecars its kwargs touch. The sidecars never reference the entry table via foreign key (virtual tables don't support FKs); instead, the trigger `entry_delete_cascade` fires `AFTER DELETE ON entry FOR EACH ROW` and removes any matching `uniq_id` from all three sidecars. There are no `*_remove` helpers — deleting the entry is the only way to drop sidecar rows.
+Indexing is decoupled from `add()`. The library's combined writer `Grimoire.index(uniq_id, *, ref, ord, match, search)` PUT-replaces whichever sidecars its kwargs touch. The sidecars never reference the entry table via foreign key (virtual tables don't support FKs); instead, the trigger `entry_delete_cascade` fires `AFTER DELETE ON entry FOR EACH ROW` and removes any matching `uniq_id` from all three sidecars. There are no `*_remove` helpers — deleting the entry is the only way to drop sidecar rows.
 
 ## Lifecycle
 
-- `Grimoire.open(path, *, embedder=None)` opens or initializes a SQLite file. Empty files get the schema installed and the embedder lock written. Existing files validate that the supplied embedder matches the locked `model` and `dimension` and raise `GrimoireMismatch` on disagreement. Without an embedder, an empty file locks to NoOp sentinel values; semantic operations later raise `EmbedderRequired`.
+- `Grimoire.open(path, *, embedder=None, telemetry=None)` opens or initializes a SQLite file. Empty files get the schema installed and the embedder lock written. Existing files validate that the supplied embedder matches the locked `model` and `dimension` and raise `GrimoireMismatch` on disagreement. Without an embedder, an empty file locks to NoOp sentinel values; semantic operations later raise `EmbedderRequired`. Without a `telemetry` sink the library wires up `NoOpTelemetry`.
 - `Grimoire` is a context manager. `__exit__` commits on a clean exit and rolls back on an unhandled exception.
 - `Grimoire.peek(path)` reads `model`, `dimension`, `schema_version`, and per-table row counts without requiring an embedder. Safe to call against any file path.
+
+## Telemetry
+
+Observability is a runtime-pluggable concern. `grimoire.telemetry.Telemetry` is a `Protocol` with two methods — `span(name, **attrs)` (a context manager wrapping a block of work) and `event(name, **attrs)` (a one-shot occurrence). The library wraps every public operation in a span (`grimoire.open`, `grimoire.add`, `grimoire.match`, `grimoire.search`, `grimoire.embed`, …) and emits events at lifecycle moments (`grimoire.schema_installed`, `grimoire.lock_validated`). Two implementations ship: `NoOpTelemetry` (default — drops everything) and `LoggingTelemetry` (writes via stdlib `logging`, attaching structured fields as `extra={"grimoire": {...}}` so handlers can pluck a namespaced sub-dict without colliding with built-in `LogRecord` attributes). Callers can supply any object satisfying the protocol — e.g. an OTel adapter.
+
+The CLI reads `$GRIMOIRE_TELEMETRY` (`off` | `logging`) and forwards the resolved sink into every `Grimoire.open()` call, including the in-process MCP server.
 
 ## Mount layout (CLI convention)
 

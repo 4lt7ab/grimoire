@@ -223,6 +223,7 @@ Every command prints pretty-indented JSON to stdout. There is no table mode, no 
 | Variable | Default | Behavior |
 |---|---|---|
 | `GRIMOIRE_MOUNT` | `~/.grimoire` | Mount directory. Overridden by `--mount`. |
+| `GRIMOIRE_TELEMETRY` | `off` | Telemetry sink wired into every `Grimoire.open()`, including the in-process MCP server. `off` drops everything; `logging` enables stdlib `logging` (INFO records per span/event with structured fields under `extra={"grimoire": {...}}`). Records go to stderr so they don't interfere with JSON-on-stdout. |
 
 ## Schema notes
 

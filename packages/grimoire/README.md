@@ -69,17 +69,20 @@ from grimoire.errors import (
     EmbedderRequired, SchemaVersionError,
 )
 from grimoire.mount import Mount
+from grimoire.telemetry import Telemetry, NoOpTelemetry, LoggingTelemetry
 ```
 
 ## Public API
 
 ### File lifecycle
 
-#### `Grimoire.open(path, *, embedder=None, check_same_thread=True) -> Grimoire`
+#### `Grimoire.open(path, *, embedder=None, telemetry=None, check_same_thread=True) -> Grimoire`
 
 Open or initialize a SQLite file at `path`. An empty file gets the schema installed and the embedder lock written. An initialized file is validated against the supplied embedder; mismatched `model` or `dimension` raises `GrimoireMismatch`.
 
 Without an embedder, an empty file locks to NoOp sentinel values (`model="noop"`, `dimension=1`). The lock is sticky: reopening with a real embedder later raises `GrimoireMismatch`. Semantic operations on a NoOp-locked grimoire raise `EmbedderRequired`.
+
+`telemetry` accepts any object satisfying the `Telemetry` protocol (see [Telemetry](#telemetry)). Defaults to `NoOpTelemetry`.
 
 `check_same_thread` is forwarded to `sqlite3.connect`. Pass `False` to use the returned `Grimoire` from a different thread (you serialize access).
 
@@ -279,6 +282,45 @@ The `model` and `dimension` are written into the file on first create and locked
 
 - **`FastembedEmbedder(model="BAAI/bge-small-en-v1.5", *, cache_folder=None)`** — ONNX-based local inference via `fastembed`. Requires the `fastembed` extra.
 - **`NoOpEmbedder`** — produces zero vectors with `model="noop"`, `dimension=1`. For grimoires used only for keyword search or structured data — `search` against a NoOp grimoire returns entries in arbitrary order with distance near zero. The contract is satisfied structurally, but the result has no ranking value.
+
+## Telemetry
+
+`Telemetry` is a `Protocol`. Implement two members:
+
+```python
+from contextlib import AbstractContextManager
+from typing import Any
+
+class MyTelemetry:
+    def span(self, name: str, **attrs: Any) -> AbstractContextManager[None]: ...
+    def event(self, name: str, **attrs: Any) -> None: ...
+```
+
+`span` wraps a block of work (the implementation owns timing semantics — start time on enter, elapsed on exit, error attribution if the body raised). `event` records a one-shot occurrence with no enclosing block.
+
+Pass an instance to `Grimoire.open(..., telemetry=...)`. The library wraps every public operation in a span and emits events at lifecycle moments:
+
+| Span | When |
+|---|---|
+| `grimoire.open` | One per `Grimoire.open()` call (attrs: `embedder_model`). |
+| `grimoire.add`, `grimoire.update`, `grimoire.remove`, `grimoire.get` | Entry-table writes/reads (attr: `count`). |
+| `grimoire.fetch` | uniq_ref lookup (attr: `count`). |
+| `grimoire.query` | entry_idx browse (attrs: `limit`, `has_filters`, `has_cursor`). |
+| `grimoire.match` | FTS5 search (attrs: `query_length`, `limit`, `has_filters`). |
+| `grimoire.search` | vec0 KNN (attrs: `query_length`, `limit`). Nests one `grimoire.embed` span. |
+| `grimoire.index` | Combined PUT writer (attrs: `has_ref`, `has_ord`, `has_match`, `has_search`). Nests one `grimoire.embed` span if `search` is supplied. |
+| `grimoire.embed` | Single-text embedding (attrs: `model`, `text_length`). |
+| `grimoire.analyze` | SQLite `ANALYZE` invocation. |
+
+| Event | When |
+|---|---|
+| `grimoire.schema_installed` | First-open schema install (attrs: `model`, `dimension`). |
+| `grimoire.lock_validated` | Reopen against an existing lock (attrs: `model`, `dimension`). |
+
+### Bundled telemetry
+
+- **`NoOpTelemetry`** — drops every span and event on the floor. The library default.
+- **`LoggingTelemetry(logger=None)`** — writes via stdlib `logging` (default logger: `"grimoire"`). Each span emits one record on exit with `elapsed_ms` plus its attrs (INFO on clean exit, ERROR if the body raised); each event emits one INFO record. Structured fields ride on `LogRecord` via `extra={"grimoire": {...}}` — handlers that want JSON output can pluck the namespaced sub-dict and avoid colliding with built-in `LogRecord` attributes.
 
 ## Errors
 
