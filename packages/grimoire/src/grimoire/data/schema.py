@@ -16,24 +16,36 @@ CREATE TABLE meta (
 CREATE TABLE entry (
     uniq_id TEXT PRIMARY KEY,
     data    TEXT
-);
+) WITHOUT ROWID;
 
 CREATE TABLE entry_idx (
     uniq_id   TEXT PRIMARY KEY,
     uniq_ref  TEXT,
-    nominal_1 TEXT,
-    nominal_2 TEXT,
-    ordinal_1 REAL,
-    ordinal_2 REAL,
-    ordinal_3 REAL
-);
+    ordinal_1,
+    ordinal_2,
+    ordinal_3,
+    ordinal_4,
+    ordinal_5
+) WITHOUT ROWID;
 
-CREATE INDEX entry_idx_uniq_ref  ON entry_idx(uniq_ref);
-CREATE INDEX entry_idx_nominal_1 ON entry_idx(nominal_1);
-CREATE INDEX entry_idx_nominal_2 ON entry_idx(nominal_2);
-CREATE INDEX entry_idx_ordinal_1 ON entry_idx(ordinal_1);
-CREATE INDEX entry_idx_ordinal_2 ON entry_idx(ordinal_2);
-CREATE INDEX entry_idx_ordinal_3 ON entry_idx(ordinal_3);
+CREATE UNIQUE INDEX entry_idx_uniq_ref
+    ON entry_idx(uniq_ref) WHERE uniq_ref IS NOT NULL;
+
+CREATE INDEX entry_idx_o1_o2_o3_o4_o5
+    ON entry_idx(ordinal_1, ordinal_2, ordinal_3, ordinal_4, ordinal_5)
+    WHERE ordinal_1 IS NOT NULL;
+CREATE INDEX entry_idx_o2_o3_o4_o5_o1
+    ON entry_idx(ordinal_2, ordinal_3, ordinal_4, ordinal_5, ordinal_1)
+    WHERE ordinal_2 IS NOT NULL;
+CREATE INDEX entry_idx_o3_o4_o5_o1_o2
+    ON entry_idx(ordinal_3, ordinal_4, ordinal_5, ordinal_1, ordinal_2)
+    WHERE ordinal_3 IS NOT NULL;
+CREATE INDEX entry_idx_o4_o5_o1_o2_o3
+    ON entry_idx(ordinal_4, ordinal_5, ordinal_1, ordinal_2, ordinal_3)
+    WHERE ordinal_4 IS NOT NULL;
+CREATE INDEX entry_idx_o5_o1_o2_o3_o4
+    ON entry_idx(ordinal_5, ordinal_1, ordinal_2, ordinal_3, ordinal_4)
+    WHERE ordinal_5 IS NOT NULL;
 
 CREATE VIRTUAL TABLE entry_fts USING fts5(
     uniq_id UNINDEXED,

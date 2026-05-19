@@ -17,7 +17,7 @@ The `fastembed` extra pulls the bundled `FastembedEmbedder` (ONNX-based, no serv
 A grimoire is a single SQLite file with four tables plus a meta row:
 
 - **`entry`** — `(uniq_id, data)`. Identity row. `uniq_id` is a ULID; `data` is a JSON-serializable value (object, array, scalar, or null).
-- **`entry_idx`** — typed filterable/sortable metadata sidecar keyed by `uniq_id`: `uniq_ref` (TEXT), `nominal_1`, `nominal_2` (TEXT), `ordinal_1`, `ordinal_2`, `ordinal_3` (REAL). All columns nullable.
+- **`entry_idx`** — filterable/sortable metadata sidecar keyed by `uniq_id`: `uniq_ref` (TEXT) and five symmetric `ordinal_1`..`ordinal_5` columns. The ordinals carry no declared type (BLOB-affinity), so any JSON-serializable scalar — string label, integer, float, byte string — stores verbatim. All columns nullable.
 - **`entry_fts`** — FTS5 keyword text sidecar keyed by `uniq_id`.
 - **`entry_vec`** — vec0 semantic sidecar keyed by `uniq_id`: source text + embedding.
 
@@ -27,7 +27,7 @@ Plus a `meta` table that records the embedder's `model` and `dimension` at creat
 
 **Deletion cascades automatically.** Removing an entry fires an `AFTER DELETE` trigger that cleans up any rows in `entry_idx`, `entry_fts`, and `entry_vec` for that `uniq_id`. No `*_remove` helpers — the entry's identity row is the only thing to delete.
 
-**Re-indexing is wholesale (PUT-style).** `index()` replaces the sidecar rows you touch. Omit a kwarg and that sidecar is left alone; pass it and the sidecar is overwritten end-to-end. For the entry_idx side, that means passing `ref="X"` alone wipes any existing `nominal_*`/`ordinal_*` columns.
+**Re-indexing is wholesale (PUT-style).** `index()` replaces the sidecar rows you touch. Omit a kwarg and that sidecar is left alone; pass it and the sidecar is overwritten end-to-end. For the entry_idx side, that means passing `ref="X"` alone wipes any existing `ordinal_*` columns.
 
 ## Quickstart
 
@@ -42,14 +42,13 @@ with Grimoire.open("grimoire.db", embedder=FastembedEmbedder()) as g:
     g.index(
         entry.uniq_id,
         ref="phoenix-001",
-        nom=("creature", None),
-        ord=(1.0, None, None),
+        ord=("creature", 1.0, None, None, None),
         match="phoenix fire-bird ashes",
         search="A solar phoenix reborn from its own ashes at dawn",
     )
 
     # Browse the idx side with filters; each entry comes back with its idx row.
-    entries, indexes = g.query(Filters(equals={"nominal_1": ["creature"]}))
+    entries, indexes = g.query(Filters(equals={"ordinal_1": ["creature"]}))
     for e, i in zip(entries, indexes, strict=True):
         print(e.uniq_id, e.data, i.uniq_ref)
 
@@ -101,6 +100,12 @@ with Grimoire.open(path, embedder=...) as g:
     ...
 ```
 
+### Maintenance
+
+#### `analyze() -> None`
+
+Run SQLite's `ANALYZE` to refresh `sqlite_stat1`. The rotation composite indexes on `entry_idx` rely on accurate selectivity stats for the planner to pick among them — run this after bulk loads or whenever the data distribution shifts.
+
 ### entry  (identity table)
 
 #### `add(entries: list[Entry]) -> list[Entry]`
@@ -121,15 +126,15 @@ Fetch entries by `uniq_id`. Returns only the ones that exist; no order guarantee
 
 #### `fetch(uniq_refs: list[str]) -> tuple[list[Entry], list[EntryIndex]]`
 
-Fetch entries whose `entry_idx` row has `uniq_ref` in the given list. Returns parallel `(entries, indexes)` lists; `entries[i]` corresponds to `indexes[i]`. Entries without an `entry_idx` row are invisible to `fetch()` (no idx, no ref to match). Multiple entries may share a `uniq_ref` (no uniqueness constraint).
+Fetch entries whose `entry_idx` row has `uniq_ref` in the given list. Returns parallel `(entries, indexes)` lists; `entries[i]` corresponds to `indexes[i]`. Entries without an `entry_idx` row are invisible to `fetch()` (no idx, no ref to match). `uniq_ref` is sparse-unique (UNIQUE partial index over the non-NULL rows), so each ref maps to at most one entry.
 
 ### index  (combined sidecar writer)
 
-#### `index(uniq_id, *, ref=None, ord=None, nom=None, match=None, search=None) -> None`
+#### `index(uniq_id, *, ref=None, ord=None, match=None, search=None) -> None`
 
 One-shot PUT across the three sidecars for a single entry. Each kwarg writes wholesale; no reads, no merging.
 
-- `ref`, `ord`, `nom` together describe the `entry_idx` row. If any one is supplied, the row is fully replaced; columns mapped to unsupplied positions (or `None` inside a tuple) become NULL. Omit all three to leave `entry_idx` untouched. `ord` is a 3-tuple, `nom` is a 2-tuple.
+- `ref` and `ord` together describe the `entry_idx` row. If either is supplied, the row is fully replaced; columns mapped to unsupplied positions (or `None` inside the tuple) become NULL. Omit both to leave `entry_idx` untouched. `ord` is a 5-tuple addressing `ordinal_1`..`ordinal_5`; values may be any storage class SQLite accepts.
 - `match` replaces the `entry_fts` row with this text.
 - `search` embeds the text via the bound embedder and replaces the `entry_vec` row. Raises `EmbedderRequired` if the grimoire was opened without one.
 
@@ -145,11 +150,11 @@ Walk entry_idx rows ordered by `uniq_id` ASC, joined to entry for the data side.
 
 ### match  (FTS5 keyword search)
 
-#### `match(query, filters=None, limit=None) -> tuple[list[Entry], list[KeywordHit]]`
+#### `match(query, filters=None, limit=10) -> tuple[list[Entry], list[KeywordHit]]`
 
 FTS5 BM25 search. `query` is passed straight to FTS5 — phrases (`"exact phrase"`), prefix (`fire*`), boolean operators (`phoenix OR wyrm NOT egg`). Malformed queries surface as `sqlite3.OperationalError`. Filters apply via JOIN to `entry_idx`. Empty/whitespace queries raise `ValueError`.
 
-Returns parallel `(entries, hits)` lists in BM25 rank order. `KeywordHit.score` is positive (higher = better).
+Returns parallel `(entries, hits)` lists in BM25 rank order. `KeywordHit.score` is positive (higher = better). `limit` defaults to 10; pass `None` to return every hit.
 
 ### search  (vec0 semantic KNN)
 
@@ -175,14 +180,14 @@ class Entry:
 class EntryIndex:
     uniq_id: str | None
     uniq_ref: str | None = None
-    nominal_1: str | None = None
-    nominal_2: str | None = None
-    ordinal_1: float | None = None
-    ordinal_2: float | None = None
-    ordinal_3: float | None = None
+    ordinal_1: Any = None
+    ordinal_2: Any = None
+    ordinal_3: Any = None
+    ordinal_4: Any = None
+    ordinal_5: Any = None
 ```
 
-Read-side type returned by `query` and `fetch`. The library writes via `index(uniq_id, ref=..., ord=(...), nom=(...))`; you only construct `EntryIndex` instances yourself if you're reaching past the public surface.
+Read-side type returned by `query` and `fetch`. The library writes via `index(uniq_id, ref=..., ord=(...))`; you only construct `EntryIndex` instances yourself if you're reaching past the public surface. The `ordinal_*` slots are typed `Any` because the underlying columns are BLOB-affinity — SQLite returns whatever storage class went in.
 
 ### `Filters`
 
@@ -190,11 +195,11 @@ Read-side type returned by `query` and `fetch`. The library writes via `index(un
 @dataclass(frozen=True, slots=True)
 class Filters:
     equals: dict[str, list[Any]] | None = None
-    gte: dict[str, float] | None = None
-    lte: dict[str, float] | None = None
+    gte: dict[str, Any] | None = None
+    lte: dict[str, Any] | None = None
 ```
 
-`equals` keys may name any of the seven `entry_idx` columns. `gte` / `lte` keys must name one of `ordinal_1`/`ordinal_2`/`ordinal_3`. Unknown columns raise `ValueError`. Empty lists in `equals` skip the filter (no-op).
+`equals` keys may name any `entry_idx` column. `gte` / `lte` keys must name one of `ordinal_1`..`ordinal_5`. Unknown columns raise `ValueError`. Empty lists in `equals` skip the filter (no-op). Filter values may be any type SQLite can compare; comparison follows class precedence (`NULL < INT/REAL < TEXT < BLOB`).
 
 ### `KeywordHit`
 

@@ -67,8 +67,7 @@ def test_add_with_index_kwargs_writes_sidecars(server):
                 {
                     "data": {"k": "v"},
                     "ref": "book-1",
-                    "nom": ["novel", None],
-                    "ord": [1954.0, None, None],
+                    "ord": [1954.0, None, None, "novel", None],
                     "match": "phoenix",
                     "search": "an epic quest",
                 },
@@ -80,7 +79,7 @@ def test_add_with_index_kwargs_writes_sidecars(server):
 
     uniq_id, fetched, kw_hits = _run(_go())
     assert fetched[0]["entry"]["uniq_id"] == uniq_id
-    assert fetched[0]["index"]["nominal_1"] == "novel"
+    assert fetched[0]["index"]["ordinal_4"] == "novel"
     assert fetched[0]["index"]["ordinal_1"] == 1954.0
     assert any(h["entry"]["uniq_id"] == uniq_id for h in kw_hits)
 
@@ -118,7 +117,7 @@ def test_update_idx_put_replaces_idx(server):
             uniq_id = created.data["uniq_id"]
             await client.call_tool(
                 "update",
-                {"uniq_id": uniq_id, "ref": "X", "nom": ["a", "b"]},
+                {"uniq_id": uniq_id, "ref": "X", "ord": [None, None, None, "a", "b"]},
             )
             await client.call_tool("update", {"uniq_id": uniq_id, "ref": "Y"})
             pairs = await client.call_tool("query", {})
@@ -126,7 +125,7 @@ def test_update_idx_put_replaces_idx(server):
 
     pairs = _run(_go())
     assert pairs[0]["index"]["uniq_ref"] == "Y"
-    assert pairs[0]["index"]["nominal_1"] is None
+    assert pairs[0]["index"]["ordinal_4"] is None
 
 
 def test_update_rejects_bad_ord_length(server):
@@ -135,7 +134,7 @@ def test_update_rejects_bad_ord_length(server):
             created = await client.call_tool("add", {})
             uniq_id = created.data["uniq_id"]
             await client.call_tool(
-                "update", {"uniq_id": uniq_id, "ord": [1.0, 2.0]}
+                "update", {"uniq_id": uniq_id, "ord": [1.0, 2.0, 3.0, 4.0]}
             )
 
     with pytest.raises(Exception, match="ord"):
@@ -207,13 +206,13 @@ def test_query_filters_by_equals(server):
     async def _go():
         async with Client(server) as client:
             await client.call_tool(
-                "add", {"ref": "a", "nom": ["alpha", None]}
+                "add", {"ref": "a", "ord": ["alpha", None, None, None, None]}
             )
             await client.call_tool(
-                "add", {"ref": "b", "nom": ["beta", None]}
+                "add", {"ref": "b", "ord": ["beta", None, None, None, None]}
             )
             pairs = await client.call_tool(
-                "query", {"equals": {"nominal_1": ["alpha"]}}
+                "query", {"equals": {"ordinal_1": ["alpha"]}}
             )
             return pairs.data
 

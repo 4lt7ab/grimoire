@@ -10,7 +10,7 @@ import typer
 from grimoire.data.entry import Entry, Filters
 from grimoire.grimoire import Grimoire
 
-from grimoire_cli import embed, mount
+from grimoire_cli import embed, mount, telemetry
 
 app = typer.Typer(
     name="grimoire",
@@ -103,7 +103,9 @@ def _resolve_db(mnt: mount.Mount, db: str | None) -> Path:
 
 def _open(mnt: mount.Mount, db: str | None) -> Grimoire:
     return Grimoire.open(
-        _resolve_db(mnt, db), embedder=embed.build_embedder(mnt.models_dir)
+        _resolve_db(mnt, db),
+        embedder=embed.build_embedder(mnt.models_dir),
+        telemetry=telemetry.build_telemetry(),
     )
 
 
@@ -121,51 +123,55 @@ def _parse_kv_list(label: str, items: list[str]) -> dict[str, list[str]]:
     out: dict[str, list[str]] = {}
     for item in items:
         if "=" not in item:
-            raise typer.BadParameter(
-                f"--{label} expects KEY=VALUE; got {item!r}"
-            )
+            raise typer.BadParameter(f"--{label} expects KEY=VALUE; got {item!r}")
         k, v = item.split("=", 1)
         out.setdefault(k, []).append(v)
     return out
 
 
-def _parse_kv_float(label: str, items: list[str]) -> dict[str, float]:
-    """Parse repeatable KEY=NUMBER flags into a dict of floats."""
-    out: dict[str, float] = {}
+def _coerce_value(s: str) -> Any:
+    """Try int → float → string. Lets a typeless `ordinal_*` column take
+    any scalar a caller types on the CLI without forcing them to quote.
+    """
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    return s
+
+
+def _parse_kv_value(label: str, items: list[str]) -> dict[str, Any]:
+    """Parse repeatable KEY=VALUE flags, coercing values via `_coerce_value`."""
+    out: dict[str, Any] = {}
     for item in items:
         if "=" not in item:
-            raise typer.BadParameter(
-                f"--{label} expects KEY=NUMBER; got {item!r}"
-            )
+            raise typer.BadParameter(f"--{label} expects KEY=VALUE; got {item!r}")
         k, v = item.split("=", 1)
-        try:
-            out[k] = float(v)
-        except ValueError as e:
-            raise typer.BadParameter(
-                f"--{label} {k}={v!r} is not a number"
-            ) from e
+        out[k] = _coerce_value(v)
     return out
 
 
-def _build_filters(
-    equals: list[str], gte: list[str], lte: list[str]
-) -> Filters | None:
+def _build_filters(equals: list[str], gte: list[str], lte: list[str]) -> Filters | None:
     if not (equals or gte or lte):
         return None
     return Filters(
         equals=_parse_kv_list("equals", equals) or None,
-        gte=_parse_kv_float("gte", gte) or None,
-        lte=_parse_kv_float("lte", lte) or None,
+        gte=_parse_kv_value("gte", gte) or None,
+        lte=_parse_kv_value("lte", lte) or None,
     )
 
 
 def _index_kwargs(
     ref: str | None,
-    ord_1: float | None,
-    ord_2: float | None,
-    ord_3: float | None,
-    nom_1: str | None,
-    nom_2: str | None,
+    ord_1: str | None,
+    ord_2: str | None,
+    ord_3: str | None,
+    ord_4: str | None,
+    ord_5: str | None,
     match: str | None,
     search: str | None,
 ) -> dict[str, Any]:
@@ -177,10 +183,9 @@ def _index_kwargs(
     kwargs: dict[str, Any] = {}
     if ref is not None:
         kwargs["ref"] = ref
-    if ord_1 is not None or ord_2 is not None or ord_3 is not None:
-        kwargs["ord"] = (ord_1, ord_2, ord_3)
-    if nom_1 is not None or nom_2 is not None:
-        kwargs["nom"] = (nom_1, nom_2)
+    ords = (ord_1, ord_2, ord_3, ord_4, ord_5)
+    if any(o is not None for o in ords):
+        kwargs["ord"] = tuple(_coerce_value(o) if o is not None else None for o in ords)
     if match is not None:
         kwargs["match"] = match
     if search is not None:
@@ -213,7 +218,11 @@ def mount_create_cmd(ctx: typer.Context) -> None:
     mnt: mount.Mount = ctx.obj
     mount.create(mnt)
 
-    with Grimoire.open(mnt.default_db, embedder=embed.build_embedder(mnt.models_dir)):
+    with Grimoire.open(
+        mnt.default_db,
+        embedder=embed.build_embedder(mnt.models_dir),
+        telemetry=telemetry.build_telemetry(),
+    ):
         pass
 
     typer.echo(json.dumps(asdict(mnt), indent=2, default=str))
@@ -253,7 +262,11 @@ def mount_add_cmd(
         raise typer.BadParameter(str(e)) from e
     db_path.parent.mkdir(exist_ok=True)
 
-    with Grimoire.open(db_path, embedder=embed.build_embedder(mnt.models_dir)):
+    with Grimoire.open(
+        db_path,
+        embedder=embed.build_embedder(mnt.models_dir),
+        telemetry=telemetry.build_telemetry(),
+    ):
         pass
 
     typer.echo(json.dumps({"db": db_path.parent.name, "path": str(db_path)}, indent=2))
@@ -308,11 +321,15 @@ def mount_remove_cmd(
 
 _DB_OPT = typer.Option("--db", "-d", help="Database name (default DB if omitted).")
 _REF_OPT = typer.Option("--ref", help="entry_idx.uniq_ref value.")
-_ORD_1_OPT = typer.Option("--ord-1", help="entry_idx.ordinal_1 value.")
-_ORD_2_OPT = typer.Option("--ord-2", help="entry_idx.ordinal_2 value.")
-_ORD_3_OPT = typer.Option("--ord-3", help="entry_idx.ordinal_3 value.")
-_NOM_1_OPT = typer.Option("--nom-1", help="entry_idx.nominal_1 value.")
-_NOM_2_OPT = typer.Option("--nom-2", help="entry_idx.nominal_2 value.")
+_ORD_HELP = (
+    "entry_idx.ordinal_{n} value. Coerced int → float → string, so a literal"
+    " number stores as a number and anything else stores as text."
+)
+_ORD_1_OPT = typer.Option("--ord-1", help=_ORD_HELP.format(n=1))
+_ORD_2_OPT = typer.Option("--ord-2", help=_ORD_HELP.format(n=2))
+_ORD_3_OPT = typer.Option("--ord-3", help=_ORD_HELP.format(n=3))
+_ORD_4_OPT = typer.Option("--ord-4", help=_ORD_HELP.format(n=4))
+_ORD_5_OPT = typer.Option("--ord-5", help=_ORD_HELP.format(n=5))
 _MATCH_OPT = typer.Option(
     "--match", help="Text to index in FTS5 (entry_fts). PUT-replaces."
 )
@@ -330,25 +347,23 @@ def entry_add_cmd(
         typer.Option("--data", help="JSON for the entry's data column."),
     ] = None,
     ref: Annotated[str | None, _REF_OPT] = None,
-    ord_1: Annotated[float | None, _ORD_1_OPT] = None,
-    ord_2: Annotated[float | None, _ORD_2_OPT] = None,
-    ord_3: Annotated[float | None, _ORD_3_OPT] = None,
-    nom_1: Annotated[str | None, _NOM_1_OPT] = None,
-    nom_2: Annotated[str | None, _NOM_2_OPT] = None,
+    ord_1: Annotated[str | None, _ORD_1_OPT] = None,
+    ord_2: Annotated[str | None, _ORD_2_OPT] = None,
+    ord_3: Annotated[str | None, _ORD_3_OPT] = None,
+    ord_4: Annotated[str | None, _ORD_4_OPT] = None,
+    ord_5: Annotated[str | None, _ORD_5_OPT] = None,
     match: Annotated[str | None, _MATCH_OPT] = None,
     search: Annotated[str | None, _SEARCH_OPT] = None,
 ) -> None:
     """Create a grimoire entry and (optionally) PUT-index its sidecars.
 
     `--data` writes the entry's JSON blob. The remaining flags are
-    forwarded to `index()`; supplying any of `--ref`, `--ord-*`, `--nom-*`
+    forwarded to `index()`; supplying any of `--ref`, `--ord-*`
     PUT-replaces the entry_idx row (omitted columns become NULL).
     """
     mnt = _existing_mount(ctx)
     data_value = _parse_json("data", data)
-    idx_kwargs = _index_kwargs(
-        ref, ord_1, ord_2, ord_3, nom_1, nom_2, match, search
-    )
+    idx_kwargs = _index_kwargs(ref, ord_1, ord_2, ord_3, ord_4, ord_5, match, search)
 
     with _open(mnt, db) as g:
         [created] = g.add([Entry(uniq_id=None, data=data_value)])
@@ -371,24 +386,22 @@ def entry_update_cmd(
         typer.Option("--data", help="Replace the entry's `data` JSON blob."),
     ] = None,
     ref: Annotated[str | None, _REF_OPT] = None,
-    ord_1: Annotated[float | None, _ORD_1_OPT] = None,
-    ord_2: Annotated[float | None, _ORD_2_OPT] = None,
-    ord_3: Annotated[float | None, _ORD_3_OPT] = None,
-    nom_1: Annotated[str | None, _NOM_1_OPT] = None,
-    nom_2: Annotated[str | None, _NOM_2_OPT] = None,
+    ord_1: Annotated[str | None, _ORD_1_OPT] = None,
+    ord_2: Annotated[str | None, _ORD_2_OPT] = None,
+    ord_3: Annotated[str | None, _ORD_3_OPT] = None,
+    ord_4: Annotated[str | None, _ORD_4_OPT] = None,
+    ord_5: Annotated[str | None, _ORD_5_OPT] = None,
     match: Annotated[str | None, _MATCH_OPT] = None,
     search: Annotated[str | None, _SEARCH_OPT] = None,
 ) -> None:
     """Update an entry's data and/or PUT-index its sidecars.
 
     Omit `--data` to leave the data column untouched. Idx flags follow the
-    same PUT semantics as `entry add` — supplying any of `--ref`,
-    `--ord-*`, `--nom-*` wholesale-replaces the entry_idx row.
+    same PUT semantics as `entry add` — supplying any of `--ref`, `--ord-*`
+    wholesale-replaces the entry_idx row.
     """
     mnt = _existing_mount(ctx)
-    idx_kwargs = _index_kwargs(
-        ref, ord_1, ord_2, ord_3, nom_1, nom_2, match, search
-    )
+    idx_kwargs = _index_kwargs(ref, ord_1, ord_2, ord_3, ord_4, ord_5, match, search)
 
     with _open(mnt, db) as g:
         if data is not None:
@@ -442,9 +455,7 @@ def entry_remove_cmd(
     mnt = _existing_mount(ctx)
     with _open(mnt, db) as g:
         removed = g.remove([uniq_id])
-    typer.echo(
-        json.dumps({"uniq_id": uniq_id, "removed": bool(removed)}, indent=2)
-    )
+    typer.echo(json.dumps({"uniq_id": uniq_id, "removed": bool(removed)}, indent=2))
 
 
 # ----------------------------------------------------------------------
@@ -473,26 +484,47 @@ def info_cmd(
     typer.echo(json.dumps(result, indent=2, default=str))
 
 
+@app.command(name="analyze")
+def analyze_cmd(
+    ctx: typer.Context,
+    db: Annotated[str | None, _DB_OPT] = None,
+) -> None:
+    """Re-seed the SQLite planner stats by running ANALYZE.
+
+    Run after bulk loads or when the data distribution shifts; the
+    rotation composite indexes on `entry_idx` rely on these stats to
+    pick the right index for multi-ordinal predicates.
+    """
+    mnt = _existing_mount(ctx)
+    with _open(mnt, db) as g:
+        g.analyze()
+    typer.echo(json.dumps({"db": db, "analyzed": True}, indent=2))
+
+
 _EQUALS_OPT = typer.Option(
     "--equals",
     help=(
-        "Filter `entry_idx.<col> IN (...)`. Repeatable as KEY=VAL "
-        "(e.g. --equals nominal_1=foo)."
+        "Filter `entry_idx.<col> IN (...)`. Repeatable as KEY=VALUE "
+        "(e.g. --equals ordinal_4=note)."
     ),
 )
 _GTE_OPT = typer.Option(
     "--gte",
-    help="Filter `ordinal_N >= value`. Repeatable as KEY=NUMBER.",
+    help=(
+        "Filter `ordinal_N >= value`. Repeatable as KEY=VALUE."
+        " Values are coerced int → float → string."
+    ),
 )
 _LTE_OPT = typer.Option(
     "--lte",
-    help="Filter `ordinal_N <= value`. Repeatable as KEY=NUMBER.",
+    help=(
+        "Filter `ordinal_N <= value`. Repeatable as KEY=VALUE."
+        " Values are coerced int → float → string."
+    ),
 )
 
 
-def _format_entry_pair_list(
-    entries: list, second: list, key: str
-) -> str:
+def _format_entry_pair_list(entries: list, second: list, key: str) -> str:
     """Zip parallel lists into `[{entry, <key>}, ...]` JSON."""
     if key == "index":
         return json.dumps(

@@ -34,7 +34,7 @@ with Grimoire.open("grimoire.db", embedder=FastembedEmbedder()) as g:
     g.index(
         entry.uniq_id,
         ref="phoenix-001",
-        nom=("creature", None),
+        ord=("creature", None, None, None, None),
         match="phoenix fire-bird ashes",
         search="A solar phoenix reborn from its own ashes at dawn",
     )
@@ -52,7 +52,7 @@ grimoire mount create
 grimoire entry add \
     --data '{"habitat": "volcano"}' \
     --ref phoenix-001 \
-    --nom-1 creature \
+    --ord-1 creature \
     --match "phoenix fire-bird ashes" \
     --search "A solar phoenix reborn from its own ashes at dawn"
 grimoire search "creatures that come back from the dead"

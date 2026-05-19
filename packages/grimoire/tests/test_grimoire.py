@@ -104,8 +104,7 @@ def test_index_writes_all_three_sidecars(tmp_path, fake_embedder):
     g.index(
         e.uniq_id,
         ref="X",
-        ord=(1.0, 2.0, 3.0),
-        nom=("a", "b"),
+        ord=(1.0, 2.0, 3.0, "a", "b"),
         match="kw",
         search="sem",
     )
@@ -113,32 +112,32 @@ def test_index_writes_all_three_sidecars(tmp_path, fake_embedder):
     _, indexes = g.query()
     assert len(indexes) == 1
     assert indexes[0].uniq_ref == "X"
-    assert indexes[0].nominal_1 == "a"
+    assert indexes[0].ordinal_4 == "a"
     assert indexes[0].ordinal_2 == 2.0
 
 
 def test_index_put_replaces_idx_row(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [e] = g.add([Entry(None, None)])
-    g.index(e.uniq_id, ref="X", ord=(1.0, 2.0, 3.0), nom=("a", "b"))
-    g.index(e.uniq_id, ref="Y")  # PUT: ord/nom should clear
+    g.index(e.uniq_id, ref="X", ord=(1.0, 2.0, 3.0, "a", "b"))
+    g.index(e.uniq_id, ref="Y")  # PUT: ord should clear
 
     _, indexes = g.query()
     assert indexes[0].uniq_ref == "Y"
-    assert indexes[0].nominal_1 is None
-    assert indexes[0].nominal_2 is None
+    assert indexes[0].ordinal_4 is None
+    assert indexes[0].ordinal_5 is None
     assert indexes[0].ordinal_1 is None
 
 
 def test_index_match_only_does_not_touch_idx(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [e] = g.add([Entry(None, None)])
-    g.index(e.uniq_id, ref="X", nom=("a", "b"))
+    g.index(e.uniq_id, ref="X", ord=(None, None, None, "a", "b"))
     g.index(e.uniq_id, match="hello")
 
     _, indexes = g.query()
     assert indexes[0].uniq_ref == "X"
-    assert indexes[0].nominal_1 == "a"
+    assert indexes[0].ordinal_4 == "a"
 
 
 def test_index_replaces_match(tmp_path, fake_embedder):
@@ -157,14 +156,7 @@ def test_index_validates_ord_tuple_length(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [e] = g.add([Entry(None, None)])
     with pytest.raises(ValueError, match="ord"):
-        g.index(e.uniq_id, ord=(1.0, 2.0))  # type: ignore[arg-type]
-
-
-def test_index_validates_nom_tuple_length(tmp_path, fake_embedder):
-    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
-    [e] = g.add([Entry(None, None)])
-    with pytest.raises(ValueError, match="nom"):
-        g.index(e.uniq_id, nom=("a",))  # type: ignore[arg-type]
+        g.index(e.uniq_id, ord=(1.0, 2.0, 3.0, 4.0))  # type: ignore[arg-type]
 
 
 def test_index_requires_existing_entry(tmp_path, fake_embedder):
@@ -181,14 +173,14 @@ def test_index_with_no_kwargs_is_noop(tmp_path, fake_embedder):
     assert indexes == []
 
 
-def test_index_partial_nom_writes_null_for_omitted(tmp_path, fake_embedder):
+def test_index_partial_ord_writes_null_for_omitted(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [e] = g.add([Entry(None, None)])
-    g.index(e.uniq_id, nom=("a", None))
+    g.index(e.uniq_id, ord=(None, None, None, "a", None))
 
     _, indexes = g.query()
-    assert indexes[0].nominal_1 == "a"
-    assert indexes[0].nominal_2 is None
+    assert indexes[0].ordinal_4 == "a"
+    assert indexes[0].ordinal_5 is None
 
 
 # ----------------------------------------------------------------------
@@ -200,8 +192,8 @@ def test_query_returns_parallel_entries_indexes(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [a] = g.add([Entry(None, {"x": 1})])
     [b] = g.add([Entry(None, {"x": 2})])
-    g.index(a.uniq_id, nom=("alpha", None))
-    g.index(b.uniq_id, nom=("beta", None))
+    g.index(a.uniq_id, ord=("alpha", None, None, None, None))
+    g.index(b.uniq_id, ord=("beta", None, None, None, None))
 
     entries, indexes = g.query()
     assert len(entries) == len(indexes) == 2
@@ -223,10 +215,10 @@ def test_query_filters_by_equals(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [a] = g.add([Entry(None, None)])
     [b] = g.add([Entry(None, None)])
-    g.index(a.uniq_id, nom=("alpha", None))
-    g.index(b.uniq_id, nom=("beta", None))
+    g.index(a.uniq_id, ord=("alpha", None, None, None, None))
+    g.index(b.uniq_id, ord=("beta", None, None, None, None))
 
-    _, indexes = g.query(Filters(equals={"nominal_1": ["alpha"]}))
+    _, indexes = g.query(Filters(equals={"ordinal_1": ["alpha"]}))
     assert [i.uniq_id for i in indexes] == [a.uniq_id]
 
 
@@ -235,13 +227,25 @@ def test_query_filters_by_ordinal_range(tmp_path, fake_embedder):
     saved = []
     for v in [1.0, 5.0, 10.0]:
         [e] = g.add([Entry(None, None)])
-        g.index(e.uniq_id, ord=(v, None, None))
+        g.index(e.uniq_id, ord=(v, None, None, None, None))
         saved.append((e.uniq_id, v))
 
     _, indexes = g.query(
         Filters(gte={"ordinal_1": 2.0}, lte={"ordinal_1": 7.0})
     )
     assert {i.ordinal_1 for i in indexes} == {5.0}
+
+
+def test_query_filters_by_text_ordinal_range(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    for tag in ["alpha", "mike", "zulu"]:
+        [e] = g.add([Entry(None, None)])
+        g.index(e.uniq_id, ord=(tag, None, None, None, None))
+
+    _, indexes = g.query(
+        Filters(gte={"ordinal_1": "b"}, lte={"ordinal_1": "n"})
+    )
+    assert {i.ordinal_1 for i in indexes} == {"mike"}
 
 
 def test_query_cursor_paginates_by_uniq_id(tmp_path, fake_embedder):
@@ -269,7 +273,7 @@ def test_query_invalid_filter_column_raises(tmp_path, fake_embedder):
 def test_query_gte_rejects_non_ordinal_column(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     with pytest.raises(ValueError, match="gte filter column"):
-        g.query(Filters(gte={"nominal_1": 5.0}))
+        g.query(Filters(gte={"uniq_ref": "x"}))
 
 
 # ----------------------------------------------------------------------
@@ -289,15 +293,21 @@ def test_fetch_returns_entries_matching_uniq_ref(tmp_path, fake_embedder):
     assert [i.uniq_ref for i in indexes] == ["ext-1"]
 
 
-def test_fetch_allows_multiple_entries_per_ref(tmp_path, fake_embedder):
+def test_uniq_ref_is_sparse_unique(tmp_path, fake_embedder):
+    import sqlite3
+
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [a] = g.add([Entry(None, None)])
     [b] = g.add([Entry(None, None)])
     g.index(a.uniq_id, ref="shared")
-    g.index(b.uniq_id, ref="shared")
 
+    with pytest.raises(sqlite3.IntegrityError):
+        g.index(b.uniq_id, ref="shared")
+
+    # Re-indexing the same entry with the same ref is fine (PUT replaces).
+    g.index(a.uniq_id, ref="shared")
     entries, _ = g.fetch(["shared"])
-    assert {e.uniq_id for e in entries} == {a.uniq_id, b.uniq_id}
+    assert [e.uniq_id for e in entries] == [a.uniq_id]
 
 
 def test_fetch_excludes_entries_without_idx(tmp_path, fake_embedder):
@@ -336,11 +346,11 @@ def test_match_filters_via_idx_join(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     [a] = g.add([Entry(None, None)])
     [b] = g.add([Entry(None, None)])
-    g.index(a.uniq_id, nom=("alpha", None), match="phoenix")
-    g.index(b.uniq_id, nom=("beta", None), match="phoenix")
+    g.index(a.uniq_id, ord=("alpha", None, None, None, None), match="phoenix")
+    g.index(b.uniq_id, ord=("beta", None, None, None, None), match="phoenix")
 
     entries, _ = g.match(
-        "phoenix", filters=Filters(equals={"nominal_1": ["alpha"]})
+        "phoenix", filters=Filters(equals={"ordinal_1": ["alpha"]})
     )
     assert [e.uniq_id for e in entries] == [a.uniq_id]
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import sqlite_vec
 
@@ -20,6 +21,7 @@ from grimoire.errors import (
     GrimoireMismatch,
     GrimoireNotFound,
 )
+from grimoire.telemetry import NoOpTelemetry, Telemetry
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,9 +42,13 @@ class Grimoire:
         self,
         conn: sqlite3.Connection,
         embedder: Embedder | None = None,
+        telemetry: Telemetry | None = None,
     ) -> None:
         self._conn = conn
         self.embedder = embedder
+        self._telemetry: Telemetry = (
+            telemetry if telemetry is not None else NoOpTelemetry()
+        )
 
     # ------------------------------------------------------------------
     # File lifecycle
@@ -53,6 +59,7 @@ class Grimoire:
         path: str | Path,
         *,
         embedder: Embedder | None = None,
+        telemetry: Telemetry | None = None,
         check_same_thread: bool = True,
     ) -> Grimoire:
         """Open or initialize a grimoire file at `path`.
@@ -66,33 +73,48 @@ class Grimoire:
         real embedder later raises `GrimoireMismatch`. Semantic operations
         on a NoOp-locked grimoire raise `EmbedderRequired`.
         """
-        conn = sqlite3.connect(path, check_same_thread=check_same_thread)
-        conn.row_factory = sqlite3.Row
+        tel = telemetry if telemetry is not None else NoOpTelemetry()
+        with tel.span(
+            "grimoire.open",
+            embedder_model=embedder.model if embedder is not None else None,
+        ):
+            conn = sqlite3.connect(path, check_same_thread=check_same_thread)
+            conn.row_factory = sqlite3.Row
 
-        conn.enable_load_extension(True)
-        sqlite_vec.load(conn)
-        conn.enable_load_extension(False)
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
 
-        if schema.read_version(conn) == 0:
-            lock = embedder if embedder is not None else NoOpEmbedder()
-            schema.create(conn, model=lock.model, dimension=lock.dimension)
-        else:
-            schema.validate(conn)
-            if embedder is not None:
-                stored_model = meta.fetch(conn, "model")
-                stored_dimension = int(meta.fetch(conn, "dimension"))
-                if (
-                    stored_model != embedder.model
-                    or stored_dimension != embedder.dimension
-                ):
-                    raise GrimoireMismatch(
-                        f"Embedder reports model={embedder.model!r}"
-                        f" dimension={embedder.dimension},"
-                        f" file locked to model={stored_model!r}"
-                        f" dimension={stored_dimension}."
+            if schema.read_version(conn) == 0:
+                lock = embedder if embedder is not None else NoOpEmbedder()
+                schema.create(conn, model=lock.model, dimension=lock.dimension)
+                tel.event(
+                    "grimoire.schema_installed",
+                    model=lock.model,
+                    dimension=lock.dimension,
+                )
+            else:
+                schema.validate(conn)
+                if embedder is not None:
+                    stored_model = meta.fetch(conn, "model")
+                    stored_dimension = int(meta.fetch(conn, "dimension"))
+                    if (
+                        stored_model != embedder.model
+                        or stored_dimension != embedder.dimension
+                    ):
+                        raise GrimoireMismatch(
+                            f"Embedder reports model={embedder.model!r}"
+                            f" dimension={embedder.dimension},"
+                            f" file locked to model={stored_model!r}"
+                            f" dimension={stored_dimension}."
+                        )
+                    tel.event(
+                        "grimoire.lock_validated",
+                        model=stored_model,
+                        dimension=stored_dimension,
                     )
 
-        return Grimoire(conn, embedder=embedder)
+            return Grimoire(conn, embedder=embedder, telemetry=tel)
 
     @staticmethod
     def peek(path: str | Path, *, check_same_thread: bool = True) -> Peek:
@@ -150,28 +172,44 @@ class Grimoire:
             self._conn.rollback()
 
     # ------------------------------------------------------------------
+    # Maintenance
+    # ------------------------------------------------------------------
+
+    def analyze(self) -> None:
+        """Re-seed SQLite's planner stats by running `ANALYZE`.
+
+        The rotation composite indexes on `entry_idx` rely on accurate
+        selectivity stats for the planner to pick among them. Run this
+        after bulk loads or when the data distribution shifts.
+        """
+        with self._telemetry.span("grimoire.analyze"):
+            self._conn.execute("ANALYZE")
+
+    # ------------------------------------------------------------------
     # entry  (identity table)
     # ------------------------------------------------------------------
 
     def add(self, entries: list[Entry]) -> list[Entry]:
         """Insert entries with freshly-minted ULIDs."""
-        return entry.add(self._conn, entries)
+        with self._telemetry.span("grimoire.add", count=len(entries)):
+            return entry.add(self._conn, entries)
 
     def update(self, entries: list[Entry]) -> list[Entry]:
         """Rewrite the `data` column on existing rows, keyed by `uniq_id`."""
-        return entry.update(self._conn, entries)
+        with self._telemetry.span("grimoire.update", count=len(entries)):
+            return entry.update(self._conn, entries)
 
     def remove(self, uniq_ids: list[str]) -> list[str]:
         """Delete entries. Sidecar rows are cascade-cleaned by DB trigger."""
-        return entry.remove(self._conn, uniq_ids)
+        with self._telemetry.span("grimoire.remove", count=len(uniq_ids)):
+            return entry.remove(self._conn, uniq_ids)
 
     def get(self, uniq_ids: list[str]) -> list[Entry]:
         """Fetch entries by uniq_id. Returns only the ones that exist."""
-        return entry.get(self._conn, uniq_ids)
+        with self._telemetry.span("grimoire.get", count=len(uniq_ids)):
+            return entry.get(self._conn, uniq_ids)
 
-    def fetch(
-        self, uniq_refs: list[str]
-    ) -> tuple[list[Entry], list[EntryIndex]]:
+    def fetch(self, uniq_refs: list[str]) -> tuple[list[Entry], list[EntryIndex]]:
         """Fetch entries whose entry_idx row has uniq_ref in the given list.
 
         Returns parallel `(entries, indexes)` lists. Entries without an
@@ -179,7 +217,8 @@ class Grimoire:
         (no uniqueness constraint), so the result may contain more rows
         than refs were passed.
         """
-        return entry.fetch_by_uniq_ref(self._conn, uniq_refs)
+        with self._telemetry.span("grimoire.fetch", count=len(uniq_refs)):
+            return entry.fetch_by_uniq_ref(self._conn, uniq_refs)
 
     # ------------------------------------------------------------------
     # entry_idx  (filterable metadata sidecar)
@@ -197,7 +236,13 @@ class Grimoire:
         returns rows with `uniq_id > cursor`. For ordinal-window paging,
         pass `Filters(gte={...}, lte={...})`.
         """
-        return entry.fetch_idx(self._conn, filters, limit, cursor=cursor)
+        with self._telemetry.span(
+            "grimoire.query",
+            limit=limit,
+            has_filters=filters is not None,
+            has_cursor=cursor is not None,
+        ):
+            return entry.fetch_idx(self._conn, filters, limit, cursor=cursor)
 
     # ------------------------------------------------------------------
     # entry_fts  (FTS5 keyword sidecar)
@@ -207,13 +252,20 @@ class Grimoire:
         self,
         query: str,
         filters: Filters | None = None,
-        limit: int | None = None,
+        limit: int | None = 10,
     ) -> tuple[list[Entry], list[KeywordHit]]:
         """FTS5 BM25 search. Filters apply via JOIN to entry_idx.
 
         Returns parallel `(entries, hits)` lists in BM25 rank order.
+        `limit` defaults to 10; pass `None` to return every hit.
         """
-        return entry.keyword_search(self._conn, query, filters, limit)
+        with self._telemetry.span(
+            "grimoire.match",
+            query_length=len(query),
+            limit=limit,
+            has_filters=filters is not None,
+        ):
+            return entry.keyword_search(self._conn, query, filters, limit)
 
     # ------------------------------------------------------------------
     # entry_vec  (vec0 semantic sidecar)
@@ -231,9 +283,14 @@ class Grimoire:
                 "This grimoire was opened without an embedder; "
                 "pass embedder=... to Grimoire.open() to enable semantic search."
             )
-        return entry.semantic_search(
-            self._conn, self.embedder.embed(query), limit
-        )
+        with self._telemetry.span(
+            "grimoire.search", query_length=len(query), limit=limit
+        ):
+            with self._telemetry.span(
+                "grimoire.embed", model=self.embedder.model, text_length=len(query)
+            ):
+                vec = self.embedder.embed(query)
+            return entry.semantic_search(self._conn, vec, limit)
 
     # ------------------------------------------------------------------
     # Combined PUT-style indexing
@@ -244,8 +301,7 @@ class Grimoire:
         uniq_id: str,
         *,
         ref: str | None = None,
-        ord: tuple[float | None, float | None, float | None] | None = None,
-        nom: tuple[str | None, str | None] | None = None,
+        ord: tuple[Any, Any, Any, Any, Any] | None = None,
         match: str | None = None,
         search: str | None = None,
     ) -> None:
@@ -253,11 +309,11 @@ class Grimoire:
 
         Each kwarg writes wholesale; no reads, no merging.
 
-        - `ref`, `ord`, `nom` together describe the `entry_idx` row. If any
-          one of the three is supplied, the row is fully replaced from the
-          given kwargs; columns mapped to unsupplied or in-tuple `None`
-          positions become NULL. If all three are omitted, `entry_idx` is
-          untouched. A 3-tuple is expected for `ord`, a 2-tuple for `nom`.
+        - `ref` and `ord` together describe the `entry_idx` row. If either
+          is supplied, the row is fully replaced from the given kwargs;
+          columns mapped to unsupplied or in-tuple `None` positions become
+          NULL. Omit both to leave `entry_idx` untouched. A 5-tuple is
+          expected for `ord` (positional values for `ordinal_1`..`ordinal_5`).
         - `match` replaces the `entry_fts` row.
         - `search` embeds the text via the bound embedder and replaces the
           `entry_vec` row. Raises `EmbedderRequired` if the grimoire was
@@ -266,36 +322,46 @@ class Grimoire:
         The entry referenced by `uniq_id` must already exist in `entry`;
         otherwise the underlying sidecar writes raise `ValueError`.
         """
-        if ord is not None and len(ord) != 3:
-            raise ValueError("`ord` must be a 3-tuple")
-        if nom is not None and len(nom) != 2:
-            raise ValueError("`nom` must be a 2-tuple")
+        if ord is not None and len(ord) != 5:
+            raise ValueError("`ord` must be a 5-tuple")
 
-        if ref is not None or ord is not None or nom is not None:
-            entry.entry_idx_set(
-                self._conn,
-                [
-                    EntryIndex(
-                        uniq_id=uniq_id,
-                        uniq_ref=ref,
-                        nominal_1=nom[0] if nom else None,
-                        nominal_2=nom[1] if nom else None,
-                        ordinal_1=ord[0] if ord else None,
-                        ordinal_2=ord[1] if ord else None,
-                        ordinal_3=ord[2] if ord else None,
-                    )
-                ],
-            )
-
-        if match is not None:
-            entry.keyword(self._conn, [(uniq_id, match)])
-
-        if search is not None:
-            if self.embedder is None:
-                raise EmbedderRequired(
-                    "This grimoire was opened without an embedder; "
-                    "pass embedder=... to Grimoire.open() to enable "
-                    "semantic indexing."
+        with self._telemetry.span(
+            "grimoire.index",
+            has_ref=ref is not None,
+            has_ord=ord is not None,
+            has_match=match is not None,
+            has_search=search is not None,
+        ):
+            if ref is not None or ord is not None:
+                entry.entry_idx_set(
+                    self._conn,
+                    [
+                        EntryIndex(
+                            uniq_id=uniq_id,
+                            uniq_ref=ref,
+                            ordinal_1=ord[0] if ord else None,
+                            ordinal_2=ord[1] if ord else None,
+                            ordinal_3=ord[2] if ord else None,
+                            ordinal_4=ord[3] if ord else None,
+                            ordinal_5=ord[4] if ord else None,
+                        )
+                    ],
                 )
-            vec = self.embedder.embed(search)
-            entry.embed(self._conn, [(uniq_id, search, vec)])
+
+            if match is not None:
+                entry.keyword(self._conn, [(uniq_id, match)])
+
+            if search is not None:
+                if self.embedder is None:
+                    raise EmbedderRequired(
+                        "This grimoire was opened without an embedder; "
+                        "pass embedder=... to Grimoire.open() to enable "
+                        "semantic indexing."
+                    )
+                with self._telemetry.span(
+                    "grimoire.embed",
+                    model=self.embedder.model,
+                    text_length=len(search),
+                ):
+                    vec = self.embedder.embed(search)
+                entry.embed(self._conn, [(uniq_id, search, vec)])

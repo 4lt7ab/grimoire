@@ -7,19 +7,11 @@ from typing import Any
 
 from ulid import ULID
 
-_ENTRY_IDX_COLUMNS: frozenset[str] = frozenset(
-    {
-        "uniq_id",
-        "uniq_ref",
-        "nominal_1",
-        "nominal_2",
-        "ordinal_1",
-        "ordinal_2",
-        "ordinal_3",
-    }
+_ORDINAL_COLUMNS: frozenset[str] = frozenset(
+    {"ordinal_1", "ordinal_2", "ordinal_3", "ordinal_4", "ordinal_5"}
 )
 
-_ORDINAL_COLUMNS: frozenset[str] = frozenset({"ordinal_1", "ordinal_2", "ordinal_3"})
+_ENTRY_IDX_COLUMNS: frozenset[str] = frozenset({"uniq_id", "uniq_ref"}) | _ORDINAL_COLUMNS
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,33 +26,37 @@ class Entry:
 class EntryIndex:
     """Filterable/searchable metadata sidecar keyed by uniq_id.
 
-    All slots except `uniq_id` are optional. Library writes/reads them
-    verbatim; semantics (what nominal_1 means, what ordinal_2 measures)
-    are the caller's to define.
+    All slots except `uniq_id` are optional. The five `ordinal_*` columns
+    are BLOB-affinity — store any JSON-serializable scalar; SQLite holds
+    each value in its native storage class. Library writes/reads them
+    verbatim; semantics (what `ordinal_2` measures) are the caller's to
+    define.
     """
 
     uniq_id: str | None
     uniq_ref: str | None = None
-    nominal_1: str | None = None
-    nominal_2: str | None = None
-    ordinal_1: float | None = None
-    ordinal_2: float | None = None
-    ordinal_3: float | None = None
+    ordinal_1: Any = None
+    ordinal_2: Any = None
+    ordinal_3: Any = None
+    ordinal_4: Any = None
+    ordinal_5: Any = None
 
 
 @dataclass(frozen=True, slots=True)
 class Filters:
     """Generic, dict-driven filters over `entry_idx` columns.
 
-    `equals` keys may name any of the seven entry_idx columns and apply
-    `column IN (values...)`. `gte` / `lte` keys must name one of the three
+    `equals` keys may name any entry_idx column and apply
+    `column IN (values...)`. `gte` / `lte` keys must name one of the five
     `ordinal_*` columns and apply `>= value` / `<= value`. Empty value
-    lists in `equals` skip the filter (no-op).
+    lists in `equals` skip the filter (no-op). Filter values may be any
+    type SQLite can compare — comparison follows SQLite's storage-class
+    precedence (NULL < INT/REAL < TEXT < BLOB).
     """
 
     equals: dict[str, list[Any]] | None = None
-    gte: dict[str, float] | None = None
-    lte: dict[str, float] | None = None
+    gte: dict[str, Any] | None = None
+    lte: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,11 +82,11 @@ def _row_to_entry_idx(r: sqlite3.Row) -> EntryIndex:
     return EntryIndex(
         uniq_id=r["uniq_id"],
         uniq_ref=r["uniq_ref"],
-        nominal_1=r["nominal_1"],
-        nominal_2=r["nominal_2"],
         ordinal_1=r["ordinal_1"],
         ordinal_2=r["ordinal_2"],
         ordinal_3=r["ordinal_3"],
+        ordinal_4=r["ordinal_4"],
+        ordinal_5=r["ordinal_5"],
     )
 
 
@@ -243,18 +239,15 @@ def fetch_by_uniq_ref(
     """Fetch entries whose entry_idx row has uniq_ref in the given list.
 
     Returns parallel `(entries, indexes)` lists — `entries[i]` and
-    `indexes[i]` describe the same row. Joins entry to entry_idx;
-    entries without an entry_idx row are excluded (no idx, no ref to
-    match). Multiple entries may share a uniq_ref since there is no
-    uniqueness constraint, so the result may contain more rows than
-    refs were passed.
+    `indexes[i]` describe the same row. `uniq_ref` is sparse-unique
+    (UNIQUE index on the non-NULL rows), so each ref maps to at most
+    one entry; entries without an entry_idx row are excluded.
     """
     if not uniq_refs:
         return [], []
     cur = conn.execute(
-        "SELECT e.uniq_id, e.data, "
-        "       i.uniq_ref, i.nominal_1, i.nominal_2, "
-        "       i.ordinal_1, i.ordinal_2, i.ordinal_3 "
+        "SELECT e.uniq_id, e.data, i.uniq_ref, "
+        "       i.ordinal_1, i.ordinal_2, i.ordinal_3, i.ordinal_4, i.ordinal_5 "
         "FROM entry e "
         "JOIN entry_idx i ON i.uniq_id = e.uniq_id "
         "WHERE i.uniq_ref IN (SELECT value FROM json_each(?))",
@@ -294,18 +287,18 @@ def entry_idx_set(
     )
     conn.executemany(
         "INSERT INTO entry_idx "
-        "(uniq_id, uniq_ref, nominal_1, nominal_2, "
-        " ordinal_1, ordinal_2, ordinal_3) "
+        "(uniq_id, uniq_ref, "
+        " ordinal_1, ordinal_2, ordinal_3, ordinal_4, ordinal_5) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 i.uniq_id,
                 i.uniq_ref,
-                i.nominal_1,
-                i.nominal_2,
                 i.ordinal_1,
                 i.ordinal_2,
                 i.ordinal_3,
+                i.ordinal_4,
+                i.ordinal_5,
             )
             for i in indexes
         ],
@@ -331,8 +324,8 @@ def fetch_idx(
         params["cursor"] = cursor
 
     sql = (
-        "SELECT i.uniq_id, i.uniq_ref, i.nominal_1, i.nominal_2, "
-        "       i.ordinal_1, i.ordinal_2, i.ordinal_3, "
+        "SELECT i.uniq_id, i.uniq_ref, "
+        "       i.ordinal_1, i.ordinal_2, i.ordinal_3, i.ordinal_4, i.ordinal_5, "
         "       e.data "
         "FROM entry_idx i "
         "JOIN entry e ON e.uniq_id = i.uniq_id"
@@ -388,11 +381,13 @@ def keyword_search(
     conn: sqlite3.Connection,
     query: str,
     filters: Filters | None = None,
-    limit: int | None = None,
+    limit: int | None = 10,
 ) -> tuple[list[Entry], list[KeywordHit]]:
     """FTS5 BM25 search. Filters apply via JOIN to entry_idx.
 
-    Returns parallel `(entries, hits)` lists in BM25 rank order.
+    Returns parallel `(entries, hits)` lists in BM25 rank order. `limit`
+    defaults to 10 to avoid unbounded with-data joins; pass `None` to
+    return every hit.
     """
     if not query.strip():
         raise ValueError("search query must be non-empty")

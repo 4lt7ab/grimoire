@@ -46,11 +46,11 @@ A grimoire entry has two layers:
 
 - The **entry** itself: `uniq_id` (library-assigned ULID) + `data` (JSON blob).
 - Three opt-in **sidecars** keyed by that `uniq_id`:
-  - **`entry_idx`** — typed filterable columns: `uniq_ref` (external reference), `nominal_1`/`nominal_2` (categorical labels), `ordinal_1`/`ordinal_2`/`ordinal_3` (sortable numbers).
+  - **`entry_idx`** — filterable columns: `uniq_ref` (external reference) and five symmetric `ordinal_1`..`ordinal_5` slots (BLOB-affinity — store any scalar: numbers, strings, labels).
   - **`entry_fts`** — FTS5 keyword text.
   - **`entry_vec`** — semantic vector + source text.
 
-`entry add` creates an entry and optionally writes any subset of the three sidecars in the same call. Sidecar writes are **PUT** — supplying any of `--ref`/`--ord-*`/`--nom-*` wholesale-replaces the `entry_idx` row; supplying `--match` replaces the FTS row; supplying `--search` replaces the vec row. Deleting an entry cascade-cleans every sidecar via a DB trigger.
+`entry add` creates an entry and optionally writes any subset of the three sidecars in the same call. Sidecar writes are **PUT** — supplying any of `--ref`/`--ord-*` wholesale-replaces the `entry_idx` row; supplying `--match` replaces the FTS row; supplying `--search` replaces the vec row. Deleting an entry cascade-cleans every sidecar via a DB trigger.
 
 ## Quickstart
 
@@ -65,8 +65,8 @@ grimoire mount create
 grimoire entry add \
     --data '{"habitat": "volcano"}' \
     --ref phoenix-001 \
-    --nom-1 creature \
-    --ord-1 1.0 \
+    --ord-1 creature \
+    --ord-2 1.0 \
     --match "phoenix fire-bird ashes" \
     --search "A solar phoenix reborn from its own ashes at dawn"
 
@@ -75,7 +75,7 @@ grimoire search "creatures that come back from the dead"
 grimoire match "phoenix"
 
 # Browse entry_idx rows with filters.
-grimoire query --equals nominal_1=creature --gte ordinal_1=0.5
+grimoire query --equals ordinal_1=creature --gte ordinal_2=0.5
 
 # Look up entries by external reference.
 grimoire fetch phoenix-001
@@ -124,6 +124,10 @@ Delete a single named database file from the mount. The model cache and other da
 
 Show metadata for a database: embedder lock (`model`, `dimension`), `schema_version`, per-table row counts (`entry_count`, `entry_idx_count`, `entry_fts_count`, `entry_vec_count`), file path, file size. Does not load the embedder.
 
+#### `grimoire analyze [--db <name>]`
+
+Run SQLite's `ANALYZE` to refresh `sqlite_stat1`. The rotation composite indexes on `entry_idx` rely on accurate selectivity stats for the planner to pick among them — run after bulk loads or whenever the data distribution shifts. Prints `{"db": <name|null>, "analyzed": true}` on success.
+
 ### Entry CRUD
 
 #### `grimoire entry add [options]`
@@ -135,12 +139,11 @@ Create an entry and optionally PUT-index its sidecars in one call.
 | `--db`, `-d` | Target a named DB. Omit for the default. |
 | `--data` | JSON value stored in `entry.data` (object, array, scalar, or null). |
 | `--ref` | `entry_idx.uniq_ref` value. |
-| `--nom-1`, `--nom-2` | `entry_idx.nominal_1` / `nominal_2` values. |
-| `--ord-1`, `--ord-2`, `--ord-3` | `entry_idx.ordinal_1` / `ordinal_2` / `ordinal_3` (REAL) values. |
+| `--ord-1` .. `--ord-5` | `entry_idx.ordinal_N` values. Each value is coerced int → float → string, so a numeric literal stores as a number and anything else stores as text. |
 | `--match` | Text written to the FTS5 row. PUT-replaces the entry's `entry_fts` row. |
 | `--search` | Text embedded via the bundled embedder. PUT-replaces the entry's `entry_vec` row. |
 
-Supplying any of `--ref`, `--nom-*`, `--ord-*` PUT-replaces the entry's `entry_idx` row; omitted columns become NULL. Omit all three to leave `entry_idx` untouched.
+Supplying any of `--ref` or `--ord-*` PUT-replaces the entry's `entry_idx` row; omitted columns become NULL. Omit them all to leave `entry_idx` untouched.
 
 #### `grimoire entry update <uniq_id> [options]`
 
@@ -165,9 +168,9 @@ Browse `entry_idx` rows ordered by `uniq_id` ASC, joined to `entry` for the data
 | Option | Behavior |
 |---|---|
 | `--db`, `-d` | Target a named DB. |
-| `--equals KEY=VAL` | Filter `entry_idx.<KEY> IN (...)`. Repeatable. Valid keys: any of the seven `entry_idx` columns. |
-| `--gte KEY=NUMBER` | Filter `entry_idx.<KEY> >= NUMBER`. Repeatable. Valid keys: `ordinal_1`/`ordinal_2`/`ordinal_3`. |
-| `--lte KEY=NUMBER` | Filter `entry_idx.<KEY> <= NUMBER`. Repeatable. |
+| `--equals KEY=VALUE` | Filter `entry_idx.<KEY> IN (...)`. Repeatable. Valid keys: any `entry_idx` column. Value is coerced int → float → string. |
+| `--gte KEY=VALUE` | Filter `entry_idx.<KEY> >= VALUE`. Repeatable. Valid keys: `ordinal_1`..`ordinal_5`. Same coercion as `--equals`. |
+| `--lte KEY=VALUE` | Filter `entry_idx.<KEY> <= VALUE`. Repeatable. |
 | `--cursor` | Return rows with `uniq_id > <cursor>`. Pass the last id of the previous page. |
 | `--limit` | Maximum rows (default 100). |
 
@@ -178,7 +181,7 @@ grimoire query --limit 100 --cursor "$LAST"
 
 #### `grimoire fetch <uniq_ref> [<uniq_ref>...]`
 
-Fetch entries whose `entry_idx.uniq_ref` is in the given list. Returns `[{"entry": {...}, "index": {...}}, ...]`. `uniq_ref` is non-unique (multiple entries may share one); entries without an `entry_idx` row are invisible to `fetch`.
+Fetch entries whose `entry_idx.uniq_ref` is in the given list. Returns `[{"entry": {...}, "index": {...}}, ...]`. `uniq_ref` is sparse-unique (UNIQUE partial index over the non-NULL rows), so each ref maps to at most one entry; entries without an `entry_idx` row are invisible to `fetch`.
 
 #### `grimoire match <query> [filters] [--limit <n>]`
 

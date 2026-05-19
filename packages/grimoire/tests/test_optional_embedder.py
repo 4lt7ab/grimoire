@@ -71,7 +71,7 @@ def test_index_match_works_without_embedder(tmp_path):
 def test_index_idx_only_works_without_embedder(tmp_path):
     with Grimoire.open(tmp_path / "g.db") as g:
         [e] = g.add([Entry(None, None)])
-        g.index(e.uniq_id, ref="r", nom=("a", "b"), ord=(1.0, 2.0, 3.0))
+        g.index(e.uniq_id, ref="r", ord=(1.0, 2.0, 3.0, "a", "b"))
 
         _, indexes = g.query()
         assert indexes[0].uniq_ref == "r"

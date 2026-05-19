@@ -10,7 +10,7 @@ Terms used across grimoire's code and docs, alphabetical.
 
 **Entry.** The identity row in `entry`: `(uniq_id, data)`. No filterable or searchable text lives on the entry — those are sidecars.
 
-**`entry_idx`.** The typed filterable/sortable metadata sidecar. One row per indexed entry. Columns: `uniq_id` (PK), `uniq_ref`, `nominal_1`, `nominal_2`, `ordinal_1`, `ordinal_2`, `ordinal_3`. Written by `index(uniq_id, ref=..., nom=..., ord=...)`; cleaned by the entry-delete trigger.
+**`entry_idx`.** The filterable/sortable metadata sidecar. One row per indexed entry. Columns: `uniq_id` (PK), `uniq_ref`, and five symmetric `ordinal_1`..`ordinal_5` columns (BLOB-affinity — any storage class accepted). Written by `index(uniq_id, ref=..., ord=...)`; cleaned by the entry-delete trigger.
 
 **`entry_fts`.** The FTS5 keyword sidecar. One row per FTS-indexed entry holding `(uniq_id, text)`. Written by `index(uniq_id, match=...)`; cleaned by the entry-delete trigger. An entry without an `entry_fts` row is invisible to `match`.
 
@@ -18,19 +18,19 @@ Terms used across grimoire's code and docs, alphabetical.
 
 **`entry_delete_cascade`.** The `AFTER DELETE ON entry FOR EACH ROW` SQLite trigger that removes matching `uniq_id` rows from `entry_idx`, `entry_fts`, and `entry_vec`. Deleting an entry is the only public way to drop sidecar rows.
 
-**Fetch.** `Grimoire.fetch(uniq_refs)`. Looks up entries by `entry_idx.uniq_ref` (external reference). Returns parallel `(entries, indexes)` lists. `uniq_ref` is non-unique, so the result may include more entries than refs.
+**Analyze.** `Grimoire.analyze()`. Runs SQLite's `ANALYZE` to refresh planner statistics. Run after bulk loads or distribution shifts so the planner can pick among the rotation composite indexes on `entry_idx` by selectivity.
+
+**Fetch.** `Grimoire.fetch(uniq_refs)`. Looks up entries by `entry_idx.uniq_ref` (external reference). Returns parallel `(entries, indexes)` lists. `uniq_ref` is sparse-unique (UNIQUE index over the non-NULL rows), so each ref maps to at most one entry.
 
 **FTS5.** SQLite's bundled full-text search extension. Powers `entry_fts` and `match`. Ranks by BM25.
 
-**Index.** `Grimoire.index(uniq_id, *, ref, ord, nom, match, search)`. The combined sidecar writer. PUT-style: each supplied kwarg wholesale-replaces the corresponding sidecar row; omitted kwargs leave that side alone.
+**Index.** `Grimoire.index(uniq_id, *, ref, ord, match, search)`. The combined sidecar writer. PUT-style: each supplied kwarg wholesale-replaces the corresponding sidecar row; omitted kwargs leave that side alone. `ord` is a 5-tuple addressing `ordinal_1`..`ordinal_5`; in-tuple `None` writes NULL to that column.
 
-**Match.** `Grimoire.match(query, filters=None, limit=None)`. FTS5 BM25 keyword search. Returns parallel `(entries, hits)` lists in rank order. `KeywordHit.score` is `-bm25` so higher = better.
+**Match.** `Grimoire.match(query, filters=None, limit=10)`. FTS5 BM25 keyword search. Returns parallel `(entries, hits)` lists in rank order. `limit` defaults to 10; pass `None` to return every hit. `KeywordHit.score` is `-bm25` so higher = better.
 
 **Mount.** Directory holding one default `grimoire.db`, optional named-subdirectory databases, a shared `__models__/` embedder cache, and a reserved `grimoire.toml` registry. The library publishes the convention via `grimoire.mount.Mount`; the CLI resolves a mount path from `--mount`, `$GRIMOIRE_MOUNT`, or `~/.grimoire`.
 
-**`nominal_1` / `nominal_2`.** Two consumer-defined TEXT columns on `entry_idx`. Used for categorical labels (e.g., type, status, owner). Indexed; nullable. Filterable via `Filters.equals`.
-
-**`ordinal_1` / `ordinal_2` / `ordinal_3`.** Three consumer-defined REAL columns on `entry_idx`. Used for sortable numerics (e.g., timestamps, scores, measurements). Indexed; nullable. Filterable via `Filters.equals`, `Filters.gte`, `Filters.lte`.
+**`ordinal_1` .. `ordinal_5`.** Five consumer-defined columns on `entry_idx`. No declared type (BLOB-affinity): store any JSON-serializable scalar — categorical labels (`"draft"`, `"note"`), numeric measurements (timestamps, scores), or any other ordered value. Indexed; nullable. Filterable via `Filters.equals`, `Filters.gte`, `Filters.lte`. Comparison within a column follows SQLite's storage-class precedence; callers typically stick to one type per column.
 
 **Peek.** A read-only inspection of a database that returns model, dimension, schema version, and per-table row counts without binding an embedder. Exposed as `Grimoire.peek(path)`.
 
@@ -46,4 +46,4 @@ Terms used across grimoire's code and docs, alphabetical.
 
 **`uniq_id`.** Primary key on `entry` and on all three sidecars. Library-assigned ULID at `add()` time.
 
-**`uniq_ref`.** Indexed (but non-unique) TEXT column on `entry_idx` for external reference. Looked up by `Grimoire.fetch(uniq_refs)`.
+**`uniq_ref`.** Sparse-unique TEXT column on `entry_idx` for external reference: a UNIQUE partial index covers the non-NULL rows, so any given non-NULL `uniq_ref` belongs to at most one entry. Looked up by `Grimoire.fetch(uniq_refs)`.

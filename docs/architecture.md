@@ -29,8 +29,8 @@ The CLI imports the library directly. There is no IPC, RPC, or daemon. The MCP s
 
 One identity table, three sidecars, one meta table:
 
-- **`entry`** — `(uniq_id, data)`. The identity row. `uniq_id` is a ULID; `data` is a JSON-serialized value (object, array, scalar, or null), library-encoded on write and decoded on read.
-- **`entry_idx`** — typed filterable/sortable metadata. Columns: `uniq_id` (PK), `uniq_ref` (TEXT), `nominal_1`, `nominal_2` (TEXT), `ordinal_1`, `ordinal_2`, `ordinal_3` (REAL). All columns except `uniq_id` are nullable; each non-PK column is indexed.
+- **`entry`** — `(uniq_id, data)`. The identity row, `WITHOUT ROWID` so PK seeks skip the rowid indirection. `uniq_id` is a ULID; `data` is a JSON-serialized value (object, array, scalar, or null), library-encoded on write and decoded on read.
+- **`entry_idx`** — filterable/sortable metadata, `WITHOUT ROWID`. Columns: `uniq_id` (PK), `uniq_ref` (TEXT), and five symmetric `ordinal_1`..`ordinal_5` columns with no declared type — BLOB-affinity, so SQLite stores each value in its native storage class and comparison follows class precedence (`NULL < INT/REAL < TEXT < BLOB`). All columns except `uniq_id` are nullable. Indexes are all partial (`WHERE col IS NOT NULL`) to skip rows that equality and range predicates would never match: a UNIQUE partial index on `uniq_ref`, plus a five-rotation composite set — `(ordinal_1, ordinal_2, ordinal_3, ordinal_4, ordinal_5)`, `(ordinal_2, ordinal_3, ordinal_4, ordinal_5, ordinal_1)`, and so on — so every non-empty subset of the ordinals has a leading-prefix seek on at least one index. The planner picks among the rotations by selectivity, which is why `ANALYZE` matters after bulk loads.
 - **`entry_fts`** — virtual FTS5 table holding `(uniq_id, text)`. One row per FTS-indexed entry.
 - **`entry_vec`** — virtual vec0 table holding `(uniq_id, text, embedding)`. One row per semantically-indexed entry.
 - **`meta`** — key/value pairs recording the embedder lock (`model`, `dimension`) at create time.

@@ -120,8 +120,8 @@ def test_entry_add_with_all_index_kwargs(mounted):
             "entry", "add",
             "--data", '{"k": "v"}',
             "--ref", "book-1",
-            "--nom-1", "novel",
-            "--nom-2", "fantasy",
+            "--ord-4", "novel",
+            "--ord-5", "fantasy",
             "--ord-1", "1954",
             "--ord-2", "2.5",
             "--match", "fellowship ring",
@@ -134,9 +134,10 @@ def test_entry_add_with_all_index_kwargs(mounted):
     pairs = json.loads(runner.invoke(app, ["fetch", "book-1"]).output)
     assert len(pairs) == 1
     assert pairs[0]["entry"]["uniq_id"] == uniq_id
-    assert pairs[0]["index"]["nominal_1"] == "novel"
-    assert pairs[0]["index"]["nominal_2"] == "fantasy"
-    assert pairs[0]["index"]["ordinal_1"] == 1954.0
+    assert pairs[0]["index"]["ordinal_4"] == "novel"
+    assert pairs[0]["index"]["ordinal_5"] == "fantasy"
+    assert pairs[0]["index"]["ordinal_1"] == 1954
+    assert pairs[0]["index"]["ordinal_2"] == 2.5
 
 
 def test_entry_add_with_named_db(mounted):
@@ -299,18 +300,18 @@ def test_info_targets_named_db(mounted):
 
 
 def test_query_returns_pairs(mounted):
-    uniq_id = _add("--ref", "r1", "--nom-1", "x")
+    uniq_id = _add("--ref", "r1", "--ord-4", "x")
     result = runner.invoke(app, ["query"])
     pairs = json.loads(result.output)
     assert len(pairs) == 1
     assert pairs[0]["entry"]["uniq_id"] == uniq_id
-    assert pairs[0]["index"]["nominal_1"] == "x"
+    assert pairs[0]["index"]["ordinal_4"] == "x"
 
 
 def test_query_filters_by_equals(mounted):
-    _add("--ref", "a", "--nom-1", "x")
-    _add("--ref", "b", "--nom-1", "y")
-    result = runner.invoke(app, ["query", "--equals", "nominal_1=x"])
+    _add("--ref", "a", "--ord-4", "x")
+    _add("--ref", "b", "--ord-4", "y")
+    result = runner.invoke(app, ["query", "--equals", "ordinal_4=x"])
     pairs = json.loads(result.output)
     assert [p["index"]["uniq_ref"] for p in pairs] == ["a"]
 
@@ -406,11 +407,11 @@ def test_match_all_punctuation_returns_empty(mounted):
 
 
 def test_match_filters_by_idx(mounted):
-    a = _add("--match", "phoenix", "--nom-1", "alpha")
-    _add("--match", "phoenix", "--nom-1", "beta")
+    a = _add("--match", "phoenix", "--ord-4", "alpha")
+    _add("--match", "phoenix", "--ord-4", "beta")
     pairs = json.loads(
         runner.invoke(
-            app, ["match", "phoenix", "--equals", "nominal_1=alpha"]
+            app, ["match", "phoenix", "--equals", "ordinal_4=alpha"]
         ).output
     )
     assert [p["entry"]["uniq_id"] for p in pairs] == [a]

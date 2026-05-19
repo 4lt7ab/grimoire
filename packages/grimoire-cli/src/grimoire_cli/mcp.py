@@ -14,7 +14,7 @@ from fastmcp import FastMCP
 from grimoire.data.entry import Entry, EntryIndex, Filters
 from grimoire.grimoire import Grimoire
 
-from grimoire_cli import embed, mount
+from grimoire_cli import embed, mount, telemetry
 
 
 def _resolve_db(mnt: mount.Mount, db: str | None) -> Path:
@@ -44,8 +44,8 @@ def _tokenize_fts(query: str) -> str:
 
 def _build_filters(
     equals: dict[str, list[Any]] | None,
-    gte: dict[str, float] | None,
-    lte: dict[str, float] | None,
+    gte: dict[str, Any] | None,
+    lte: dict[str, Any] | None,
 ) -> Filters | None:
     if not (equals or gte or lte):
         return None
@@ -61,9 +61,7 @@ def _pair_index(
     ]
 
 
-def _pair_hits(
-    entries: list[Entry], hits: list, key: str
-) -> list[dict[str, Any]]:
+def _pair_hits(entries: list[Entry], hits: list, key: str) -> list[dict[str, Any]]:
     return [
         {"entry": asdict(e), key: getattr(h, key)}
         for e, h in zip(entries, hits, strict=True)
@@ -71,32 +69,25 @@ def _pair_hits(
 
 
 def _coerce_ord(
-    ord_: list[float | None] | None,
-) -> tuple[float | None, float | None, float | None] | None:
+    ord_: list[Any] | None,
+) -> tuple[Any, Any, Any, Any, Any] | None:
     if ord_ is None:
         return None
-    if len(ord_) != 3:
-        raise ValueError("`ord` must be a 3-element list")
-    return (ord_[0], ord_[1], ord_[2])
-
-
-def _coerce_nom(
-    nom: list[str | None] | None,
-) -> tuple[str | None, str | None] | None:
-    if nom is None:
-        return None
-    if len(nom) != 2:
-        raise ValueError("`nom` must be a 2-element list")
-    return (nom[0], nom[1])
+    if len(ord_) != 5:
+        raise ValueError("`ord` must be a 5-element list")
+    return (ord_[0], ord_[1], ord_[2], ord_[3], ord_[4])
 
 
 def build_server(mnt: mount.Mount) -> FastMCP:
     """Construct a FastMCP server exposing the grimoire mount's read+write surface."""
     mcp = FastMCP("grimoire")
+    tel = telemetry.build_telemetry()
 
     def _open(db: str | None) -> Grimoire:
         return Grimoire.open(
-            _resolve_db(mnt, db), embedder=embed.build_embedder(mnt.models_dir)
+            _resolve_db(mnt, db),
+            embedder=embed.build_embedder(mnt.models_dir),
+            telemetry=tel,
         )
 
     # ------------------------------------------------------------------
@@ -130,8 +121,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
     def add(
         data: Any = None,
         ref: str | None = None,
-        ord: list[float | None] | None = None,
-        nom: list[str | None] | None = None,
+        ord: list[Any] | None = None,
         match: str | None = None,
         search: str | None = None,
         db: str | None = None,
@@ -140,23 +130,22 @@ def build_server(mnt: mount.Mount) -> FastMCP:
 
         `data` is a JSON-serializable value stored in entry.data.
 
-        The remaining kwargs are forwarded to `index()`. Supplying any of
-        `ref`/`ord`/`nom` PUT-replaces the entry_idx row (omitted columns
-        become NULL). `ord` is a 3-element list of `[ord_1, ord_2, ord_3]`,
-        `nom` is a 2-element list `[nom_1, nom_2]`; in-list nulls write
-        NULL to that column. `match` replaces the entry_fts row; `search`
-        embeds the text and replaces the entry_vec row.
+        The remaining kwargs are forwarded to `index()`. Supplying either of
+        `ref` or `ord` PUT-replaces the entry_idx row (omitted columns
+        become NULL). `ord` is a 5-element list
+        `[ordinal_1, ordinal_2, ordinal_3, ordinal_4, ordinal_5]`; in-list
+        nulls write NULL to that column. The columns are BLOB-affinity, so
+        any JSON-serializable scalar is stored verbatim. `match` replaces
+        the entry_fts row; `search` embeds the text and replaces the
+        entry_vec row.
         """
         with _open(db) as g:
             [created] = g.add([Entry(uniq_id=None, data=data)])
-            if any(
-                v is not None for v in (ref, ord, nom, match, search)
-            ):
+            if any(v is not None for v in (ref, ord, match, search)):
                 g.index(
                     created.uniq_id,
                     ref=ref,
                     ord=_coerce_ord(ord),
-                    nom=_coerce_nom(nom),
                     match=match,
                     search=search,
                 )
@@ -167,8 +156,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         uniq_id: str,
         data: Any = None,
         ref: str | None = None,
-        ord: list[float | None] | None = None,
-        nom: list[str | None] | None = None,
+        ord: list[Any] | None = None,
         match: str | None = None,
         search: str | None = None,
         db: str | None = None,
@@ -178,8 +166,8 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         - `data`: replaces the entry's `data` column. **Pass `null` (or
           omit) to leave it alone** — MCP/JSON can't distinguish those two
           cases, so to explicitly null `data`, drop to the CLI or library.
-        - `ref`, `ord`, `nom`, `match`, `search`: same PUT semantics as
-          `add`. Supplying any of `ref`/`ord`/`nom` wholesale-replaces the
+        - `ref`, `ord`, `match`, `search`: same PUT semantics as `add`.
+          Supplying either of `ref` or `ord` wholesale-replaces the
           `entry_idx` row; omitted columns become NULL.
 
         The entry must already exist; otherwise raises.
@@ -196,12 +184,11 @@ def build_server(mnt: mount.Mount) -> FastMCP:
                     raise ValueError(f"No entry with uniq_id {uniq_id!r}")
                 current = existing[0]
 
-            if any(v is not None for v in (ref, ord, nom, match, search)):
+            if any(v is not None for v in (ref, ord, match, search)):
                 g.index(
                     uniq_id,
                     ref=ref,
                     ord=_coerce_ord(ord),
-                    nom=_coerce_nom(nom),
                     match=match,
                     search=search,
                 )
@@ -229,8 +216,8 @@ def build_server(mnt: mount.Mount) -> FastMCP:
     @mcp.tool
     def query(
         equals: dict[str, list[Any]] | None = None,
-        gte: dict[str, float] | None = None,
-        lte: dict[str, float] | None = None,
+        gte: dict[str, Any] | None = None,
+        lte: dict[str, Any] | None = None,
         cursor: str | None = None,
         limit: int = 100,
         db: str | None = None,
@@ -241,8 +228,10 @@ def build_server(mnt: mount.Mount) -> FastMCP:
 
         - `equals` keys may name any entry_idx column; the entry must match
           one of the listed values for that column.
-        - `gte` / `lte` keys must name one of `ordinal_1`/`ordinal_2`/
-          `ordinal_3` and apply numeric bounds.
+        - `gte` / `lte` keys must name one of `ordinal_1`..`ordinal_5` and
+          apply `>= value` / `<= value`. Values may be any type SQLite can
+          compare; comparison follows class precedence (NULL < INT/REAL <
+          TEXT < BLOB).
         - `cursor` pages by id (`uniq_id > cursor`); pair with the default
           ordering for forward paging.
         """
@@ -255,10 +244,9 @@ def build_server(mnt: mount.Mount) -> FastMCP:
     def fetch(uniq_refs: list[str], db: str | None = None) -> list[dict[str, Any]]:
         """Fetch entries whose entry_idx row has uniq_ref in the given list.
 
-        Returns `[{entry, index}, ...]`. Entries without an entry_idx row
-        are excluded. Multiple entries may share a uniq_ref (no uniqueness
-        constraint), so the result may contain more rows than refs were
-        passed.
+        Returns `[{entry, index}, ...]`. `uniq_ref` is sparse-unique (UNIQUE
+        partial index over the non-NULL rows), so each ref maps to at most
+        one entry; entries without an entry_idx row are excluded.
         """
         with _open(db) as g:
             entries, indexes = g.fetch(uniq_refs)
@@ -268,8 +256,8 @@ def build_server(mnt: mount.Mount) -> FastMCP:
     def match(
         query: str,
         equals: dict[str, list[Any]] | None = None,
-        gte: dict[str, float] | None = None,
-        lte: dict[str, float] | None = None,
+        gte: dict[str, Any] | None = None,
+        lte: dict[str, Any] | None = None,
         limit: int = 10,
         db: str | None = None,
     ) -> list[dict[str, Any]]:
