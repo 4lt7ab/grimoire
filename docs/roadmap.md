@@ -17,9 +17,9 @@ Nothing runs without a human today. Make correctness checks automatic.
 
 Documented contracts that currently have no test.
 
-- [ ] `SchemaVersionError` — the version-mismatch / recreate-the-file path is untested
+- [x] `SchemaVersionError` — the version-mismatch / recreate-the-file path is untested
 - [x] `limit` is a positive int across all reads — `None`/unbounded dropped, `<= 0` rejected
-- [ ] `check_same_thread=False` cross-thread use
+- [x] `check_same_thread=False` cross-thread use
 - [x] Opt-in, marked integration test against the real `FastembedEmbedder` (skipped by default, network-gated)
 - [ ] Set a coverage floor once `pytest-cov` lands
 

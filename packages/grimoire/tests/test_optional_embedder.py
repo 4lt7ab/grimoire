@@ -1,6 +1,8 @@
+import sqlite3
+
 import pytest
 from grimoire.data.entry import Entry
-from grimoire.errors import EmbedderRequired, GrimoireMismatch
+from grimoire.errors import EmbedderRequired, GrimoireMismatch, SchemaVersionError
 from grimoire.grimoire import Grimoire
 
 
@@ -75,3 +77,28 @@ def test_index_idx_only_works_without_embedder(tmp_path):
 
         _, indexes = g.query()
         assert indexes[0].uniq_ref == "r"
+
+
+def _stamp_version(path, version):
+    bare = sqlite3.connect(path)
+    bare.execute(f"PRAGMA user_version = {version}")
+    bare.commit()
+    bare.close()
+
+
+def test_reopen_with_mismatched_schema_version_raises(tmp_path, fake_embedder):
+    db = tmp_path / "g.db"
+    Grimoire.open(db, embedder=fake_embedder).__exit__(None, None, None)
+    _stamp_version(db, 2)
+
+    with pytest.raises(SchemaVersionError):
+        Grimoire.open(db, embedder=fake_embedder)
+
+
+def test_peek_with_mismatched_schema_version_raises(tmp_path, fake_embedder):
+    db = tmp_path / "g.db"
+    Grimoire.open(db, embedder=fake_embedder).__exit__(None, None, None)
+    _stamp_version(db, 2)
+
+    with pytest.raises(SchemaVersionError):
+        Grimoire.peek(db)
