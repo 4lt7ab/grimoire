@@ -97,10 +97,9 @@ class Grimoire:
                 schema.validate(conn)
                 if embedder is not None:
                     stored_model = meta.fetch(conn, "model")
-                    stored_dimension = int(meta.fetch(conn, "dimension"))
-                    if (
-                        stored_model != embedder.model
-                        or stored_dimension != embedder.dimension
+                    stored_dimension = meta.fetch(conn, "dimension")
+                    if stored_model != embedder.model or stored_dimension != str(
+                        embedder.dimension
                     ):
                         raise GrimoireMismatch(
                             f"Embedder reports model={embedder.model!r}"
@@ -165,7 +164,7 @@ class Grimoire:
     def __enter__(self) -> Grimoire:
         return self
 
-    def __exit__(self, exc_type, *_) -> None:
+    def __exit__(self, exc_type: type[BaseException] | None, *_: object) -> None:
         if exc_type is None:
             self._conn.commit()
         else:

@@ -11,7 +11,6 @@ embeddings produce a *meaningful* distance ordering.
 """
 
 import pytest
-
 from grimoire.data.entry import Entry
 from grimoire.embed import FastembedEmbedder
 from grimoire.grimoire import Grimoire

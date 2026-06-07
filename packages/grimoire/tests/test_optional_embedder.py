@@ -16,9 +16,7 @@ def test_open_fresh_file_without_embedder_locks_to_noop(tmp_path):
     assert peeked.dimension == 1
 
 
-def test_open_existing_file_without_embedder_skips_validation(
-    tmp_path, fake_embedder
-):
+def test_open_existing_file_without_embedder_skips_validation(tmp_path, fake_embedder):
     db = tmp_path / "g.db"
     with Grimoire.open(db, embedder=fake_embedder) as g:
         g.add([Entry(None, {"k": "v"})])
@@ -56,9 +54,8 @@ def test_index_search_without_embedder_raises(tmp_path):
 
 
 def test_search_without_embedder_raises(tmp_path):
-    with Grimoire.open(tmp_path / "g.db") as g:
-        with pytest.raises(EmbedderRequired):
-            g.search("anything")
+    with Grimoire.open(tmp_path / "g.db") as g, pytest.raises(EmbedderRequired):
+        g.search("anything")
 
 
 def test_index_match_works_without_embedder(tmp_path):

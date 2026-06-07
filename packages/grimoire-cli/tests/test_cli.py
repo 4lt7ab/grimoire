@@ -117,15 +117,24 @@ def test_entry_add_with_all_index_kwargs(mounted):
     add = runner.invoke(
         app,
         [
-            "entry", "add",
-            "--data", '{"k": "v"}',
-            "--ref", "book-1",
-            "--ord-4", "novel",
-            "--ord-5", "fantasy",
-            "--ord-1", "1954",
-            "--ord-2", "2.5",
-            "--match", "fellowship ring",
-            "--search", "an epic quest",
+            "entry",
+            "add",
+            "--data",
+            '{"k": "v"}',
+            "--ref",
+            "book-1",
+            "--ord-4",
+            "novel",
+            "--ord-5",
+            "fantasy",
+            "--ord-1",
+            "1954",
+            "--ord-2",
+            "2.5",
+            "--match",
+            "fellowship ring",
+            "--search",
+            "an epic quest",
         ],
     )
     assert add.exit_code == 0, add.output
@@ -204,9 +213,7 @@ def test_entry_update_no_data_leaves_data_alone(mounted):
 
 def test_entry_update_index_kwargs_apply(mounted):
     uniq_id = _add("--data", '{"v": 1}')
-    runner.invoke(
-        app, ["entry", "update", uniq_id, "--ref", "newref", "--match", "kw"]
-    )
+    runner.invoke(app, ["entry", "update", uniq_id, "--ref", "newref", "--match", "kw"])
     pairs = json.loads(runner.invoke(app, ["fetch", "newref"]).output)
     assert pairs[0]["entry"]["uniq_id"] == uniq_id
 
@@ -221,9 +228,7 @@ def test_entry_update_unknown_id_errors(mounted):
 
 def test_entry_update_invalid_data_json(mounted):
     uniq_id = _add()
-    result = runner.invoke(
-        app, ["entry", "update", uniq_id, "--data", "not-json"]
-    )
+    result = runner.invoke(app, ["entry", "update", uniq_id, "--data", "not-json"])
     assert result.exit_code != 0
     assert "Invalid JSON" in result.output
 
@@ -287,9 +292,7 @@ def test_info_counts_per_table(mounted):
 def test_info_targets_named_db(mounted):
     runner.invoke(app, ["mount", "add", "spellbook"])
     _add(db="spellbook")
-    info = json.loads(
-        runner.invoke(app, ["info", "-d", "spellbook"]).output
-    )
+    info = json.loads(runner.invoke(app, ["info", "-d", "spellbook"]).output)
     assert info["db"] == "spellbook"
     assert info["entry_count"] == 1
 
@@ -333,9 +336,7 @@ def test_query_cursor_paginates(mounted):
     page1_ids = [p["entry"]["uniq_id"] for p in page1]
     assert page1_ids == ids[:2]
     page2 = json.loads(
-        runner.invoke(
-            app, ["query", "--limit", "2", "--cursor", page1_ids[-1]]
-        ).output
+        runner.invoke(app, ["query", "--limit", "2", "--cursor", page1_ids[-1]]).output
     )
     assert [p["entry"]["uniq_id"] for p in page2] == ids[2:4]
 
@@ -393,9 +394,7 @@ def test_match_returns_score(mounted):
 
 def test_match_tokenizer_handles_apostrophes(mounted):
     uniq_id = _add("--match", "happening mate")
-    pairs = json.loads(
-        runner.invoke(app, ["match", "what's going on mate?"]).output
-    )
+    pairs = json.loads(runner.invoke(app, ["match", "what's going on mate?"]).output)
     assert any(p["entry"]["uniq_id"] == uniq_id for p in pairs)
 
 
@@ -410,9 +409,7 @@ def test_match_filters_by_idx(mounted):
     a = _add("--match", "phoenix", "--ord-4", "alpha")
     _add("--match", "phoenix", "--ord-4", "beta")
     pairs = json.loads(
-        runner.invoke(
-            app, ["match", "phoenix", "--equals", "ordinal_4=alpha"]
-        ).output
+        runner.invoke(app, ["match", "phoenix", "--equals", "ordinal_4=alpha"]).output
     )
     assert [p["entry"]["uniq_id"] for p in pairs] == [a]
 
@@ -427,9 +424,7 @@ def test_match_default_limit(mounted):
 def test_match_respects_limit(mounted):
     for _ in range(5):
         _add("--match", "phoenix")
-    pairs = json.loads(
-        runner.invoke(app, ["match", "phoenix", "--limit", "2"]).output
-    )
+    pairs = json.loads(runner.invoke(app, ["match", "phoenix", "--limit", "2"]).output)
     assert len(pairs) == 2
 
 

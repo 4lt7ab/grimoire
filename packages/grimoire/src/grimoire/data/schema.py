@@ -78,7 +78,7 @@ def create(conn: sqlite3.Connection, *, model: str, dimension: int) -> None:
 
 
 def read_version(conn: sqlite3.Connection) -> int:
-    return conn.execute("PRAGMA user_version").fetchone()[0]
+    return int(conn.execute("PRAGMA user_version").fetchone()[0])
 
 
 def validate(conn: sqlite3.Connection) -> None:

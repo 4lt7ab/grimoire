@@ -61,7 +61,7 @@ def _pair_index(
     ]
 
 
-def _pair_hits(entries: list[Entry], hits: list, key: str) -> list[dict[str, Any]]:
+def _pair_hits(entries: list[Entry], hits: list[Any], key: str) -> list[dict[str, Any]]:
     return [
         {"entry": asdict(e), key: getattr(h, key)}
         for e, h in zip(entries, hits, strict=True)
@@ -141,6 +141,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         """
         with _open(db) as g:
             [created] = g.add([Entry(uniq_id=None, data=data)])
+            assert created.uniq_id is not None  # add() always assigns a ULID
             if any(v is not None for v in (ref, ord, match, search)):
                 g.index(
                     created.uniq_id,

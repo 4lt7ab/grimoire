@@ -2,7 +2,6 @@ import pytest
 from grimoire.data.entry import Entry, Filters
 from grimoire.grimoire import Grimoire
 
-
 # ----------------------------------------------------------------------
 # entry CRUD
 # ----------------------------------------------------------------------
@@ -230,9 +229,7 @@ def test_query_filters_by_ordinal_range(tmp_path, fake_embedder):
         g.index(e.uniq_id, ord=(v, None, None, None, None))
         saved.append((e.uniq_id, v))
 
-    _, indexes = g.query(
-        Filters(gte={"ordinal_1": 2.0}, lte={"ordinal_1": 7.0})
-    )
+    _, indexes = g.query(Filters(gte={"ordinal_1": 2.0}, lte={"ordinal_1": 7.0}))
     assert {i.ordinal_1 for i in indexes} == {5.0}
 
 
@@ -242,9 +239,7 @@ def test_query_filters_by_text_ordinal_range(tmp_path, fake_embedder):
         [e] = g.add([Entry(None, None)])
         g.index(e.uniq_id, ord=(tag, None, None, None, None))
 
-    _, indexes = g.query(
-        Filters(gte={"ordinal_1": "b"}, lte={"ordinal_1": "n"})
-    )
+    _, indexes = g.query(Filters(gte={"ordinal_1": "b"}, lte={"ordinal_1": "n"}))
     assert {i.ordinal_1 for i in indexes} == {"mike"}
 
 
@@ -355,9 +350,7 @@ def test_match_filters_via_idx_join(tmp_path, fake_embedder):
     g.index(a.uniq_id, ord=("alpha", None, None, None, None), match="phoenix")
     g.index(b.uniq_id, ord=("beta", None, None, None, None), match="phoenix")
 
-    entries, _ = g.match(
-        "phoenix", filters=Filters(equals={"ordinal_1": ["alpha"]})
-    )
+    entries, _ = g.match("phoenix", filters=Filters(equals={"ordinal_1": ["alpha"]}))
     assert [e.uniq_id for e in entries] == [a.uniq_id]
 
 

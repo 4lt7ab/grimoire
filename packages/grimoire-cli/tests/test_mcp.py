@@ -161,13 +161,9 @@ def test_update_combined_data_and_idx(server):
 def test_update_data_only_leaves_idx_alone(server):
     async def _go():
         async with Client(server) as client:
-            created = await client.call_tool(
-                "add", {"data": {"v": 1}, "ref": "X"}
-            )
+            created = await client.call_tool("add", {"data": {"v": 1}, "ref": "X"})
             uniq_id = created.data["uniq_id"]
-            await client.call_tool(
-                "update", {"uniq_id": uniq_id, "data": {"v": 2}}
-            )
+            await client.call_tool("update", {"uniq_id": uniq_id, "data": {"v": 2}})
             pairs = await client.call_tool("query", {})
             return pairs.data
 
@@ -181,9 +177,7 @@ def test_remove_returns_ids(server):
         async with Client(server) as client:
             created = await client.call_tool("add", {})
             uniq_id = created.data["uniq_id"]
-            removed = await client.call_tool(
-                "remove", {"uniq_ids": [uniq_id]}
-            )
+            removed = await client.call_tool("remove", {"uniq_ids": [uniq_id]})
             return uniq_id, removed.data
 
     uniq_id, removed = _run(_go())
@@ -223,9 +217,7 @@ def test_query_filters_by_equals(server):
 def test_fetch_by_uniq_ref(server):
     async def _go():
         async with Client(server) as client:
-            await client.call_tool(
-                "add", {"data": {"k": "v"}, "ref": "book-1"}
-            )
+            await client.call_tool("add", {"data": {"k": "v"}, "ref": "book-1"})
             pairs = await client.call_tool("fetch", {"uniq_refs": ["book-1"]})
             return pairs.data
 
@@ -237,9 +229,7 @@ def test_fetch_by_uniq_ref(server):
 def test_match_returns_score(server):
     async def _go():
         async with Client(server) as client:
-            created = await client.call_tool(
-                "add", {"match": "phoenix arcane ember"}
-            )
+            created = await client.call_tool("add", {"match": "phoenix arcane ember"})
             uniq_id = created.data["uniq_id"]
             hits = await client.call_tool("match", {"query": "phoenix"})
             return uniq_id, hits.data
@@ -265,9 +255,7 @@ def test_search_returns_distance(server):
 def test_info_reports_per_table_counts(server):
     async def _go():
         async with Client(server) as client:
-            await client.call_tool(
-                "add", {"ref": "r", "match": "text"}
-            )
+            await client.call_tool("add", {"ref": "r", "match": "text"})
             info = await client.call_tool("info", {})
             return info.data
 

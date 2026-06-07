@@ -11,7 +11,9 @@ _ORDINAL_COLUMNS: frozenset[str] = frozenset(
     {"ordinal_1", "ordinal_2", "ordinal_3", "ordinal_4", "ordinal_5"}
 )
 
-_ENTRY_IDX_COLUMNS: frozenset[str] = frozenset({"uniq_id", "uniq_ref"}) | _ORDINAL_COLUMNS
+_ENTRY_IDX_COLUMNS: frozenset[str] = (
+    frozenset({"uniq_id", "uniq_ref"}) | _ORDINAL_COLUMNS
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,9 +120,7 @@ def _build_where(
             if not values:
                 continue
             key = f"eq_{i}"
-            clauses.append(
-                f"{alias}.{col} IN (SELECT value FROM json_each(:{key}))"
-            )
+            clauses.append(f"{alias}.{col} IN (SELECT value FROM json_each(:{key}))")
             params[key] = json.dumps(list(values))
 
     if filters.gte:
@@ -151,8 +151,7 @@ def _build_where(
 def _check_ids_exist(conn: sqlite3.Connection, ids: list[str]) -> None:
     """Raise ValueError if any id is missing from `entry` (the identity table)."""
     existing = conn.execute(
-        "SELECT uniq_id FROM entry "
-        "WHERE uniq_id IN (SELECT value FROM json_each(?))",
+        "SELECT uniq_id FROM entry WHERE uniq_id IN (SELECT value FROM json_each(?))",
         (json.dumps(ids),),
     ).fetchall()
     known = {r["uniq_id"] for r in existing}
@@ -182,9 +181,7 @@ def add(conn: sqlite3.Connection, entries: list[Entry]) -> list[Entry]:
     return saved
 
 
-def update(
-    conn: sqlite3.Connection, entries: list[Entry]
-) -> list[Entry]:
+def update(conn: sqlite3.Connection, entries: list[Entry]) -> list[Entry]:
     """Rewrite the `data` column on existing rows, keyed by `uniq_id`.
 
     Unknown ids are silently skipped; the returned list contains only the
@@ -222,7 +219,7 @@ def remove(conn: sqlite3.Connection, uniq_ids: list[str]) -> list[str]:
 
 
 def get(conn: sqlite3.Connection, uniq_ids: list[str]) -> list[Entry]:
-    """Fetch entries by uniq_id. Returns only the ones that exist, no order guarantee."""
+    """Fetch entries by uniq_id. Returns only those that exist, no order guarantee."""
     if not uniq_ids:
         return []
     cur = conn.execute(
@@ -266,9 +263,7 @@ def fetch_by_uniq_ref(
 # ----------------------------------------------------------------------
 
 
-def entry_idx_set(
-    conn: sqlite3.Connection, indexes: list[EntryIndex]
-) -> list[str]:
+def entry_idx_set(conn: sqlite3.Connection, indexes: list[EntryIndex]) -> list[str]:
     """Insert or replace entry_idx rows. Each uniq_id must exist in `entry`.
 
     Returns the list of ids that were written.
@@ -350,9 +345,7 @@ def fetch_idx(
 # ----------------------------------------------------------------------
 
 
-def keyword(
-    conn: sqlite3.Connection, items: list[tuple[str, str]]
-) -> list[str]:
+def keyword(conn: sqlite3.Connection, items: list[tuple[str, str]]) -> list[str]:
     """Write (or replace) entry_fts rows for (uniq_id, text) pairs.
 
     Each id must exist in `entry`; text must be non-empty. Returns the

@@ -367,6 +367,7 @@ def entry_add_cmd(
 
     with _open(mnt, db) as g:
         [created] = g.add([Entry(uniq_id=None, data=data_value)])
+        assert created.uniq_id is not None  # add() always assigns a ULID
         if idx_kwargs:
             try:
                 g.index(created.uniq_id, **idx_kwargs)
@@ -524,7 +525,7 @@ _LTE_OPT = typer.Option(
 )
 
 
-def _format_entry_pair_list(entries: list, second: list, key: str) -> str:
+def _format_entry_pair_list(entries: list[Any], second: list[Any], key: str) -> str:
     """Zip parallel lists into `[{entry, <key>}, ...]` JSON."""
     if key == "index":
         return json.dumps(
