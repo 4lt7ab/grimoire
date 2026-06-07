@@ -17,7 +17,10 @@ target-version = "py312"
 select = ["E", "F", "I", "B", "UP", "SIM"]
 
 [tool.pytest.ini_options]
-addopts = ["--import-mode=importlib"]
+addopts = ["--import-mode=importlib", "-m", "not integration"]
+markers = [
+    "integration: exercises the real FastembedEmbedder; network-gated, deselected by default",
+]
 testpaths = [
     "packages/grimoire/tests",
     "packages/grimoire-cli/tests",

@@ -7,6 +7,10 @@ install:
 test:
     uv run pytest
 
+# Opt-in: real-embedder tests, deselected by default. First run fetches weights.
+test-integration:
+    HF_HUB_DISABLE_XET=1 uv run pytest -m integration
+
 lint:
     uv run ruff check
 

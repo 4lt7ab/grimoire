@@ -562,7 +562,7 @@ def query_cmd(
     ] = None,
     limit: Annotated[
         int,
-        typer.Option("--limit", help="Max rows to return.", min=0),
+        typer.Option("--limit", help="Max rows to return.", min=1),
     ] = 100,
 ) -> None:
     """Browse entry_idx rows, optionally filtered. Joins entry for the data side."""
@@ -604,7 +604,7 @@ def match_cmd(
     equals: Annotated[list[str] | None, _EQUALS_OPT] = None,
     gte: Annotated[list[str] | None, _GTE_OPT] = None,
     lte: Annotated[list[str] | None, _LTE_OPT] = None,
-    limit: Annotated[int, typer.Option("--limit", help="Max hits.", min=0)] = 10,
+    limit: Annotated[int, typer.Option("--limit", help="Max hits.", min=1)] = 10,
 ) -> None:
     """FTS5 BM25 keyword search. Filters apply via JOIN to entry_idx.
 
@@ -636,7 +636,7 @@ def search_cmd(
     ctx: typer.Context,
     query: Annotated[str, typer.Argument(help="Search query — embedded for vec0 KNN.")],
     db: Annotated[str | None, _DB_OPT] = None,
-    limit: Annotated[int, typer.Option("--limit", help="Max hits.", min=0)] = 10,
+    limit: Annotated[int, typer.Option("--limit", help="Max hits.", min=1)] = 10,
 ) -> None:
     """vec0 KNN semantic search. `distance` is raw (lower = better, non-negative)."""
     mnt = _existing_mount(ctx)

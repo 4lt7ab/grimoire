@@ -433,6 +433,11 @@ def test_match_respects_limit(mounted):
     assert len(pairs) == 2
 
 
+def test_match_rejects_limit_zero(mounted):
+    result = runner.invoke(app, ["match", "phoenix", "--limit", "0"])
+    assert result.exit_code != 0
+
+
 # ----------------------------------------------------------------------
 # search
 # ----------------------------------------------------------------------

@@ -270,6 +270,12 @@ def test_query_invalid_filter_column_raises(tmp_path, fake_embedder):
         g.query(Filters(equals={"bogus": ["x"]}))
 
 
+def test_query_rejects_limit_below_one(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    with pytest.raises(ValueError, match="limit must be >= 1"):
+        g.query(limit=0)
+
+
 def test_query_gte_rejects_non_ordinal_column(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     with pytest.raises(ValueError, match="gte filter column"):
@@ -374,6 +380,22 @@ def test_match_rejects_empty_query(tmp_path, fake_embedder):
         g.match("")
 
 
+def test_match_respects_limit(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    for _ in range(5):
+        [e] = g.add([Entry(None, None)])
+        g.index(e.uniq_id, match="phoenix")
+
+    entries, hits = g.match("phoenix", limit=2)
+    assert len(entries) == 2 and len(hits) == 2
+
+
+def test_match_rejects_limit_below_one(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    with pytest.raises(ValueError, match="limit must be >= 1"):
+        g.match("phoenix", limit=0)
+
+
 # ----------------------------------------------------------------------
 # search()
 # ----------------------------------------------------------------------
@@ -405,6 +427,12 @@ def test_search_empty_returns_empty(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     entries, hits = g.search("anything")
     assert entries == [] and hits == []
+
+
+def test_search_rejects_limit_below_one(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    with pytest.raises(ValueError, match="limit must be >= 1"):
+        g.search("anything", limit=0)
 
 
 def test_search_uses_embed_not_embed_many(tmp_path, fake_embedder):

@@ -252,12 +252,12 @@ class Grimoire:
         self,
         query: str,
         filters: Filters | None = None,
-        limit: int | None = 10,
+        limit: int = 10,
     ) -> tuple[list[Entry], list[KeywordHit]]:
         """FTS5 BM25 search. Filters apply via JOIN to entry_idx.
 
         Returns parallel `(entries, hits)` lists in BM25 rank order.
-        `limit` defaults to 10; pass `None` to return every hit.
+        `limit` defaults to 10 and must be >= 1.
         """
         with self._telemetry.span(
             "grimoire.match",

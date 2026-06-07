@@ -318,6 +318,8 @@ def fetch_idx(
     returns rows with `uniq_id > cursor`. For ordinal-window paging,
     pass `Filters(gte={...}, lte={...})`.
     """
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
     clauses, params = _build_where(filters, alias="i")
     if cursor is not None:
         clauses.append("i.uniq_id > :cursor")
@@ -381,16 +383,17 @@ def keyword_search(
     conn: sqlite3.Connection,
     query: str,
     filters: Filters | None = None,
-    limit: int | None = 10,
+    limit: int = 10,
 ) -> tuple[list[Entry], list[KeywordHit]]:
     """FTS5 BM25 search. Filters apply via JOIN to entry_idx.
 
     Returns parallel `(entries, hits)` lists in BM25 rank order. `limit`
-    defaults to 10 to avoid unbounded with-data joins; pass `None` to
-    return every hit.
+    defaults to 10 to avoid unbounded with-data joins.
     """
     if not query.strip():
         raise ValueError("search query must be non-empty")
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
 
     clauses, params = _build_where(filters, alias="i")
     sql = (
@@ -406,9 +409,8 @@ def keyword_search(
         sql += " AND " + " AND ".join(clauses)
     sql += " ORDER BY bm25(entry_fts)"
     params["query"] = query
-    if limit is not None:
-        sql += " LIMIT :limit"
-        params["limit"] = limit
+    sql += " LIMIT :limit"
+    params["limit"] = limit
 
     entries: list[Entry] = []
     hits: list[KeywordHit] = []
@@ -462,6 +464,8 @@ def semantic_search(
     nearest-first by vector distance."""
     if not embedding:
         raise ValueError("embedding must be non-empty")
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
 
     entries: list[Entry] = []
     hits: list[SemanticHit] = []
