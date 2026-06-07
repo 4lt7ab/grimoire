@@ -4,6 +4,7 @@ members = ["packages/*"]
 [dependency-groups]
 dev = [
     "pytest>=8",
+    "pytest-cov>=6",
     "ruff>=0.8",
     "fastembed>=0.4",
     "socksio>=1.0",
@@ -21,3 +22,9 @@ testpaths = [
     "packages/grimoire/tests",
     "packages/grimoire-cli/tests",
 ]
+
+[tool.coverage.run]
+source = ["grimoire", "grimoire_cli"]
+
+[tool.coverage.report]
+show_missing = true
