@@ -558,9 +558,13 @@ def query_cmd(
         str | None,
         typer.Option(
             "--cursor",
-            help="Return rows with uniq_id > this. Pass the last id of the prior page.",
+            help="Page from this id in the walk direction (> asc, < desc).",
         ),
     ] = None,
+    desc: Annotated[
+        bool,
+        typer.Option("--desc", help="Walk newest-first (uniq_id DESC) instead of ASC."),
+    ] = False,
     limit: Annotated[
         int,
         typer.Option("--limit", help="Max rows to return.", min=1),
@@ -574,7 +578,9 @@ def query_cmd(
         raise
     with _open(mnt, db) as g:
         try:
-            entries, indexes = g.query(filters, limit=limit, cursor=cursor)
+            entries, indexes = g.query(
+                filters, limit=limit, cursor=cursor, ascending=not desc
+            )
         except ValueError as e:
             raise typer.BadParameter(str(e)) from e
 

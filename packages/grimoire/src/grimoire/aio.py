@@ -100,8 +100,9 @@ class AsyncGrimoire:
         filters: Filters | None = None,
         limit: int = 100,
         cursor: str | None = None,
+        ascending: bool = True,
     ) -> tuple[list[Entry], list[EntryIndex]]:
-        return await self._run(self._inner.query, filters, limit, cursor)
+        return await self._run(self._inner.query, filters, limit, cursor, ascending)
 
     async def match(
         self,

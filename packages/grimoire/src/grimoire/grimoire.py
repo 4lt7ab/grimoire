@@ -228,20 +228,26 @@ class Grimoire:
         filters: Filters | None = None,
         limit: int = 100,
         cursor: str | None = None,
+        ascending: bool = True,
     ) -> tuple[list[Entry], list[EntryIndex]]:
-        """Walk entry_idx rows ordered by `uniq_id` ASC.
+        """Walk entry_idx rows ordered by `uniq_id`, ascending by default.
 
-        Returns parallel `(entries, indexes)` lists. `cursor`, if given,
-        returns rows with `uniq_id > cursor`. For ordinal-window paging,
-        pass `Filters(gte={...}, lte={...})`.
+        Set `ascending=False` to walk newest-first. Returns parallel
+        `(entries, indexes)` lists. `cursor`, if given, returns rows on
+        the far side of it in the walk direction (`uniq_id > cursor`
+        ascending, `uniq_id < cursor` descending). For ordinal-window
+        paging, pass `Filters(gte={...}, lte={...})`.
         """
         with self._telemetry.span(
             "grimoire.query",
             limit=limit,
             has_filters=filters is not None,
             has_cursor=cursor is not None,
+            ascending=ascending,
         ):
-            return entry.fetch_idx(self._conn, filters, limit, cursor=cursor)
+            return entry.fetch_idx(
+                self._conn, filters, limit, cursor=cursor, ascending=ascending
+            )
 
     # ------------------------------------------------------------------
     # entry_fts  (FTS5 keyword sidecar)

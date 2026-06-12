@@ -306,18 +306,21 @@ def fetch_idx(
     filters: Filters | None = None,
     limit: int = 100,
     cursor: str | None = None,
+    ascending: bool = True,
 ) -> tuple[list[Entry], list[EntryIndex]]:
-    """Walk entry_idx rows ordered by `uniq_id` ASC.
+    """Walk entry_idx rows ordered by `uniq_id`, ascending by default.
 
     Returns parallel `(entries, indexes)` lists. `cursor`, if given,
-    returns rows with `uniq_id > cursor`. For ordinal-window paging,
-    pass `Filters(gte={...}, lte={...})`.
+    returns rows on the far side of it in the walk direction — `uniq_id
+    > cursor` ascending, `uniq_id < cursor` descending — so keyset
+    paging works either way. For ordinal-window paging, pass
+    `Filters(gte={...}, lte={...})`.
     """
     if limit < 1:
         raise ValueError("limit must be >= 1")
     clauses, params = _build_where(filters, alias="i")
     if cursor is not None:
-        clauses.append("i.uniq_id > :cursor")
+        clauses.append("i.uniq_id > :cursor" if ascending else "i.uniq_id < :cursor")
         params["cursor"] = cursor
 
     sql = (
@@ -329,7 +332,7 @@ def fetch_idx(
     )
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY i.uniq_id ASC LIMIT :limit"
+    sql += f" ORDER BY i.uniq_id {'ASC' if ascending else 'DESC'} LIMIT :limit"
     params["limit"] = limit
 
     entries: list[Entry] = []

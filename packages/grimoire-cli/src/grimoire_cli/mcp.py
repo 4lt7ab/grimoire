@@ -221,11 +221,13 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         lte: dict[str, Any] | None = None,
         cursor: str | None = None,
         limit: int = 100,
+        ascending: bool = True,
         db: str | None = None,
     ) -> list[dict[str, Any]]:
         """Browse entry_idx rows with optional dict-driven filters.
 
-        Returns `[{entry, index}, ...]` ordered by `uniq_id` ASC.
+        Returns `[{entry, index}, ...]` ordered by `uniq_id`, ascending
+        by default.
 
         - `equals` keys may name any entry_idx column; the entry must match
           one of the listed values for that column.
@@ -233,12 +235,15 @@ def build_server(mnt: mount.Mount) -> FastMCP:
           apply `>= value` / `<= value`. Values may be any type SQLite can
           compare; comparison follows class precedence (NULL < INT/REAL <
           TEXT < BLOB).
-        - `cursor` pages by id (`uniq_id > cursor`); pair with the default
-          ordering for forward paging.
+        - `ascending` walks `uniq_id` ASC when true, DESC when false.
+        - `cursor` pages by id on the far side of it in the walk direction
+          (`uniq_id > cursor` ascending, `uniq_id < cursor` descending).
         """
         filters = _build_filters(equals, gte, lte)
         with _open(db) as g:
-            entries, indexes = g.query(filters, limit=limit, cursor=cursor)
+            entries, indexes = g.query(
+                filters, limit=limit, cursor=cursor, ascending=ascending
+            )
         return _pair_index(entries, indexes)
 
     @mcp.tool

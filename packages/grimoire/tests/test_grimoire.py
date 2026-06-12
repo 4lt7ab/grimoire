@@ -259,6 +259,34 @@ def test_query_cursor_paginates_by_uniq_id(tmp_path, fake_embedder):
     assert [i.uniq_id for i in page2] == added[2:4]
 
 
+def test_query_descending_reverses_uniq_id_order(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    added = []
+    for i in range(4):
+        [e] = g.add([Entry(None, None)])
+        g.index(e.uniq_id, ref=f"r-{i}")
+        added.append(e.uniq_id)
+
+    _, indexes = g.query(ascending=False)
+    assert [i.uniq_id for i in indexes] == added[::-1]
+
+
+def test_query_descending_cursor_pages_backward(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    added = []
+    for i in range(5):
+        [e] = g.add([Entry(None, None)])
+        g.index(e.uniq_id, ref=f"r-{i}")
+        added.append(e.uniq_id)
+
+    _, page1 = g.query(limit=2, ascending=False)
+    ids1 = [i.uniq_id for i in page1]
+    assert ids1 == added[::-1][:2]
+
+    _, page2 = g.query(limit=2, cursor=ids1[-1], ascending=False)
+    assert [i.uniq_id for i in page2] == added[::-1][2:4]
+
+
 def test_query_invalid_filter_column_raises(tmp_path, fake_embedder):
     g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
     with pytest.raises(ValueError, match="equals filter column"):
