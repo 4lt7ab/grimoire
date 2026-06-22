@@ -376,11 +376,83 @@ def test_group_ref_filter_is_index_backed(tmp_path, fake_embedder):
     plan = " ".join(
         str(r["detail"])
         for r in g._conn.execute(
-            "EXPLAIN QUERY PLAN "
-            "SELECT uniq_id FROM entry_idx WHERE group_ref = 'g-0'"
+            "EXPLAIN QUERY PLAN SELECT uniq_id FROM entry_idx WHERE group_ref = 'g-0'"
         )
     )
     assert "entry_idx_group_ref" in plan, plan
+
+
+def test_index_writes_and_reads_owner_ref(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [e] = g.add([Entry(None, None)])
+    g.index(e.uniq_id, ref="X", owner="user-42")
+
+    _, indexes = g.query()
+    assert indexes[0].owner_ref == "user-42"
+
+
+def test_query_filters_by_owner_ref(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    ids = []
+    for i in range(3):
+        [e] = g.add([Entry(None, None)])
+        g.index(e.uniq_id, owner="user-1" if i < 2 else "user-2")
+        ids.append(e.uniq_id)
+
+    _, indexes = g.query(Filters(equals={"owner_ref": ["user-1"]}))
+    assert {i.uniq_id for i in indexes} == set(ids[:2])
+
+
+def test_owner_ref_is_not_unique(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [a] = g.add([Entry(None, None)])
+    [b] = g.add([Entry(None, None)])
+    # Many rows may share an owner_ref — no uniqueness constraint.
+    g.index(a.uniq_id, owner="shared")
+    g.index(b.uniq_id, owner="shared")
+
+    _, indexes = g.query(Filters(equals={"owner_ref": ["shared"]}))
+    assert {i.uniq_id for i in indexes} == {a.uniq_id, b.uniq_id}
+
+
+def test_owner_ref_independent_of_group_ref(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [e] = g.add([Entry(None, None)])
+    g.index(e.uniq_id, group="batch-1", owner="user-42")
+
+    _, indexes = g.query(
+        Filters(equals={"group_ref": ["batch-1"], "owner_ref": ["user-42"]})
+    )
+    assert indexes[0].uniq_id == e.uniq_id
+    assert indexes[0].group_ref == "batch-1"
+    assert indexes[0].owner_ref == "user-42"
+
+
+def test_index_put_replaces_owner_ref(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [e] = g.add([Entry(None, None)])
+    g.index(e.uniq_id, ref="X", owner="user-42")
+    g.index(e.uniq_id, ref="X")  # PUT: owner_ref should clear
+
+    _, indexes = g.query()
+    assert indexes[0].uniq_ref == "X"
+    assert indexes[0].owner_ref is None
+
+
+def test_owner_ref_filter_is_index_backed(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    for i in range(50):
+        [e] = g.add([Entry(None, None)])
+        g.index(e.uniq_id, owner=f"u-{i % 5}")
+    g.analyze()
+
+    plan = " ".join(
+        str(r["detail"])
+        for r in g._conn.execute(
+            "EXPLAIN QUERY PLAN SELECT uniq_id FROM entry_idx WHERE owner_ref = 'u-0'"
+        )
+    )
+    assert "entry_idx_owner_ref" in plan, plan
 
 
 def test_uniq_ref_is_sparse_unique(tmp_path, fake_embedder):

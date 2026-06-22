@@ -46,11 +46,11 @@ A grimoire entry has two layers:
 
 - The **entry** itself: `uniq_id` (library-assigned ULID) + `data` (JSON blob).
 - Three opt-in **sidecars** keyed by that `uniq_id`:
-  - **`entry_idx`** — filterable columns: `uniq_ref` (sparse-unique external reference), `group_ref` (non-unique grouping key), and five symmetric `ordinal_1`..`ordinal_5` slots (BLOB-affinity — store any scalar: numbers, strings, labels).
+  - **`entry_idx`** — filterable columns: `uniq_ref` (sparse-unique external reference), `group_ref` (non-unique grouping key), `owner_ref` (non-unique owner key), and five symmetric `ordinal_1`..`ordinal_5` slots (BLOB-affinity — store any scalar: numbers, strings, labels).
   - **`entry_fts`** — FTS5 keyword text.
   - **`entry_vec`** — semantic vector + source text.
 
-`entry add` creates an entry and optionally writes any subset of the three sidecars in the same call. Sidecar writes are **PUT** — supplying any of `--ref`/`--group`/`--ord-*` wholesale-replaces the `entry_idx` row; supplying `--match` replaces the FTS row; supplying `--search` replaces the vec row. Deleting an entry cascade-cleans every sidecar via a DB trigger.
+`entry add` creates an entry and optionally writes any subset of the three sidecars in the same call. Sidecar writes are **PUT** — supplying any of `--ref`/`--group`/`--owner`/`--ord-*` wholesale-replaces the `entry_idx` row; supplying `--match` replaces the FTS row; supplying `--search` replaces the vec row. Deleting an entry cascade-cleans every sidecar via a DB trigger.
 
 ## Quickstart
 
@@ -140,11 +140,12 @@ Create an entry and optionally PUT-index its sidecars in one call.
 | `--data` | JSON value stored in `entry.data` (object, array, scalar, or null). |
 | `--ref` | `entry_idx.uniq_ref` value (sparse-unique). |
 | `--group` | `entry_idx.group_ref` value (non-unique grouping key). |
+| `--owner` | `entry_idx.owner_ref` value (non-unique owner key). |
 | `--ord-1` .. `--ord-5` | `entry_idx.ordinal_N` values. Each value is coerced int → float → string, so a numeric literal stores as a number and anything else stores as text. |
 | `--match` | Text written to the FTS5 row. PUT-replaces the entry's `entry_fts` row. |
 | `--search` | Text embedded via the bundled embedder. PUT-replaces the entry's `entry_vec` row. |
 
-Supplying any of `--ref`, `--group`, or `--ord-*` PUT-replaces the entry's `entry_idx` row; omitted columns become NULL. Omit them all to leave `entry_idx` untouched.
+Supplying any of `--ref`, `--group`, `--owner`, or `--ord-*` PUT-replaces the entry's `entry_idx` row; omitted columns become NULL. Omit them all to leave `entry_idx` untouched.
 
 #### `grimoire entry update <uniq_id> [options]`
 

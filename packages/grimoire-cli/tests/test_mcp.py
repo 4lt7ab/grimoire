@@ -84,6 +84,23 @@ def test_add_with_index_kwargs_writes_sidecars(server):
     assert any(h["entry"]["uniq_id"] == uniq_id for h in kw_hits)
 
 
+def test_add_with_owner_filters_by_owner(server):
+    async def _go():
+        async with Client(server) as client:
+            created = await client.call_tool(
+                "add", {"data": {"k": "v"}, "ref": "book-1", "owner": "user-42"}
+            )
+            uniq_id = created.data["uniq_id"]
+            pairs = await client.call_tool(
+                "query", {"equals": {"owner_ref": ["user-42"]}}
+            )
+            return uniq_id, pairs.data
+
+    uniq_id, pairs = _run(_go())
+    assert [p["entry"]["uniq_id"] for p in pairs] == [uniq_id]
+    assert pairs[0]["index"]["owner_ref"] == "user-42"
+
+
 def test_update_replaces_data(server):
     async def _go():
         async with Client(server) as client:

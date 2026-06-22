@@ -319,6 +319,15 @@ def test_query_filters_by_equals(mounted):
     assert [p["index"]["uniq_ref"] for p in pairs] == ["a"]
 
 
+def test_query_filters_by_owner(mounted):
+    a = _add("--ref", "a", "--owner", "user-1")
+    _add("--ref", "b", "--owner", "user-2")
+    result = runner.invoke(app, ["query", "--equals", "owner_ref=user-1"])
+    pairs = json.loads(result.output)
+    assert [p["entry"]["uniq_id"] for p in pairs] == [a]
+    assert pairs[0]["index"]["owner_ref"] == "user-1"
+
+
 def test_query_filters_by_ordinal_range(mounted):
     _add("--ord-1", "1.0")
     in_window = _add("--ord-1", "5.0")

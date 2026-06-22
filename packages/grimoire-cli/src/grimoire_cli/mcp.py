@@ -122,6 +122,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         data: Any = None,
         ref: str | None = None,
         group: str | None = None,
+        owner: str | None = None,
         ord: list[Any] | None = None,
         match: str | None = None,
         search: str | None = None,
@@ -132,8 +133,9 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         `data` is a JSON-serializable value stored in entry.data.
 
         The remaining kwargs are forwarded to `index()`. Supplying any of
-        `ref`, `group`, or `ord` PUT-replaces the entry_idx row (omitted
-        columns become NULL). `group` sets `entry_idx.group_ref`. `ord` is a
+        `ref`, `group`, `owner`, or `ord` PUT-replaces the entry_idx row
+        (omitted columns become NULL). `group` sets `entry_idx.group_ref`;
+        `owner` sets the non-unique `entry_idx.owner_ref`. `ord` is a
         5-element list
         `[ordinal_1, ordinal_2, ordinal_3, ordinal_4, ordinal_5]`; in-list
         nulls write NULL to that column. The columns are BLOB-affinity, so
@@ -144,11 +146,12 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         with _open(db) as g:
             [created] = g.add([Entry(uniq_id=None, data=data)])
             assert created.uniq_id is not None  # add() always assigns a ULID
-            if any(v is not None for v in (ref, group, ord, match, search)):
+            if any(v is not None for v in (ref, group, owner, ord, match, search)):
                 g.index(
                     created.uniq_id,
                     ref=ref,
                     group=group,
+                    owner=owner,
                     ord=_coerce_ord(ord),
                     match=match,
                     search=search,
@@ -161,6 +164,7 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         data: Any = None,
         ref: str | None = None,
         group: str | None = None,
+        owner: str | None = None,
         ord: list[Any] | None = None,
         match: str | None = None,
         search: str | None = None,
@@ -171,9 +175,10 @@ def build_server(mnt: mount.Mount) -> FastMCP:
         - `data`: replaces the entry's `data` column. **Pass `null` (or
           omit) to leave it alone** — MCP/JSON can't distinguish those two
           cases, so to explicitly null `data`, drop to the CLI or library.
-        - `ref`, `group`, `ord`, `match`, `search`: same PUT semantics as
-          `add`. Supplying any of `ref`, `group`, or `ord` wholesale-replaces
-          the `entry_idx` row; omitted columns become NULL.
+        - `ref`, `group`, `owner`, `ord`, `match`, `search`: same PUT
+          semantics as `add`. Supplying any of `ref`, `group`, `owner`, or
+          `ord` wholesale-replaces the `entry_idx` row; omitted columns
+          become NULL.
 
         The entry must already exist; otherwise raises.
         """
@@ -189,11 +194,12 @@ def build_server(mnt: mount.Mount) -> FastMCP:
                     raise ValueError(f"No entry with uniq_id {uniq_id!r}")
                 current = existing[0]
 
-            if any(v is not None for v in (ref, group, ord, match, search)):
+            if any(v is not None for v in (ref, group, owner, ord, match, search)):
                 g.index(
                     uniq_id,
                     ref=ref,
                     group=group,
+                    owner=owner,
                     ord=_coerce_ord(ord),
                     match=match,
                     search=search,

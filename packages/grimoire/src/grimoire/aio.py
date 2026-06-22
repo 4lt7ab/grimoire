@@ -90,9 +90,7 @@ class AsyncGrimoire:
     async def get(self, uniq_ids: list[str]) -> list[Entry]:
         return await self._run(self._inner.get, uniq_ids)
 
-    async def fetch(
-        self, uniq_refs: list[str]
-    ) -> tuple[list[Entry], list[EntryIndex]]:
+    async def fetch(self, uniq_refs: list[str]) -> tuple[list[Entry], list[EntryIndex]]:
         return await self._run(self._inner.fetch, uniq_refs)
 
     async def query(
@@ -123,12 +121,19 @@ class AsyncGrimoire:
         *,
         ref: str | None = None,
         group: str | None = None,
+        owner: str | None = None,
         ord: tuple[Any, Any, Any, Any, Any] | None = None,
         match: str | None = None,
         search: str | None = None,
     ) -> None:
         await self._run(
             lambda: self._inner.index(
-                uniq_id, ref=ref, group=group, ord=ord, match=match, search=search
+                uniq_id,
+                ref=ref,
+                group=group,
+                owner=owner,
+                ord=ord,
+                match=match,
+                search=search,
             )
         )

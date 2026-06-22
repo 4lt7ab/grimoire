@@ -22,6 +22,7 @@ CREATE TABLE entry_idx (
     uniq_id   TEXT PRIMARY KEY,
     uniq_ref  TEXT,
     group_ref TEXT,
+    owner_ref TEXT,
     ordinal_1,
     ordinal_2,
     ordinal_3,
@@ -34,6 +35,9 @@ CREATE UNIQUE INDEX entry_idx_uniq_ref
 
 CREATE INDEX entry_idx_group_ref
     ON entry_idx(group_ref) WHERE group_ref IS NOT NULL;
+
+CREATE INDEX entry_idx_owner_ref
+    ON entry_idx(owner_ref) WHERE owner_ref IS NOT NULL;
 
 CREATE INDEX entry_idx_o1_o2_o3_o4_o5
     ON entry_idx(ordinal_1, ordinal_2, ordinal_3, ordinal_4, ordinal_5)

@@ -307,6 +307,7 @@ class Grimoire:
         *,
         ref: str | None = None,
         group: str | None = None,
+        owner: str | None = None,
         ord: tuple[Any, Any, Any, Any, Any] | None = None,
         match: str | None = None,
         search: str | None = None,
@@ -315,10 +316,12 @@ class Grimoire:
 
         Each kwarg writes wholesale; no reads, no merging.
 
-        - `ref`, `group`, and `ord` together describe the `entry_idx` row. If
-          any is supplied, the row is fully replaced from the given kwargs;
-          columns mapped to unsupplied or in-tuple `None` positions become
-          NULL. Omit all three to leave `entry_idx` untouched. A 5-tuple is
+        - `ref`, `group`, `owner`, and `ord` together describe the `entry_idx`
+          row. If any is supplied, the row is fully replaced from the given
+          kwargs; columns mapped to unsupplied or in-tuple `None` positions
+          become NULL. Omit them all to leave `entry_idx` untouched. `ref`
+          sets the sparse-unique `uniq_ref`; `group` sets the non-unique
+          `group_ref`; `owner` sets the non-unique `owner_ref`. A 5-tuple is
           expected for `ord` (positional values for `ordinal_1`..`ordinal_5`).
         - `match` replaces the `entry_fts` row.
         - `search` embeds the text via the bound embedder and replaces the
@@ -335,11 +338,17 @@ class Grimoire:
             "grimoire.index",
             has_ref=ref is not None,
             has_group=group is not None,
+            has_owner=owner is not None,
             has_ord=ord is not None,
             has_match=match is not None,
             has_search=search is not None,
         ):
-            if ref is not None or group is not None or ord is not None:
+            if (
+                ref is not None
+                or group is not None
+                or owner is not None
+                or ord is not None
+            ):
                 entry.entry_idx_set(
                     self._conn,
                     [
@@ -347,6 +356,7 @@ class Grimoire:
                             uniq_id=uniq_id,
                             uniq_ref=ref,
                             group_ref=group,
+                            owner_ref=owner,
                             ordinal_1=ord[0] if ord else None,
                             ordinal_2=ord[1] if ord else None,
                             ordinal_3=ord[2] if ord else None,

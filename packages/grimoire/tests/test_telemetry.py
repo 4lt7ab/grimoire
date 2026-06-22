@@ -147,6 +147,7 @@ def test_index_span_records_which_sidecars_touched(tmp_path, fake_embedder):
     assert attrs == {
         "has_ref": True,
         "has_group": False,
+        "has_owner": False,
         "has_ord": False,
         "has_match": True,
         "has_search": True,
