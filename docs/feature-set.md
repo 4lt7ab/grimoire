@@ -12,9 +12,11 @@
 
 - **Entry/sidecar separation.** Entries are pure identity: `uniq_id` + `data`. To make an entry searchable or filterable, call `index()` with the kwargs for the sides you want populated. An entry can have rows in zero, one, two, or all three sidecars — useful for data-only records, filter-only catalogs, keyword-only memory, vector-only embeddings, or any combination.
 
-- **One-shot indexing.** `index(uniq_id, *, ref, ord, match, search)` PUT-replaces whichever sidecars its kwargs touch in a single call. Omit a kwarg to leave that side alone; pass it to overwrite end-to-end.
+- **One-shot indexing.** `index(uniq_id, *, ref, group, ord, match, search)` PUT-replaces whichever sidecars its kwargs touch in a single call. Omit a kwarg to leave that side alone; pass it to overwrite end-to-end.
 
-- **Filterable metadata.** `entry_idx` holds six nullable columns: `uniq_ref` (TEXT — external reference) and five symmetric `ordinal_1`..`ordinal_5` columns. The ordinals carry no declared type (BLOB-affinity) — store any JSON-serializable scalar; SQLite preserves the native storage class on the way in and out, and comparison follows class precedence. Each non-PK column is indexed. Library reads/writes them verbatim; semantics (what `ordinal_2` measures, what `ordinal_4` discriminates) are the caller's to define.
+- **Filterable metadata.** `entry_idx` holds seven nullable columns: `uniq_ref` (TEXT — sparse-unique external reference), `group_ref` (TEXT — non-unique grouping key), and five symmetric `ordinal_1`..`ordinal_5` columns. The ordinals carry no declared type (BLOB-affinity) — store any JSON-serializable scalar; SQLite preserves the native storage class on the way in and out, and comparison follows class precedence. Each non-PK column is indexed. Library reads/writes them verbatim; semantics (what `ordinal_2` measures, what `ordinal_4` discriminates) are the caller's to define.
+
+- **Grouping key.** `group_ref` is a non-unique TEXT column for grabbing many entries under one shared value — a batch, shelf, tenant, or namespace id. `query(Filters(equals={"group_ref": [...]}))` seeks its partial index rather than scanning. Distinct from `uniq_ref`, which stays globally unique; `group_ref` enforces no uniqueness, so any number of rows may share one.
 
 - **Keyword search.** `match(query, filters=None, limit=10)` returns parallel `(entries, hits)` lists ranked by FTS5 BM25. `KeywordHit.score` is positive (higher = better). `limit` defaults to 10; pass `None` to return every hit. The CLI tokenizes free-form prose into safe quoted OR-joined FTS5 syntax for the common case.
 
@@ -54,6 +56,6 @@
 - **Manage embedders.** Callers own their embedder's lifecycle. The library only validates that the supplied embedder matches what the file was created with.
 - **Partial sidecar updates.** `index()` is PUT — passing `ref="X"` alone wipes any existing `ordinal_*` columns on `entry_idx`. There is no PATCH path; callers who want partial updates either pass every column they want kept, or fall back to driving the SQL themselves.
 - **Per-sidecar removal.** Removing an entry cascade-cleans every sidecar via DB trigger. There is no public way to drop just one sidecar row while keeping the entry.
-- **Uniqueness on the ordinals.** Only `uniq_ref` enforces uniqueness (sparse: over the non-NULL rows). The five `ordinal_*` columns are indexed but not unique — callers manage dedup on those columns themselves if they need it.
+- **Uniqueness beyond `uniq_ref`.** Only `uniq_ref` enforces uniqueness (sparse: over the non-NULL rows). `group_ref` and the five `ordinal_*` columns are indexed but not unique — callers manage dedup on those columns themselves if they need it.
 - **In-place schema migration.** Pre-v1, schema changes are not migrated. A `SCHEMA_VERSION` mismatch raises `SchemaVersionError`; the response is to recreate the file. Migration ergonomics get designed once v1 is on the table.
 - **Multi-process write coordination.** SQLite's connection-level locking serializes writes. Suitable for one writer with many readers, not for sustained high-concurrency writes.

@@ -167,6 +167,7 @@ def _build_filters(equals: list[str], gte: list[str], lte: list[str]) -> Filters
 
 def _index_kwargs(
     ref: str | None,
+    group: str | None,
     ord_1: str | None,
     ord_2: str | None,
     ord_3: str | None,
@@ -183,6 +184,8 @@ def _index_kwargs(
     kwargs: dict[str, Any] = {}
     if ref is not None:
         kwargs["ref"] = ref
+    if group is not None:
+        kwargs["group"] = group
     ords = (ord_1, ord_2, ord_3, ord_4, ord_5)
     if any(o is not None for o in ords):
         kwargs["ord"] = tuple(_coerce_value(o) if o is not None else None for o in ords)
@@ -321,6 +324,7 @@ def mount_remove_cmd(
 
 _DB_OPT = typer.Option("--db", "-d", help="Database name (default DB if omitted).")
 _REF_OPT = typer.Option("--ref", help="entry_idx.uniq_ref value.")
+_GROUP_OPT = typer.Option("--group", help="entry_idx.group_ref value.")
 _ORD_HELP = (
     "entry_idx.ordinal_{n} value. Coerced int → float → string, so a literal"
     " number stores as a number and anything else stores as text."
@@ -347,6 +351,7 @@ def entry_add_cmd(
         typer.Option("--data", help="JSON for the entry's data column."),
     ] = None,
     ref: Annotated[str | None, _REF_OPT] = None,
+    group: Annotated[str | None, _GROUP_OPT] = None,
     ord_1: Annotated[str | None, _ORD_1_OPT] = None,
     ord_2: Annotated[str | None, _ORD_2_OPT] = None,
     ord_3: Annotated[str | None, _ORD_3_OPT] = None,
@@ -358,12 +363,14 @@ def entry_add_cmd(
     """Create a grimoire entry and (optionally) PUT-index its sidecars.
 
     `--data` writes the entry's JSON blob. The remaining flags are
-    forwarded to `index()`; supplying any of `--ref`, `--ord-*`
+    forwarded to `index()`; supplying any of `--ref`, `--group`, `--ord-*`
     PUT-replaces the entry_idx row (omitted columns become NULL).
     """
     mnt = _existing_mount(ctx)
     data_value = _parse_json("data", data)
-    idx_kwargs = _index_kwargs(ref, ord_1, ord_2, ord_3, ord_4, ord_5, match, search)
+    idx_kwargs = _index_kwargs(
+        ref, group, ord_1, ord_2, ord_3, ord_4, ord_5, match, search
+    )
 
     with _open(mnt, db) as g:
         [created] = g.add([Entry(uniq_id=None, data=data_value)])
@@ -387,6 +394,7 @@ def entry_update_cmd(
         typer.Option("--data", help="Replace the entry's `data` JSON blob."),
     ] = None,
     ref: Annotated[str | None, _REF_OPT] = None,
+    group: Annotated[str | None, _GROUP_OPT] = None,
     ord_1: Annotated[str | None, _ORD_1_OPT] = None,
     ord_2: Annotated[str | None, _ORD_2_OPT] = None,
     ord_3: Annotated[str | None, _ORD_3_OPT] = None,
@@ -398,11 +406,13 @@ def entry_update_cmd(
     """Update an entry's data and/or PUT-index its sidecars.
 
     Omit `--data` to leave the data column untouched. Idx flags follow the
-    same PUT semantics as `entry add` — supplying any of `--ref`, `--ord-*`
-    wholesale-replaces the entry_idx row.
+    same PUT semantics as `entry add` — supplying any of `--ref`, `--group`,
+    `--ord-*` wholesale-replaces the entry_idx row.
     """
     mnt = _existing_mount(ctx)
-    idx_kwargs = _index_kwargs(ref, ord_1, ord_2, ord_3, ord_4, ord_5, match, search)
+    idx_kwargs = _index_kwargs(
+        ref, group, ord_1, ord_2, ord_3, ord_4, ord_5, match, search
+    )
 
     with _open(mnt, db) as g:
         if data is not None:

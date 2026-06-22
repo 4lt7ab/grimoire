@@ -12,7 +12,7 @@ _ORDINAL_COLUMNS: frozenset[str] = frozenset(
 )
 
 _ENTRY_IDX_COLUMNS: frozenset[str] = (
-    frozenset({"uniq_id", "uniq_ref"}) | _ORDINAL_COLUMNS
+    frozenset({"uniq_id", "uniq_ref", "group_ref"}) | _ORDINAL_COLUMNS
 )
 
 
@@ -37,6 +37,7 @@ class EntryIndex:
 
     uniq_id: str | None
     uniq_ref: str | None = None
+    group_ref: str | None = None
     ordinal_1: Any = None
     ordinal_2: Any = None
     ordinal_3: Any = None
@@ -84,6 +85,7 @@ def _row_to_entry_idx(r: sqlite3.Row) -> EntryIndex:
     return EntryIndex(
         uniq_id=r["uniq_id"],
         uniq_ref=r["uniq_ref"],
+        group_ref=r["group_ref"],
         ordinal_1=r["ordinal_1"],
         ordinal_2=r["ordinal_2"],
         ordinal_3=r["ordinal_3"],
@@ -243,7 +245,7 @@ def fetch_by_uniq_ref(
     if not uniq_refs:
         return [], []
     cur = conn.execute(
-        "SELECT e.uniq_id, e.data, i.uniq_ref, "
+        "SELECT e.uniq_id, e.data, i.uniq_ref, i.group_ref, "
         "       i.ordinal_1, i.ordinal_2, i.ordinal_3, i.ordinal_4, i.ordinal_5 "
         "FROM entry e "
         "JOIN entry_idx i ON i.uniq_id = e.uniq_id "
@@ -282,13 +284,14 @@ def entry_idx_set(conn: sqlite3.Connection, indexes: list[EntryIndex]) -> list[s
     )
     conn.executemany(
         "INSERT INTO entry_idx "
-        "(uniq_id, uniq_ref, "
+        "(uniq_id, uniq_ref, group_ref, "
         " ordinal_1, ordinal_2, ordinal_3, ordinal_4, ordinal_5) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 i.uniq_id,
                 i.uniq_ref,
+                i.group_ref,
                 i.ordinal_1,
                 i.ordinal_2,
                 i.ordinal_3,
@@ -324,7 +327,7 @@ def fetch_idx(
         params["cursor"] = cursor
 
     sql = (
-        "SELECT i.uniq_id, i.uniq_ref, "
+        "SELECT i.uniq_id, i.uniq_ref, i.group_ref, "
         "       i.ordinal_1, i.ordinal_2, i.ordinal_3, i.ordinal_4, i.ordinal_5, "
         "       e.data "
         "FROM entry_idx i "

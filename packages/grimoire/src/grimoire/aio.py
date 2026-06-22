@@ -122,12 +122,13 @@ class AsyncGrimoire:
         uniq_id: str,
         *,
         ref: str | None = None,
+        group: str | None = None,
         ord: tuple[Any, Any, Any, Any, Any] | None = None,
         match: str | None = None,
         search: str | None = None,
     ) -> None:
         await self._run(
             lambda: self._inner.index(
-                uniq_id, ref=ref, ord=ord, match=match, search=search
+                uniq_id, ref=ref, group=group, ord=ord, match=match, search=search
             )
         )

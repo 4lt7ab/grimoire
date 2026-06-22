@@ -322,6 +322,67 @@ def test_fetch_returns_entries_matching_uniq_ref(tmp_path, fake_embedder):
     assert [i.uniq_ref for i in indexes] == ["ext-1"]
 
 
+def test_index_writes_and_reads_group_ref(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [e] = g.add([Entry(None, None)])
+    g.index(e.uniq_id, ref="X", group="batch-1")
+
+    _, indexes = g.query()
+    assert indexes[0].group_ref == "batch-1"
+
+
+def test_query_filters_by_group_ref(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    ids = []
+    for i in range(3):
+        [e] = g.add([Entry(None, None)])
+        g.index(e.uniq_id, group="batch-1" if i < 2 else "batch-2")
+        ids.append(e.uniq_id)
+
+    _, indexes = g.query(Filters(equals={"group_ref": ["batch-1"]}))
+    assert {i.uniq_id for i in indexes} == set(ids[:2])
+
+
+def test_group_ref_is_not_unique(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [a] = g.add([Entry(None, None)])
+    [b] = g.add([Entry(None, None)])
+    # Many rows may share a group_ref — no uniqueness constraint.
+    g.index(a.uniq_id, group="shared")
+    g.index(b.uniq_id, group="shared")
+
+    _, indexes = g.query(Filters(equals={"group_ref": ["shared"]}))
+    assert {i.uniq_id for i in indexes} == {a.uniq_id, b.uniq_id}
+
+
+def test_index_put_replaces_group_ref(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    [e] = g.add([Entry(None, None)])
+    g.index(e.uniq_id, ref="X", group="batch-1")
+    g.index(e.uniq_id, ref="X")  # PUT: group_ref should clear
+
+    _, indexes = g.query()
+    assert indexes[0].uniq_ref == "X"
+    assert indexes[0].group_ref is None
+
+
+def test_group_ref_filter_is_index_backed(tmp_path, fake_embedder):
+    g = Grimoire.open(tmp_path / "g.db", embedder=fake_embedder)
+    for i in range(50):
+        [e] = g.add([Entry(None, None)])
+        g.index(e.uniq_id, group=f"g-{i % 5}")
+    g.analyze()
+
+    plan = " ".join(
+        str(r["detail"])
+        for r in g._conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT uniq_id FROM entry_idx WHERE group_ref = 'g-0'"
+        )
+    )
+    assert "entry_idx_group_ref" in plan, plan
+
+
 def test_uniq_ref_is_sparse_unique(tmp_path, fake_embedder):
     import sqlite3
 

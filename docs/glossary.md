@@ -10,7 +10,7 @@ Terms used across grimoire's code and docs, alphabetical.
 
 **Entry.** The identity row in `entry`: `(uniq_id, data)`. No filterable or searchable text lives on the entry — those are sidecars.
 
-**`entry_idx`.** The filterable/sortable metadata sidecar. One row per indexed entry. Columns: `uniq_id` (PK), `uniq_ref`, and five symmetric `ordinal_1`..`ordinal_5` columns (BLOB-affinity — any storage class accepted). Written by `index(uniq_id, ref=..., ord=...)`; cleaned by the entry-delete trigger.
+**`entry_idx`.** The filterable/sortable metadata sidecar. One row per indexed entry. Columns: `uniq_id` (PK), `uniq_ref`, `group_ref`, and five symmetric `ordinal_1`..`ordinal_5` columns (BLOB-affinity — any storage class accepted). Written by `index(uniq_id, ref=..., group=..., ord=...)`; cleaned by the entry-delete trigger.
 
 **`entry_fts`.** The FTS5 keyword sidecar. One row per FTS-indexed entry holding `(uniq_id, text)`. Written by `index(uniq_id, match=...)`; cleaned by the entry-delete trigger. An entry without an `entry_fts` row is invisible to `match`.
 
@@ -24,7 +24,9 @@ Terms used across grimoire's code and docs, alphabetical.
 
 **FTS5.** SQLite's bundled full-text search extension. Powers `entry_fts` and `match`. Ranks by BM25.
 
-**Index.** `Grimoire.index(uniq_id, *, ref, ord, match, search)`. The combined sidecar writer. PUT-style: each supplied kwarg wholesale-replaces the corresponding sidecar row; omitted kwargs leave that side alone. `ord` is a 5-tuple addressing `ordinal_1`..`ordinal_5`; in-tuple `None` writes NULL to that column.
+**`group_ref`.** Non-unique TEXT column on `entry_idx` for grouping many entries under a shared key (e.g. a batch, shelf, tenant, or namespace id). Backed by a partial index (`WHERE group_ref IS NOT NULL`), so `query(Filters(equals={"group_ref": [...]}))` seeks rather than scans. Unlike `uniq_ref`, it enforces no uniqueness — any number of rows may share a `group_ref`. Written by `index(uniq_id, group=...)`.
+
+**Index.** `Grimoire.index(uniq_id, *, ref, group, ord, match, search)`. The combined sidecar writer. PUT-style: each supplied kwarg wholesale-replaces the corresponding sidecar row; omitted kwargs leave that side alone. `ord` is a 5-tuple addressing `ordinal_1`..`ordinal_5`; in-tuple `None` writes NULL to that column.
 
 **Match.** `Grimoire.match(query, filters=None, limit=10)`. FTS5 BM25 keyword search. Returns parallel `(entries, hits)` lists in rank order. `limit` defaults to 10; pass `None` to return every hit. `KeywordHit.score` is `-bm25` so higher = better.
 

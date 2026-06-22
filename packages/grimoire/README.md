@@ -17,7 +17,7 @@ The `fastembed` extra pulls the bundled `FastembedEmbedder` (ONNX-based, no serv
 A grimoire is a single SQLite file with four tables plus a meta row:
 
 - **`entry`** — `(uniq_id, data)`. Identity row. `uniq_id` is a ULID; `data` is a JSON-serializable value (object, array, scalar, or null).
-- **`entry_idx`** — filterable/sortable metadata sidecar keyed by `uniq_id`: `uniq_ref` (TEXT) and five symmetric `ordinal_1`..`ordinal_5` columns. The ordinals carry no declared type (BLOB-affinity), so any JSON-serializable scalar — string label, integer, float, byte string — stores verbatim. All columns nullable.
+- **`entry_idx`** — filterable/sortable metadata sidecar keyed by `uniq_id`: `uniq_ref` (TEXT, sparse-unique), `group_ref` (TEXT, non-unique grouping key), and five symmetric `ordinal_1`..`ordinal_5` columns. The ordinals carry no declared type (BLOB-affinity), so any JSON-serializable scalar — string label, integer, float, byte string — stores verbatim. All columns nullable.
 - **`entry_fts`** — FTS5 keyword text sidecar keyed by `uniq_id`.
 - **`entry_vec`** — vec0 semantic sidecar keyed by `uniq_id`: source text + embedding.
 
@@ -133,11 +133,11 @@ Fetch entries whose `entry_idx` row has `uniq_ref` in the given list. Returns pa
 
 ### index  (combined sidecar writer)
 
-#### `index(uniq_id, *, ref=None, ord=None, match=None, search=None) -> None`
+#### `index(uniq_id, *, ref=None, group=None, ord=None, match=None, search=None) -> None`
 
 One-shot PUT across the three sidecars for a single entry. Each kwarg writes wholesale; no reads, no merging.
 
-- `ref` and `ord` together describe the `entry_idx` row. If either is supplied, the row is fully replaced; columns mapped to unsupplied positions (or `None` inside the tuple) become NULL. Omit both to leave `entry_idx` untouched. `ord` is a 5-tuple addressing `ordinal_1`..`ordinal_5`; values may be any storage class SQLite accepts.
+- `ref`, `group`, and `ord` together describe the `entry_idx` row. If any is supplied, the row is fully replaced; columns mapped to unsupplied positions (or `None` inside the tuple) become NULL. Omit all three to leave `entry_idx` untouched. `ref` sets the sparse-unique `uniq_ref`; `group` sets the non-unique `group_ref`. `ord` is a 5-tuple addressing `ordinal_1`..`ordinal_5`; values may be any storage class SQLite accepts.
 - `match` replaces the `entry_fts` row with this text.
 - `search` embeds the text via the bound embedder and replaces the `entry_vec` row. Raises `EmbedderRequired` if the grimoire was opened without one.
 
@@ -183,6 +183,7 @@ class Entry:
 class EntryIndex:
     uniq_id: str | None
     uniq_ref: str | None = None
+    group_ref: str | None = None
     ordinal_1: Any = None
     ordinal_2: Any = None
     ordinal_3: Any = None
@@ -190,7 +191,7 @@ class EntryIndex:
     ordinal_5: Any = None
 ```
 
-Read-side type returned by `query` and `fetch`. The library writes via `index(uniq_id, ref=..., ord=(...))`; you only construct `EntryIndex` instances yourself if you're reaching past the public surface. The `ordinal_*` slots are typed `Any` because the underlying columns are BLOB-affinity — SQLite returns whatever storage class went in.
+Read-side type returned by `query` and `fetch`. The library writes via `index(uniq_id, ref=..., group=..., ord=(...))`; you only construct `EntryIndex` instances yourself if you're reaching past the public surface. The `ordinal_*` slots are typed `Any` because the underlying columns are BLOB-affinity — SQLite returns whatever storage class went in.
 
 ### `Filters`
 

@@ -146,6 +146,7 @@ def test_index_span_records_which_sidecars_touched(tmp_path, fake_embedder):
     [(_, attrs)] = [(n, a) for n, a in tel.spans if n == "grimoire.index"]
     assert attrs == {
         "has_ref": True,
+        "has_group": False,
         "has_ord": False,
         "has_match": True,
         "has_search": True,
